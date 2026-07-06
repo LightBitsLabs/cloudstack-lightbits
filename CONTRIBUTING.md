@@ -13,7 +13,7 @@ Thank you for your interest in contributing to the Lightbits CloudStack plugin.
 ## Code style
 
 - Java 17, standard CloudStack plugin conventions — when in doubt, follow the patterns used by in-tree storage plugins in `apache/cloudstack` under `plugins/storage/volume/`.
-- No proprietary dependencies: this plugin is intended for upstream contribution to Apache CloudStack, so everything must remain ASF-license compatible.
+- No proprietary dependencies: everything must remain ASF-license compatible, so that future upstream contribution to Apache CloudStack stays possible.
 
 ## Reporting security issues
 

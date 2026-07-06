@@ -41,6 +41,6 @@ Host prerequisites: `nvme_tcp` kernel module, `nvme-cli`, unique host NQN regist
 
 CloudStack account/domain → Lightbits project. Pool-level default project initially; finer-grained mapping later.
 
-## Upstream trajectory
+## Delivery model
 
-Intended for contribution to `apache/cloudstack` as `plugins/storage/volume/lightbits` (see the Linstor plugin, apache/cloudstack#4994, as the structural precedent). Until then this repo builds out-of-tree against a source-built CloudStack.
+Ships as a **standalone out-of-tree plugin** installed onto existing CloudStack deployments (StorPool precedent), built against a source-built CloudStack. The layout deliberately matches what an in-tree `plugins/storage/volume/lightbits` module would look like (see the Linstor plugin, apache/cloudstack#4994), so upstream contribution remains a low-cost future option.

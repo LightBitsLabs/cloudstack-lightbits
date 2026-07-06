@@ -39,9 +39,13 @@ cd cloudstack && mvn -B -DskipTests install -pl api,core,engine/api,engine/stora
 cd ../cloudstack-lightbits && mvn -B compile
 ```
 
+## Delivery model
+
+This is a **standalone (out-of-tree) plugin**, installed onto existing CloudStack deployments — the same model as [StorPool's CloudStack integration](https://github.com/storpool/storpool-cloudstack-integration) and our own [pve-lightbits](https://github.com/LightBitsLabs/pve-lightbits). The codebase is kept upstream-compatible (Apache 2.0, ASF-clean dependencies, in-tree-compatible layout) so contribution to `apache/cloudstack` remains an option in the future.
+
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). This plugin is intended for eventual contribution to upstream Apache CloudStack.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
