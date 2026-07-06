@@ -122,6 +122,11 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         PrimaryDataStoreParameters params = new PrimaryDataStoreParameters();
         params.setType(LightbitsUtil.POOL_TYPE);   // v1: IscsiLUN (see LightbitsUtil / decision log Q3)
         params.setUuid(UUID.randomUUID().toString());
+        // host/port/path back the required storage_pool columns (host_address, path);
+        // the API endpoint identifies the cluster, project is the path segment.
+        params.setHost(pf.config.getApiHost());
+        params.setPort(pf.config.getApiPort());
+        params.setPath("/" + pf.config.getProject());
         params.setName(name);
         params.setProviderName((String) dsInfos.get("providerName"));
         params.setManaged(true);

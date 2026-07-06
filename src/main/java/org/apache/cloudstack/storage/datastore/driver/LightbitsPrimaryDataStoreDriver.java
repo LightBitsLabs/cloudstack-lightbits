@@ -15,7 +15,11 @@
  */
 package org.apache.cloudstack.storage.datastore.driver;
 
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+
+import javax.inject.Inject;
 
 import org.apache.cloudstack.engine.subsystem.api.storage.ChapInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.CopyCommandResult;
@@ -28,7 +32,13 @@ import org.apache.cloudstack.engine.subsystem.api.storage.TemplateInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
 import org.apache.cloudstack.storage.command.CommandResult;
+import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
+import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
+import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
+import org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig;
+import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
 
+import com.cloud.agent.api.to.DataObjectType;
 import com.cloud.agent.api.to.DataStoreTO;
 import com.cloud.agent.api.to.DataTO;
 import com.cloud.host.Host;
@@ -36,13 +46,30 @@ import com.cloud.storage.Storage.StoragePoolType;
 import com.cloud.storage.StoragePool;
 import com.cloud.storage.Volume;
 import com.cloud.utils.Pair;
+import com.cloud.utils.crypt.DBEncryptionUtil;
+import com.cloud.utils.exception.CloudRuntimeException;
 
 public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
+    @Inject
+    private StoragePoolDetailsDao storagePoolDetailsDao;
+
+    /** Build an API client for a pool (by id) from its persisted (JWT-encrypted) details. */
+    LightbitsApiClient clientForPool(long poolId) {
+        Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(poolId);
+        String jwt = DBEncryptionUtil.decrypt(details.get(LightbitsPoolConfig.KEY_JWT));
+        LightbitsPoolConfig cfg = LightbitsPoolConfig.fromDetails(details, jwt);
+        // v1 dev/lab TLS: trust-all (see open item L3). Production uses the validated default.
+        return LightbitsApiClient.insecureForDevelopment(cfg.apiEndpoint(), cfg.getJwt(), cfg.getProject());
+    }
+
     @Override
     public Map<String, String> getCapabilities() {
-        // TODO: advertise STORAGE_SYSTEM_SNAPSHOT / CAN_CREATE_VOLUME_FROM_SNAPSHOT etc.
-        return null;
+        Map<String, String> caps = new HashMap<>();
+        caps.put("STORAGE_SYSTEM_SNAPSHOT", "true");
+        caps.put("CAN_CREATE_VOLUME_FROM_SNAPSHOT", "true");
+        caps.put("CAN_CREATE_VOLUME_FROM_VOLUME", "true");
+        return caps;
     }
 
     @Override
@@ -57,13 +84,45 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public void createAsync(DataStore store, DataObject data, AsyncCompletionCallback<CreateCmdResult> callback) {
-        // TODO: create Lightbits volume via REST API
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        String path = null;
+        String errMsg = null;
+        try {
+            if (data.getType() == DataObjectType.VOLUME) {
+                VolumeInfo vol = (VolumeInfo) data;
+                int replicas = replicaCount(store.getId());
+                org.apache.cloudstack.storage.datastore.client.model.Volume created =
+                        clientForPool(store.getId()).createVolume(
+                                LightbitsUtil.volumeName(vol.getUuid()), vol.getSize(), replicas, null);
+                // path identifies the backing volume; the M2 KVM adaptor resolves the NVMe
+                // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>).
+                path = created.getUuid();
+            } else {
+                errMsg = "Lightbits plugin: createAsync supports VOLUME only (got " + data.getType() + ")";
+            }
+        } catch (Exception e) {
+            errMsg = e.getMessage();
+        }
+        completeCreate(callback, path, errMsg);
     }
 
     @Override
     public void deleteAsync(DataStore store, DataObject data, AsyncCompletionCallback<CommandResult> callback) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        String errMsg = null;
+        try {
+            if (data.getType() == DataObjectType.VOLUME) {
+                LightbitsApiClient client = clientForPool(store.getId());
+                String name = LightbitsUtil.volumeName(data.getUuid());
+                client.getVolumeByName(name).ifPresent(v -> client.deleteVolume(v.getUuid()));
+            }
+        } catch (Exception e) {
+            errMsg = e.getMessage();
+        }
+        if (callback != null) {
+            callback.complete(new CommandResult());
+        }
+        if (errMsg != null && callback == null) {
+            throw new CloudRuntimeException(errMsg);
+        }
     }
 
     @Override
@@ -83,7 +142,38 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public void resize(DataObject data, AsyncCompletionCallback<CreateCmdResult> callback) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        String errMsg = null;
+        try {
+            VolumeInfo vol = (VolumeInfo) data;
+            LightbitsApiClient client = clientForPool(data.getDataStore().getId());
+            String name = LightbitsUtil.volumeName(vol.getUuid());
+            org.apache.cloudstack.storage.datastore.client.model.Volume v = client.getVolumeByName(name)
+                    .orElseThrow(() -> new CloudRuntimeException("volume not found on cluster: " + name));
+            client.resizeVolume(v.getUuid(), vol.getSize());
+        } catch (Exception e) {
+            errMsg = e.getMessage();
+        }
+        completeCreate(callback, null, errMsg);
+    }
+
+    // --- helpers ---
+
+    private int replicaCount(long poolId) {
+        Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(poolId);
+        String r = details.get(LightbitsPoolConfig.KEY_REPLICAS);
+        return r == null ? 3 : Integer.parseInt(r);
+    }
+
+    private void completeCreate(AsyncCompletionCallback<CreateCmdResult> callback, String path, String errMsg) {
+        if (callback == null) {
+            if (errMsg != null) {
+                throw new CloudRuntimeException(errMsg);
+            }
+            return;
+        }
+        CreateCmdResult result = new CreateCmdResult(path, null);
+        result.setResult(errMsg);
+        callback.complete(result);
     }
 
     @Override
@@ -94,18 +184,21 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean grantAccess(DataObject dataObject, Host host, DataStore dataStore) {
-        // TODO: add host NQN to the volume ACL
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        // Adds the host's NQN to the volume ACL. Requires the host NQN, which is sourced
+        // and persisted by the HostListener/agent — delivered in M2. Until then, attach
+        // is not wired, so this is not reached in the M1 (control-plane) scope.
+        throw new UnsupportedOperationException("Lightbits plugin: host attach (grantAccess) lands in M2");
     }
 
     @Override
     public void revokeAccess(DataObject dataObject, Host host, DataStore dataStore) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        throw new UnsupportedOperationException("Lightbits plugin: host detach (revokeAccess) lands in M2");
     }
 
     @Override
     public long getDataObjectSizeIncludingHypervisorSnapshotReserve(DataObject dataObject, StoragePool storagePool) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        // thin provisioning: the pool consumes the volume's virtual size (no reserve)
+        return dataObject instanceof VolumeInfo ? ((VolumeInfo) dataObject).getSize() : 0L;
     }
 
     @Override
@@ -115,7 +208,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public long getUsedBytes(StoragePool storagePool) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        ClusterInfo info = clientForPool(storagePool.getId()).getClusterInfo();
+        return info.getStatistics() == null ? 0L : info.getStatistics().usedBytes();
     }
 
     @Override
@@ -141,13 +235,18 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canProvideStorageStats() {
-        // will be true: capacity/usage comes from the cluster API
-        return false;
+        return true;   // capacity/usage come from the cluster API
     }
 
     @Override
     public Pair<Long, Long> getStorageStats(StoragePool storagePool) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        ClusterInfo info = clientForPool(storagePool.getId()).getClusterInfo();
+        ClusterInfo.Statistics s = info.getStatistics();
+        if (s == null) {
+            return null;
+        }
+        // Pair<capacity, used>
+        return new Pair<>(s.effectiveBytes(), s.usedBytes());
     }
 
     @Override
@@ -162,7 +261,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canHostAccessStoragePool(Host host, StoragePool pool) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        // Any KVM host with NVMe/TCP reachability can access the pool; real per-host
+        // reachability checks arrive with the M2 agent adaptor.
+        return true;
     }
 
     @Override
@@ -192,6 +293,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public void detachVolumeFromAllStorageNodes(Volume volume) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        // No-op: Lightbits volumes are not pinned to storage nodes (ANA multipath across
+        // the cluster). Nothing to detach at the storage layer.
     }
 }
