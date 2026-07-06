@@ -43,6 +43,10 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     @Inject
     PrimaryDataStoreHelper dataStoreHelper;
+    @Inject
+    com.cloud.storage.StorageManager storageMgr;
+    @Inject
+    com.cloud.resource.ResourceManager resourceMgr;
 
     /**
      * Parse + validate pool params and preflight the cluster (auth, project, health,
@@ -143,12 +147,23 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         return dataStoreHelper.createPrimaryDataStore(params);
     }
 
-    // M1 attach is DB-level only: mark the pool attached/Up. Host storage connection
-    // (connectHostToSharedPool -> KVM StorageAdaptor) is deferred to M2, when the
-    // NVMe/TCP adaptor exists. See decision log (2026-07-06).
+    // Connect each eligible KVM host to the pool: this sends ModifyStoragePoolCommand,
+    // which registers the pool with the host's LightbitsStorageAdaptor so per-volume
+    // connectPhysicalDisk can resolve it at attach time. (No pool-wide mount; managed,
+    // per-volume NVMe/TCP.)
 
     @Override
     public boolean attachCluster(DataStore store, ClusterScope scope) {
+        org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreInfo primary =
+                (org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreInfo) store;
+        for (com.cloud.host.HostVO host :
+                resourceMgr.getEligibleUpAndEnabledHostsInClusterForStorageConnection(primary)) {
+            try {
+                storageMgr.connectHostToSharedPool(host, store.getId());
+            } catch (Exception e) {
+                // tolerate per-host failure; the host reconnects the pool when it comes up
+            }
+        }
         dataStoreHelper.attachCluster(store);
         return true;
     }
@@ -160,6 +175,14 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     @Override
     public boolean attachZone(DataStore dataStore, ZoneScope scope, HypervisorType hypervisorType) {
+        for (com.cloud.host.HostVO host :
+                resourceMgr.getEligibleUpAndEnabledHostsInZoneForStorageConnection(dataStore, scope.getScopeId(), hypervisorType)) {
+            try {
+                storageMgr.connectHostToSharedPool(host, dataStore.getId());
+            } catch (Exception e) {
+                // tolerate per-host failure
+            }
+        }
         dataStoreHelper.attachZone(dataStore, hypervisorType);
         return true;
     }
