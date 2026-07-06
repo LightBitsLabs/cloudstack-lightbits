@@ -30,22 +30,32 @@ class LightbitsPoolConfigTest {
     @Test
     void parsesFullUrl() {
         LightbitsPoolConfig c = LightbitsPoolConfig.fromUrl(
-                "lightbits://10.19.43.20:443/my-project?replicas=3&compression=true&qosPolicy=gold", "jwt-x");
+                "lightbits://10.19.43.20:443/my-project?replicas=3&compression=true&qosPolicy=gold&environment=prod-cs1", "jwt-x");
         assertEquals("10.19.43.20", c.getApiHost());
         assertEquals(443, c.getApiPort());
         assertEquals("my-project", c.getProject());
         assertEquals(3, c.getReplicaCount());
         assertTrue(c.isCompression());
         assertEquals("gold", c.getQosPolicy());
+        assertEquals("prod-cs1", c.getEnvironment());
         assertEquals("https://10.19.43.20:443", c.apiEndpoint());
     }
 
     @Test
     void defaultsPortAndReplicasAndCompression() {
-        LightbitsPoolConfig c = LightbitsPoolConfig.fromUrl("lightbits://host/proj", "jwt");
+        LightbitsPoolConfig c = LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1", "jwt");
         assertEquals(443, c.getApiPort());
         assertEquals(3, c.getReplicaCount());
         assertFalse(c.isCompression());
+    }
+
+    @Test
+    void rejectsMissingEnvironment() {
+        // multiple CloudStacks may share a cluster; environment is required for
+        // collision-free, identifiable volume names
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj", "jwt"));
+        assertTrue(e.getMessage().contains("environment"));
     }
 
     @Test
@@ -86,7 +96,7 @@ class LightbitsPoolConfigTest {
     @Test
     void detailsRoundTripExcludesSecret() {
         LightbitsPoolConfig c = LightbitsPoolConfig.fromUrl(
-                "lightbits://h/p?replicas=2&compression=true", "secret-jwt");
+                "lightbits://h/p?replicas=2&compression=true&environment=cs1", "secret-jwt");
         Map<String, String> details = c.toDetailsWithoutSecret();
         assertFalse(details.containsValue("secret-jwt"), "JWT must never be in the details map");
         assertFalse(details.containsKey(LightbitsPoolConfig.KEY_JWT));
@@ -96,6 +106,7 @@ class LightbitsPoolConfigTest {
         assertEquals("p", back.getProject());
         assertEquals(2, back.getReplicaCount());
         assertTrue(back.isCompression());
+        assertEquals("cs1", back.getEnvironment());
         assertEquals("secret-jwt", back.getJwt());
     }
 

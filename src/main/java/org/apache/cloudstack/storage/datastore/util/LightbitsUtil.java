@@ -33,8 +33,14 @@ public final class LightbitsUtil {
      */
     public static final StoragePoolType POOL_TYPE = StoragePoolType.IscsiLUN;
 
-    /** Every Lightbits volume backing a CloudStack volume is named after the CloudStack UUID. */
-    public static String volumeName(String cloudStackVolumeUuid) {
-        return "cs-" + cloudStackVolumeUuid;
+    /**
+     * Name of the Lightbits volume backing a CloudStack volume.
+     *
+     * Format: {@code cs-<environment>-<cloudStackVolumeUuid>}. The environment suffix
+     * identifies the owning CloudStack when multiple deployments share one Lightbits
+     * cluster — avoiding collisions and making ownership obvious in `lbcli`/the cluster UI.
+     */
+    public static String volumeName(String environment, String cloudStackVolumeUuid) {
+        return "cs-" + environment + "-" + cloudStackVolumeUuid;
     }
 }

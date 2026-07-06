@@ -40,6 +40,7 @@ public class LightbitsPoolConfig {
     public static final String KEY_COMPRESSION = "compression";
     public static final String KEY_QOS = "qosPolicy";
     public static final String KEY_JWT = "jwt";
+    public static final String KEY_ENVIRONMENT = "environment";
 
     private static final int DEFAULT_PORT = 443;
     private static final int DEFAULT_REPLICAS = 3;
@@ -51,9 +52,10 @@ public class LightbitsPoolConfig {
     private final boolean compression;
     private final String qosPolicy; // nullable
     private final String jwt;        // nullable in details map (encrypted); required to operate
+    private final String environment; // identifies the owning CloudStack when clusters are shared
 
     public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
-                               boolean compression, String qosPolicy, String jwt) {
+                               boolean compression, String qosPolicy, String jwt, String environment) {
         this.apiHost = apiHost;
         this.apiPort = apiPort;
         this.project = project;
@@ -61,6 +63,7 @@ public class LightbitsPoolConfig {
         this.compression = compression;
         this.qosPolicy = qosPolicy;
         this.jwt = jwt;
+        this.environment = environment;
     }
 
     /**
@@ -101,11 +104,21 @@ public class LightbitsPoolConfig {
         }
         boolean compression = Boolean.parseBoolean(q.getOrDefault("compression", "false"));
         String qos = q.get("qosPolicy");
+        // environment identifies the owning CloudStack when multiple share a cluster;
+        // it becomes part of every volume name for collision-avoidance + identification.
+        String environment = q.get("environment");
+        if (environment == null || environment.isBlank()) {
+            throw new IllegalArgumentException("Lightbits pool URL must include '?environment=<name>' "
+                    + "to identify this CloudStack when a cluster is shared (e.g. ...?environment=prod-cs1)");
+        }
+        if (!environment.matches("[A-Za-z0-9_-]{1,40}")) {
+            throw new IllegalArgumentException("environment must be 1-40 chars of [A-Za-z0-9_-] (got '" + environment + "')");
+        }
 
         if (jwt == null || jwt.isBlank()) {
             throw new IllegalArgumentException("a JWT credential is required to register a Lightbits pool");
         }
-        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, jwt);
+        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, jwt, environment);
     }
 
     /** Rebuild config from a persisted details map (JWT already decrypted by the caller). */
@@ -119,7 +132,8 @@ public class LightbitsPoolConfig {
         int replicas = parsePositiveInt(details.getOrDefault(KEY_REPLICAS, String.valueOf(DEFAULT_REPLICAS)), KEY_REPLICAS);
         boolean compression = Boolean.parseBoolean(details.getOrDefault(KEY_COMPRESSION, "false"));
         String qos = details.get(KEY_QOS);
-        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, decryptedJwt);
+        String environment = require(details, KEY_ENVIRONMENT);
+        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, decryptedJwt, environment);
     }
 
     /** Details map WITHOUT the JWT — caller encrypts and stores the JWT separately. */
@@ -133,6 +147,7 @@ public class LightbitsPoolConfig {
         if (qosPolicy != null) {
             d.put(KEY_QOS, qosPolicy);
         }
+        d.put(KEY_ENVIRONMENT, environment);
         return d;
     }
 
@@ -205,4 +220,5 @@ public class LightbitsPoolConfig {
     public boolean isCompression() { return compression; }
     public String getQosPolicy() { return qosPolicy; }
     public String getJwt() { return jwt; }
+    public String getEnvironment() { return environment; }
 }

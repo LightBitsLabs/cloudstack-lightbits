@@ -59,11 +59,19 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
     public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
 
-    /** Build an API client for a pool (by id) from its persisted (JWT-encrypted) details. */
-    LightbitsApiClient clientForPool(long poolId) {
+    /** Rebuild the validated pool config (incl. environment) from persisted details. */
+    LightbitsPoolConfig configForPool(long poolId) {
         Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(poolId);
         String jwt = DBEncryptionUtil.decrypt(LightbitsPoolConfig.readChunked(details, LightbitsPoolConfig.KEY_JWT));
-        LightbitsPoolConfig cfg = LightbitsPoolConfig.fromDetails(details, jwt);
+        return LightbitsPoolConfig.fromDetails(details, jwt);
+    }
+
+    /** Build an API client for a pool (by id) from its persisted (JWT-encrypted) details. */
+    LightbitsApiClient clientForPool(long poolId) {
+        return clientFor(configForPool(poolId));
+    }
+
+    private LightbitsApiClient clientFor(LightbitsPoolConfig cfg) {
         // v1 dev/lab TLS: trust-all (see open item L3). Production uses the validated default.
         return LightbitsApiClient.insecureForDevelopment(cfg.apiEndpoint(), cfg.getJwt(), cfg.getProject());
     }
@@ -94,10 +102,11 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         try {
             if (data.getType() == DataObjectType.VOLUME) {
                 VolumeInfo vol = (VolumeInfo) data;
-                int replicas = replicaCount(store.getId());
+                LightbitsPoolConfig cfg = configForPool(store.getId());
                 org.apache.cloudstack.storage.datastore.client.model.Volume created =
-                        clientForPool(store.getId()).createVolume(
-                                LightbitsUtil.volumeName(vol.getUuid()), vol.getSize(), replicas, null);
+                        clientFor(cfg).createVolume(
+                                LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid()),
+                                vol.getSize(), cfg.getReplicaCount(), null);
                 // path identifies the backing volume; the M2 KVM adaptor resolves the NVMe
                 // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>).
                 path = created.getUuid();
@@ -115,8 +124,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         String errMsg = null;
         try {
             if (data.getType() == DataObjectType.VOLUME) {
-                LightbitsApiClient client = clientForPool(store.getId());
-                String name = LightbitsUtil.volumeName(data.getUuid());
+                LightbitsPoolConfig cfg = configForPool(store.getId());
+                LightbitsApiClient client = clientFor(cfg);
+                String name = LightbitsUtil.volumeName(cfg.getEnvironment(), data.getUuid());
                 client.getVolumeByName(name).ifPresent(v -> client.deleteVolume(v.getUuid()));
             }
         } catch (Exception e) {
@@ -150,8 +160,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         String errMsg = null;
         try {
             VolumeInfo vol = (VolumeInfo) data;
-            LightbitsApiClient client = clientForPool(data.getDataStore().getId());
-            String name = LightbitsUtil.volumeName(vol.getUuid());
+            LightbitsPoolConfig cfg = configForPool(data.getDataStore().getId());
+            LightbitsApiClient client = clientFor(cfg);
+            String name = LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid());
             org.apache.cloudstack.storage.datastore.client.model.Volume v = client.getVolumeByName(name)
                     .orElseThrow(() -> new CloudRuntimeException("volume not found on cluster: " + name));
             client.resizeVolume(v.getUuid(), vol.getSize());
@@ -162,12 +173,6 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     }
 
     // --- helpers ---
-
-    private int replicaCount(long poolId) {
-        Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(poolId);
-        String r = details.get(LightbitsPoolConfig.KEY_REPLICAS);
-        return r == null ? 3 : Integer.parseInt(r);
-    }
 
     private void completeCreate(AsyncCompletionCallback<CreateCmdResult> callback, String path, String errMsg) {
         if (callback == null) {
@@ -190,8 +195,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     @Override
     public boolean grantAccess(DataObject dataObject, Host host, DataStore dataStore) {
         String nqn = hostNqn(host);
-        LightbitsApiClient client = clientForPool(dataStore.getId());
-        String name = LightbitsUtil.volumeName(dataObject.getUuid());
+        LightbitsPoolConfig cfg = configForPool(dataStore.getId());
+        LightbitsApiClient client = clientFor(cfg);
+        String name = LightbitsUtil.volumeName(cfg.getEnvironment(), dataObject.getUuid());
         org.apache.cloudstack.storage.datastore.client.model.Volume v = client.getVolumeByName(name)
                 .orElseThrow(() -> new CloudRuntimeException("grantAccess: volume not found on cluster: " + name));
         java.util.List<String> acl = currentAcl(v);
@@ -205,8 +211,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     @Override
     public void revokeAccess(DataObject dataObject, Host host, DataStore dataStore) {
         String nqn = hostNqn(host);
-        LightbitsApiClient client = clientForPool(dataStore.getId());
-        String name = LightbitsUtil.volumeName(dataObject.getUuid());
+        LightbitsPoolConfig cfg = configForPool(dataStore.getId());
+        LightbitsApiClient client = clientFor(cfg);
+        String name = LightbitsUtil.volumeName(cfg.getEnvironment(), dataObject.getUuid());
         client.getVolumeByName(name).ifPresent(v -> {
             java.util.List<String> acl = currentAcl(v);
             if (acl.remove(nqn)) {

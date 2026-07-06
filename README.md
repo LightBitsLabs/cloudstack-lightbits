@@ -23,6 +23,12 @@ Two communication paths, mirroring our [Proxmox plugin](https://github.com/Light
 
 See [docs/architecture.md](docs/architecture.md) for the design sketch.
 
+## Installing
+
+See **[INSTALL.md](INSTALL.md)** for the full deployment guide (management server + KVM hosts,
+pool registration, storage tags) and **[docs/jwt-rotation.md](docs/jwt-rotation.md)** for
+credential rotation.
+
 ## Requirements (target)
 
 - Apache CloudStack 4.22+

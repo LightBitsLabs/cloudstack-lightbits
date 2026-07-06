@@ -72,7 +72,7 @@ class LightbitsLifeCyclePreflightTest {
         wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(200).withBody(
             "{\"UUID\":\"c-1\",\"health\":{\"state\":\"OK\"},"
             + "\"statistics\":{\"effectivePhysicalStorage\":\"102392961820261\"}}")));
-        PreflightResult r = lc.preflight(dsInfos("lightbits://10.19.43.20/default?replicas=3", "jwt-x"));
+        PreflightResult r = lc.preflight(dsInfos("lightbits://10.19.43.20/default?replicas=3&environment=cs1", "jwt-x"));
         assertEquals("default", r.config.getProject());
         assertEquals(102392961820261L, r.capacityBytes);
         assertFalse(r.detailsWithoutSecret.containsKey(LightbitsPoolConfig.KEY_JWT),
@@ -84,7 +84,7 @@ class LightbitsLifeCyclePreflightTest {
         wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(200).withBody(
             "{\"UUID\":\"c-1\",\"health\":{\"state\":\"Degraded\"}}")));
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> lc.preflight(dsInfos("lightbits://h/default", "jwt")));
+                () -> lc.preflight(dsInfos("lightbits://h/default?environment=cs1", "jwt")));
         assertTrue(e.getMessage().contains("not healthy"));
     }
 
@@ -92,7 +92,7 @@ class LightbitsLifeCyclePreflightTest {
     void preflightRejectsUnreachableClusterWithActionableMessage() {
         wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(401).withBody("denied")));
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-                () -> lc.preflight(dsInfos("lightbits://h/default", "bad-jwt")));
+                () -> lc.preflight(dsInfos("lightbits://h/default?environment=cs1", "bad-jwt")));
         assertTrue(e.getMessage().contains("cannot reach Lightbits cluster"));
         assertFalse(e.getMessage().contains("bad-jwt"), "credentials must not leak into errors");
     }
