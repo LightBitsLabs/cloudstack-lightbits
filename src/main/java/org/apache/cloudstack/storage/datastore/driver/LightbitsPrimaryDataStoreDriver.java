@@ -30,10 +30,18 @@ import org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreDriver
 import org.apache.cloudstack.engine.subsystem.api.storage.SnapshotInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.TemplateInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
+import org.apache.cloudstack.engine.subsystem.api.storage.EndPoint;
+import org.apache.cloudstack.engine.subsystem.api.storage.EndPointSelector;
 import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
+import org.apache.cloudstack.storage.RemoteHostEndPoint;
 import org.apache.cloudstack.storage.command.CommandResult;
+import org.apache.cloudstack.storage.command.CopyCommand;
 import org.apache.cloudstack.storage.command.CreateObjectAnswer;
+import org.apache.cloudstack.storage.to.TemplateObjectTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
+
+import com.cloud.storage.StorageManager;
+import com.cloud.vm.VirtualMachineManager;
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
 import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
 import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
@@ -58,6 +66,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     private StoragePoolDetailsDao storagePoolDetailsDao;
     @Inject
     private com.cloud.host.dao.HostDetailsDao hostDetailsDao;
+    @Inject
+    private EndPointSelector selector;
 
     /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
     public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
@@ -118,8 +128,22 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 VolumeObjectTO to = (VolumeObjectTO) vol.getTO();
                 to.setPath(path);
                 answer = new CreateObjectAnswer(to);
+            } else if (data.getType() == DataObjectType.TEMPLATE) {
+                // Managed-template caching: create a Lightbits volume to hold the template.
+                // copyAsync then streams the template bits onto it (agent qemu-img).
+                TemplateInfo tmpl = (TemplateInfo) data;
+                LightbitsPoolConfig cfg = configForPool(store.getId());
+                long size = tmpl.getSize() != null && tmpl.getSize() > 0 ? tmpl.getSize() : (1L << 30);
+                org.apache.cloudstack.storage.datastore.client.model.Volume created =
+                        clientFor(cfg).createVolume(
+                                LightbitsUtil.volumeName(cfg.getEnvironment(), tmpl.getUuid()),
+                                size, cfg.getReplicaCount(), null);
+                path = created.getUuid();
+                TemplateObjectTO to = (TemplateObjectTO) tmpl.getTO();
+                to.setPath(path);
+                answer = new CreateObjectAnswer(to);
             } else {
-                errMsg = "Lightbits plugin: createAsync supports VOLUME only (got " + data.getType() + ")";
+                errMsg = "Lightbits plugin: createAsync supports VOLUME/TEMPLATE (got " + data.getType() + ")";
                 answer = new Answer(null, false, errMsg);
             }
         } catch (Exception e) {
@@ -160,17 +184,44 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public void copyAsync(DataObject srcData, DataObject destData, AsyncCompletionCallback<CopyCommandResult> callback) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        copyAsync(srcData, destData, null, callback);
     }
 
     @Override
     public void copyAsync(DataObject srcData, DataObject destData, Host destHost, AsyncCompletionCallback<CopyCommandResult> callback) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        // Delegate the actual data copy (template -> Lightbits volume, or volume->volume) to a
+        // KVM host via a CopyCommand. The agent connects the dest volume (our adaptor) and runs
+        // createDiskFromTemplate/qemu-img. This drives root-disk-from-template boot.
+        Answer answer;
+        String errMsg = null;
+        try {
+            int wait = StorageManager.PRIMARY_STORAGE_DOWNLOAD_WAIT.value();
+            CopyCommand cmd = new CopyCommand(srcData.getTO(), destData.getTO(), wait,
+                    VirtualMachineManager.ExecuteInSequence.value());
+            EndPoint ep = destHost != null ? RemoteHostEndPoint.getHypervisorHostEndPoint(destHost)
+                    : selector.select(srcData, destData);
+            if (ep == null) {
+                answer = new Answer(cmd, false, "Lightbits copyAsync: no endpoint to run the copy");
+            } else {
+                answer = ep.sendMessage(cmd);
+            }
+        } catch (Exception e) {
+            errMsg = e.getMessage();
+            answer = new Answer(null, false, errMsg);
+        }
+        CopyCommandResult result = new CopyCommandResult(null, answer);
+        if (answer != null && !answer.getResult()) {
+            result.setResult(answer.getDetails());
+        }
+        callback.complete(result);
     }
 
     @Override
     public boolean canCopy(DataObject srcData, DataObject destData) {
-        return false;
+        // We can materialize a volume from a template (root-disk-from-template) and clone
+        // volume->volume within the cluster; the agent CopyCommand does the work.
+        return destData.getType() == DataObjectType.VOLUME
+                && (srcData.getType() == DataObjectType.TEMPLATE || srcData.getType() == DataObjectType.VOLUME);
     }
 
     @Override
