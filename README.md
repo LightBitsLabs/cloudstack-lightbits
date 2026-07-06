@@ -36,8 +36,34 @@ CloudStack does not publish its Maven artifacts to Maven Central; building this 
 ```bash
 git clone --depth 1 --branch 4.22.1.0 https://github.com/apache/cloudstack.git
 cd cloudstack && mvn -B -DskipTests install -pl api,core,engine/api,engine/storage,engine/storage/volume,framework/ipc -am
-cd ../cloudstack-lightbits && mvn -B compile
+cd ../cloudstack-lightbits && mvn -B verify   # compiles, runs the unit tests, enforces coverage
 ```
+
+## Testing
+
+Unit tests live under `src/test/java` and run with the standard Maven lifecycle — no
+CloudStack management server or Lightbits cluster required (the API is exercised against an
+in-process [WireMock](https://wiremock.org/) stub):
+
+```bash
+mvn -B test            # run the unit tests
+mvn -B verify          # tests + JaCoCo line-coverage gate (fails under 60%)
+```
+
+Coverage report after a run: `target/site/jacoco/index.html`.
+
+**Contributors are encouraged to extend these.** The suite is organized by unit:
+
+| Test | Covers |
+|---|---|
+| `client/LightbitsApiClientTest` | volume/snapshot lifecycle, idempotency, error mapping, retry/backoff |
+| `client/LightbitsApiClientTlsTest` | TLS certificate validation (self-signed rejected; no silent bypass) |
+| `util/LightbitsPoolConfigTest` | pool-URL parsing/validation, JWT-never-persisted contract |
+| `lifecycle/LightbitsLifeCyclePreflightTest` | pool preflight against a stubbed cluster |
+
+When adding an API call to `LightbitsApiClient`, add a WireMock-backed test alongside it (happy
+path **and** the failure it must handle). The coverage gate covers the `client`, `util`, and
+`model` packages; the CloudStack-coupled SPI classes are validated by integration/Marvin tests.
 
 ## Delivery model
 
