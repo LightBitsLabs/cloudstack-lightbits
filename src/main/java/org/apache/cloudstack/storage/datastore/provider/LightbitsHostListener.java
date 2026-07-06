@@ -17,29 +17,43 @@ package org.apache.cloudstack.storage.datastore.provider;
 
 import javax.inject.Inject;
 
+import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreManager;
 import org.apache.cloudstack.engine.subsystem.api.storage.HypervisorHostListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.cloud.agent.api.Answer;
+import com.cloud.agent.api.ModifyStoragePoolCommand;
+import com.cloud.agent.AgentManager;
+import com.cloud.host.Host;
+import com.cloud.host.dao.HostDao;
+import com.cloud.storage.DataStoreRole;
+import com.cloud.storage.StoragePool;
 import com.cloud.storage.StoragePoolHostVO;
 import com.cloud.storage.dao.StoragePoolHostDao;
+import com.cloud.utils.exception.CloudRuntimeException;
 
 /**
  * Host listener for the Lightbits managed primary storage pool.
  *
- * Lightbits is managed, per-volume NVMe/TCP storage: there is no pool-wide mount
- * on the host, so host connect/disconnect does not send a ModifyStoragePoolCommand.
- * Individual volumes are connected/disconnected at attach/detach time by the driver
- * (grantAccess -> ACL) and the KVM StorageAdaptor (nvme connect). This listener only
- * records the host<->pool association so CloudStack considers the host attached.
+ * On host connect it sends a ModifyStoragePoolCommand so the KVM agent registers the pool
+ * with its LightbitsStorageAdaptor (needed so per-volume connectPhysicalDisk can later find
+ * the pool). It also records the host<->pool association. There is no host-side mount:
+ * individual volumes connect over NVMe/TCP at attach time (driver grantAccess + adaptor).
  *
- * A non-null listener here is REQUIRED: StoragePoolMonitor calls
- * provider.getHostListener().hostConnect(...) for every host that connects while the
- * pool exists; returning null NPEs and wedges the host in Alert.
+ * A non-null listener is REQUIRED: StoragePoolMonitor calls
+ * provider.getHostListener().hostConnect(...) for every host that connects while the pool
+ * exists; returning null NPEs and wedges the host in Alert.
  */
 public class LightbitsHostListener implements HypervisorHostListener {
     private static final Logger LOG = LoggerFactory.getLogger(LightbitsHostListener.class);
 
+    @Inject
+    private AgentManager agentMgr;
+    @Inject
+    private DataStoreManager dataStoreMgr;
+    @Inject
+    private HostDao hostDao;
     @Inject
     private StoragePoolHostDao storagePoolHostDao;
 
@@ -50,11 +64,23 @@ public class LightbitsHostListener implements HypervisorHostListener {
 
     @Override
     public boolean hostConnect(long hostId, long poolId) {
+        StoragePool pool = (StoragePool) dataStoreMgr.getDataStore(poolId, DataStoreRole.Primary);
+
         StoragePoolHostVO association = storagePoolHostDao.findByPoolHost(poolId, hostId);
         if (association == null) {
             storagePoolHostDao.persist(new StoragePoolHostVO(poolId, hostId, ""));
         }
-        LOG.debug("Lightbits pool {} associated with host {} (per-volume connect happens at attach)", poolId, hostId);
+
+        // Register the pool on the KVM agent's LightbitsStorageAdaptor so per-volume
+        // connectPhysicalDisk can resolve it. Managed, per-volume NVMe/TCP: no pool mount.
+        ModifyStoragePoolCommand cmd = new ModifyStoragePoolCommand(true, pool);
+        Answer answer = agentMgr.easySend(hostId, cmd);
+        if (answer == null || !answer.getResult()) {
+            String detail = answer == null ? "no answer" : answer.getDetails();
+            throw new CloudRuntimeException("Lightbits: failed to register pool " + poolId
+                    + " on host " + hostId + ": " + detail);
+        }
+        LOG.info("Lightbits pool {} registered on host {}", poolId, hostId);
         return true;
     }
 
