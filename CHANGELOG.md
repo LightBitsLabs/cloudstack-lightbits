@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Initial repository scaffolding: license and project hygiene files, Maven build skeleton.
 - Stub implementations of the CloudStack storage SPI (`DataStoreProvider`, `PrimaryDataStoreLifeCycle`, `PrimaryDataStoreDriver`) against CloudStack 4.22.0.0 — compile skeleton only, no behavior.
 - CI workflow that builds the plugin against a source-built CloudStack 4.22.0.0 (CloudStack does not publish Maven artifacts to Maven Central).
+- Quality gate: JaCoCo line-coverage check (>= 60%) bound to `mvn verify` and run in CI; dormant until the first tests land, then a hard gate.
 
 ### Known limitations
 - No functional code yet: every SPI method throws `UnsupportedOperationException`.

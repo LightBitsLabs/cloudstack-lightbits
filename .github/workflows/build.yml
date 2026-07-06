@@ -40,5 +40,5 @@ jobs:
           mvn -B -q -DskipTests -Dmaven.javadoc.skip=true install \
             -pl api,core,engine/api,engine/storage,engine/storage/volume,framework/ipc -am
 
-      - name: Compile plugin
-        run: mvn -B compile
+      - name: Build, test, and enforce coverage gate
+        run: mvn -B verify
