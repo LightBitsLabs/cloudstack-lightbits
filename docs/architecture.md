@@ -10,9 +10,9 @@ The plugin implements CloudStack **managed primary storage**: each CloudStack vo
 ┌─────────────────────────────┐        REST API (443)      ┌──────────────────┐
 │ CloudStack Management Server │ ─────────────────────────▶ │                  │
 │  LightbitsPrimaryDataStore-  │   volume lifecycle, ACLs,  │ Lightbits cluster │
-│  Provider/LifeCycle/Driver   │   snapshots, stats         │  (or ICM         │
-└─────────────────────────────┘                             │   federation     │
-┌─────────────────────────────┐      NVMe/TCP (4420)        │   endpoint)      │
+│  Provider/LifeCycle/Driver   │   snapshots, stats         │                  │
+└─────────────────────────────┘                             │                  │
+┌─────────────────────────────┐      NVMe/TCP (4420)        │                  │
 │ KVM host (cloudstack-agent)  │ ─────────────────────────▶ │                  │
 │  Lightbits StorageAdaptor    │   block I/O                └──────────────────┘
 │  nvme-cli / nvme_tcp         │
@@ -25,7 +25,7 @@ The plugin implements CloudStack **managed primary storage**: each CloudStack vo
 - **`LightbitsPrimaryDataStoreLifeCycle`** — storage pool creation from URL/parameters (API endpoint, JWT, project, replica count, compression), zone-wide and cluster-wide scope, maintenance mode, capacity registration.
 - **`LightbitsPrimaryDataStoreDriver`** — volume CRUD (`createAsync`/`deleteAsync`/`resize`), `grantAccess`/`revokeAccess` mapped to per-host NQN ACLs, snapshots via native Lightbits snapshots, template copy via thin clones, capacity/usage stats from the cluster API.
 
-Control-path client: thin HTTPS/JSON client for the Lightbits REST API (JWT auth). The same driver can target a single cluster or an ICM (Intelligent Cluster Management) federation endpoint, which adds cross-cluster placement transparently.
+Control-path client: thin HTTPS/JSON client for the Lightbits REST API (JWT auth). **v1 targets a single Lightbits cluster per storage pool.** The endpoint is a plain configuration value, so richer Lightbits management endpoints (multi-cluster, data-management services) can be targeted in the future without plugin rework.
 
 ## KVM agent side (not started)
 
