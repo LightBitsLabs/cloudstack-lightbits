@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/apache/cloudstack
-          key: cloudstack-4.22.0.0-m2
+          key: cloudstack-4.22.1.0-m2
 
       - name: Cache Maven dependencies
         uses: actions/cache@v4
@@ -35,7 +35,7 @@ jobs:
       - name: Build CloudStack modules from source
         if: steps.cache-cloudstack.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch 4.22.0.0 https://github.com/apache/cloudstack.git /tmp/cloudstack
+          git clone --depth 1 --branch 4.22.1.0 https://github.com/apache/cloudstack.git /tmp/cloudstack
           cd /tmp/cloudstack
           mvn -B -q -DskipTests -Dmaven.javadoc.skip=true install \
             -pl api,core,engine/api,engine/storage,engine/storage/volume,framework/ipc -am

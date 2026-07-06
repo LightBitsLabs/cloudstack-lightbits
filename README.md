@@ -34,7 +34,7 @@ See [docs/architecture.md](docs/architecture.md) for the design sketch.
 CloudStack does not publish its Maven artifacts to Maven Central; building this plugin requires a locally installed CloudStack source tree:
 
 ```bash
-git clone --depth 1 --branch 4.22.0.0 https://github.com/apache/cloudstack.git
+git clone --depth 1 --branch 4.22.1.0 https://github.com/apache/cloudstack.git
 cd cloudstack && mvn -B -DskipTests install -pl api,core,engine/api,engine/storage,engine/storage/volume,framework/ipc -am
 cd ../cloudstack-lightbits && mvn -B compile
 ```

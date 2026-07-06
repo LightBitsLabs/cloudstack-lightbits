@@ -37,7 +37,7 @@
         <!-- CloudStack does not publish artifacts to Maven Central: install them
              locally from an apache/cloudstack source checkout at this tag first
              (see README "Building"). -->
-        <cloudstack.version>4.22.0.0</cloudstack.version>
+        <cloudstack.version>4.22.1.0</cloudstack.version>
         <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
