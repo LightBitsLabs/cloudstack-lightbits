@@ -79,12 +79,28 @@
             <version>${cloudstack.version}</version>
             <scope>provided</scope>
         </dependency>
+        <!-- Agent-side KVM StorageAdaptor classes (KVMStoragePool, QemuImg, Script, ...).
+             Provided: shipped by cloudstack-agent; our jar rides its classpath. -->
+        <dependency>
+            <groupId>org.apache.cloudstack</groupId>
+            <artifactId>cloud-plugin-hypervisor-kvm</artifactId>
+            <version>${cloudstack.version}</version>
+            <scope>provided</scope>
+        </dependency>
         <!-- Jackson is shipped by the CloudStack management server (provided scope: not
              bundled in the plugin jar). Pinned to a patched version to keep the build clean
              of known CVEs; the runtime version is whatever the management server ships. -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+            <version>2.18.8</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- Pin jackson-core to match databind: the KVM plugin dependency drags an older
+             core that lacks StreamConstraintsException, breaking runtime deserialization. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-core</artifactId>
             <version>2.18.8</version>
             <scope>provided</scope>
         </dependency>
@@ -161,6 +177,9 @@
                                 <exclude>**/storage/datastore/driver/**</exclude>
                                 <exclude>**/storage/datastore/lifecycle/**</exclude>
                                 <exclude>**/storage/datastore/provider/**</exclude>
+                                <!-- agent-side KVM adaptor: exercised by live/Marvin tests,
+                                     not unit tests (needs a real host + nvme device) -->
+                                <exclude>**/hypervisor/kvm/storage/**</exclude>
                             </excludes>
                         </configuration>
                     </execution>
