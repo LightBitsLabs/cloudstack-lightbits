@@ -115,9 +115,10 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         Long podId = (Long) dsInfos.get("podId");
         Long clusterId = (Long) dsInfos.get("clusterId");
 
-        // Persist config as pool details; the JWT is encrypted at rest (never stored cleartext).
+        // Persist config as pool details; the JWT is encrypted at rest (never stored cleartext)
+        // and chunked because it exceeds the varchar(255) detail-value column.
         Map<String, String> details = new HashMap<>(pf.detailsWithoutSecret);
-        details.put(LightbitsPoolConfig.KEY_JWT, DBEncryptionUtil.encrypt(pf.config.getJwt()));
+        LightbitsPoolConfig.putChunked(details, LightbitsPoolConfig.KEY_JWT, DBEncryptionUtil.encrypt(pf.config.getJwt()));
 
         PrimaryDataStoreParameters params = new PrimaryDataStoreParameters();
         params.setType(LightbitsUtil.POOL_TYPE);   // v1: IscsiLUN (see LightbitsUtil / decision log Q3)

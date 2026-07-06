@@ -62,7 +62,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     /** Build an API client for a pool (by id) from its persisted (JWT-encrypted) details. */
     LightbitsApiClient clientForPool(long poolId) {
         Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(poolId);
-        String jwt = DBEncryptionUtil.decrypt(details.get(LightbitsPoolConfig.KEY_JWT));
+        String jwt = DBEncryptionUtil.decrypt(LightbitsPoolConfig.readChunked(details, LightbitsPoolConfig.KEY_JWT));
         LightbitsPoolConfig cfg = LightbitsPoolConfig.fromDetails(details, jwt);
         // v1 dev/lab TLS: trust-all (see open item L3). Production uses the validated default.
         return LightbitsApiClient.insecureForDevelopment(cfg.apiEndpoint(), cfg.getJwt(), cfg.getProject());

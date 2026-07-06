@@ -100,6 +100,28 @@ class LightbitsPoolConfigTest {
     }
 
     @Test
+    void chunkedValueRoundTripsForLongJwt() {
+        // a real LightOS JWT is ~570 chars; encrypted, longer — must survive the
+        // varchar(255) detail column by chunking
+        StringBuilder jwt = new StringBuilder();
+        for (int i = 0; i < 800; i++) {
+            jwt.append((char) ('A' + (i % 26)));
+        }
+        Map<String, String> details = new HashMap<>();
+        LightbitsPoolConfig.putChunked(details, "jwt", jwt.toString());
+        // every stored chunk fits the column
+        for (Map.Entry<String, String> e : details.entrySet()) {
+            assertTrue(e.getValue().length() <= 255, "chunk " + e.getKey() + " exceeds 255");
+        }
+        assertEquals(jwt.toString(), LightbitsPoolConfig.readChunked(details, "jwt"));
+    }
+
+    @Test
+    void readChunkedReturnsNullWhenAbsent() {
+        assertEquals(null, LightbitsPoolConfig.readChunked(new HashMap<>(), "jwt"));
+    }
+
+    @Test
     void fromDetailsRejectsMissingRequiredKeys() {
         Map<String, String> incomplete = new HashMap<>();
         incomplete.put(LightbitsPoolConfig.KEY_API_HOST, "h");

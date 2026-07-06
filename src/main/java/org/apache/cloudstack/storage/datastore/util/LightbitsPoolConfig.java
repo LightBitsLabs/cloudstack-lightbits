@@ -140,6 +140,34 @@ public class LightbitsPoolConfig {
         return "https://" + apiHost + ":" + apiPort;
     }
 
+    /**
+     * CloudStack storage_pool_details.value is varchar(255), but a LightOS JWT (~570 chars,
+     * longer once encrypted) does not fit. Store long values chunked across rows:
+     * {@code base}={count}, {@code base.0}, {@code base.1}, ... each <= CHUNK chars.
+     */
+    public static final int CHUNK = 240;
+
+    public static void putChunked(Map<String, String> details, String base, String value) {
+        int n = (value.length() + CHUNK - 1) / CHUNK;
+        details.put(base, String.valueOf(n));
+        for (int i = 0; i < n; i++) {
+            details.put(base + "." + i, value.substring(i * CHUNK, Math.min((i + 1) * CHUNK, value.length())));
+        }
+    }
+
+    public static String readChunked(Map<String, String> details, String base) {
+        String countStr = details.get(base);
+        if (countStr == null) {
+            return null;
+        }
+        int n = Integer.parseInt(countStr);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            sb.append(details.getOrDefault(base + "." + i, ""));
+        }
+        return sb.toString();
+    }
+
     private static Map<String, String> parseQuery(String raw) {
         Map<String, String> m = new HashMap<>();
         if (raw == null || raw.isBlank()) {
