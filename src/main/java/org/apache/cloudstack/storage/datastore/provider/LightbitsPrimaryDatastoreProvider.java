@@ -41,28 +41,42 @@ public class LightbitsPrimaryDatastoreProvider implements DataStoreProvider {
         return PROVIDER_NAME;
     }
 
+    // Lazy-init getters: the provider registry captures getHostListener()/getDataStoreDriver()
+    // at registration time, which can precede configure() depending on the registration path.
+    // Initializing on first access guarantees a non-null instance regardless of ordering
+    // (a null host listener here NPEs connectHostToSharedPool and wedges hosts).
+
     @Override
-    public DataStoreLifeCycle getDataStoreLifeCycle() {
+    public synchronized DataStoreLifeCycle getDataStoreLifeCycle() {
+        if (lifeCycle == null) {
+            lifeCycle = ComponentContext.inject(LightbitsPrimaryDataStoreLifeCycle.class);
+        }
         return lifeCycle;
     }
 
     @Override
-    public DataStoreDriver getDataStoreDriver() {
+    public synchronized DataStoreDriver getDataStoreDriver() {
+        if (driver == null) {
+            driver = ComponentContext.inject(LightbitsPrimaryDataStoreDriver.class);
+        }
         return driver;
     }
 
     @Override
-    public HypervisorHostListener getHostListener() {
+    public synchronized HypervisorHostListener getHostListener() {
+        if (hostListener == null) {
+            hostListener = ComponentContext.inject(LightbitsHostListener.class);
+        }
         return hostListener;
     }
 
     @Override
     public boolean configure(Map<String, Object> params) {
-        // ComponentContext.inject wires @Inject fields (e.g. PrimaryDataStoreHelper) —
-        // the standard pattern for out-of-tree storage plugins (SolidFire/Linstor/ScaleIO).
-        lifeCycle = ComponentContext.inject(LightbitsPrimaryDataStoreLifeCycle.class);
-        driver = ComponentContext.inject(LightbitsPrimaryDataStoreDriver.class);
-        hostListener = ComponentContext.inject(LightbitsHostListener.class);
+        // Eagerly initialize (idempotent with the lazy getters). ComponentContext.inject
+        // wires @Inject fields — the standard out-of-tree pattern (SolidFire/Linstor/ScaleIO).
+        getDataStoreLifeCycle();
+        getDataStoreDriver();
+        getHostListener();
         return true;
     }
 
