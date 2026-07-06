@@ -34,6 +34,7 @@ public class LightbitsPrimaryDatastoreProvider implements DataStoreProvider {
 
     private DataStoreLifeCycle lifeCycle;
     private DataStoreDriver driver;
+    private HypervisorHostListener hostListener;
 
     @Override
     public String getName() {
@@ -52,8 +53,7 @@ public class LightbitsPrimaryDatastoreProvider implements DataStoreProvider {
 
     @Override
     public HypervisorHostListener getHostListener() {
-        // TODO: host listener wiring KVM hosts to the storage pool (connect/disconnect hooks)
-        return null;
+        return hostListener;
     }
 
     @Override
@@ -62,6 +62,7 @@ public class LightbitsPrimaryDatastoreProvider implements DataStoreProvider {
         // the standard pattern for out-of-tree storage plugins (SolidFire/Linstor/ScaleIO).
         lifeCycle = ComponentContext.inject(LightbitsPrimaryDataStoreLifeCycle.class);
         driver = ComponentContext.inject(LightbitsPrimaryDataStoreDriver.class);
+        hostListener = ComponentContext.inject(LightbitsHostListener.class);
         return true;
     }
 
