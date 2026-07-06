@@ -25,9 +25,12 @@ import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreProvider;
 import org.apache.cloudstack.engine.subsystem.api.storage.HypervisorHostListener;
 import org.apache.cloudstack.storage.datastore.driver.LightbitsPrimaryDataStoreDriver;
 import org.apache.cloudstack.storage.datastore.lifecycle.LightbitsPrimaryDataStoreLifeCycle;
+import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
+
+import com.cloud.utils.component.ComponentContext;
 
 public class LightbitsPrimaryDatastoreProvider implements DataStoreProvider {
-    public static final String PROVIDER_NAME = "Lightbits";
+    public static final String PROVIDER_NAME = LightbitsUtil.PROVIDER_NAME;
 
     private DataStoreLifeCycle lifeCycle;
     private DataStoreDriver driver;
@@ -55,8 +58,10 @@ public class LightbitsPrimaryDatastoreProvider implements DataStoreProvider {
 
     @Override
     public boolean configure(Map<String, Object> params) {
-        lifeCycle = new LightbitsPrimaryDataStoreLifeCycle();
-        driver = new LightbitsPrimaryDataStoreDriver();
+        // ComponentContext.inject wires @Inject fields (e.g. PrimaryDataStoreHelper) —
+        // the standard pattern for out-of-tree storage plugins (SolidFire/Linstor/ScaleIO).
+        lifeCycle = ComponentContext.inject(LightbitsPrimaryDataStoreLifeCycle.class);
+        driver = ComponentContext.inject(LightbitsPrimaryDataStoreDriver.class);
         return true;
     }
 

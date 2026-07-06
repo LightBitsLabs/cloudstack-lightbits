@@ -17,22 +17,32 @@ package org.apache.cloudstack.storage.datastore.lifecycle;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
+
+import javax.inject.Inject;
 
 import org.apache.cloudstack.engine.subsystem.api.storage.ClusterScope;
 import org.apache.cloudstack.engine.subsystem.api.storage.DataStore;
 import org.apache.cloudstack.engine.subsystem.api.storage.HostScope;
 import org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreLifeCycle;
+import org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreParameters;
 import org.apache.cloudstack.engine.subsystem.api.storage.ZoneScope;
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
 import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
 import org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig;
+import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
+import org.apache.cloudstack.storage.volume.datastore.PrimaryDataStoreHelper;
 
 import com.cloud.agent.api.StoragePoolInfo;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.hypervisor.Hypervisor.HypervisorType;
 import com.cloud.storage.StoragePool;
+import com.cloud.utils.crypt.DBEncryptionUtil;
 
 public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeCycle {
+
+    @Inject
+    PrimaryDataStoreHelper dataStoreHelper;
 
     /**
      * Parse + validate pool params and preflight the cluster (auth, project, health,
@@ -98,42 +108,69 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     @Override
     public DataStore initialize(Map<String, Object> dsInfos) {
-        // preflight validates params + cluster reachability/health up front
-        preflight(dsInfos);
-        // TODO(M1): build PrimaryDataStoreParameters (managed=true, custom type),
-        // encrypt JWT into storage_pool_details, and register via PrimaryDataStoreHelper.
-        // Exercised by the live/Marvin path (needs Spring-managed context).
-        throw new UnsupportedOperationException("Lightbits plugin: pool registration wiring lands with the live path");
+        PreflightResult pf = preflight(dsInfos);
+
+        String name = (String) dsInfos.get("name");
+        Long zoneId = (Long) dsInfos.get("zoneId");
+        Long podId = (Long) dsInfos.get("podId");
+        Long clusterId = (Long) dsInfos.get("clusterId");
+
+        // Persist config as pool details; the JWT is encrypted at rest (never stored cleartext).
+        Map<String, String> details = new HashMap<>(pf.detailsWithoutSecret);
+        details.put(LightbitsPoolConfig.KEY_JWT, DBEncryptionUtil.encrypt(pf.config.getJwt()));
+
+        PrimaryDataStoreParameters params = new PrimaryDataStoreParameters();
+        params.setType(LightbitsUtil.POOL_TYPE);   // v1: IscsiLUN (see LightbitsUtil / decision log Q3)
+        params.setUuid(UUID.randomUUID().toString());
+        params.setName(name);
+        params.setProviderName((String) dsInfos.get("providerName"));
+        params.setManaged(true);
+        params.setCapacityBytes(pf.capacityBytes);
+        params.setUsedBytes(0);
+        params.setHypervisorType(HypervisorType.KVM);
+        params.setZoneId(zoneId);
+        params.setPodId(podId);
+        params.setClusterId(clusterId);
+        params.setDetails(details);
+        params.setTags((String) dsInfos.get("tags"));
+
+        return dataStoreHelper.createPrimaryDataStore(params);
     }
+
+    // M1 attach is DB-level only: mark the pool attached/Up. Host storage connection
+    // (connectHostToSharedPool -> KVM StorageAdaptor) is deferred to M2, when the
+    // NVMe/TCP adaptor exists. See decision log (2026-07-06).
 
     @Override
     public boolean attachCluster(DataStore store, ClusterScope scope) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        dataStoreHelper.attachCluster(store);
+        return true;
     }
 
     @Override
     public boolean attachHost(DataStore store, HostScope scope, StoragePoolInfo existingInfo) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        return true;
     }
 
     @Override
     public boolean attachZone(DataStore dataStore, ZoneScope scope, HypervisorType hypervisorType) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        dataStoreHelper.attachZone(dataStore, hypervisorType);
+        return true;
     }
 
     @Override
     public boolean maintain(DataStore store) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        return dataStoreHelper.maintain(store);
     }
 
     @Override
     public boolean cancelMaintain(DataStore store) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        return dataStoreHelper.cancelMaintain(store);
     }
 
     @Override
     public boolean deleteDataStore(DataStore store) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        return dataStoreHelper.deletePrimaryDataStore(store);
     }
 
     @Override
@@ -143,26 +180,26 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     @Override
     public void updateStoragePool(StoragePool storagePool, Map<String, String> details) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        // capacity is refreshed from the cluster via the driver's stats; nothing to do here yet
     }
 
     @Override
     public void enableStoragePool(DataStore store) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        dataStoreHelper.enable(store);
     }
 
     @Override
     public void disableStoragePool(DataStore store) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        dataStoreHelper.disable(store);
     }
 
     @Override
     public void changeStoragePoolScopeToZone(DataStore store, ClusterScope clusterScope, Hypervisor.HypervisorType hypervisorType) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        throw new UnsupportedOperationException("Lightbits plugin: scope change not supported yet");
     }
 
     @Override
     public void changeStoragePoolScopeToCluster(DataStore store, ClusterScope clusterScope, Hypervisor.HypervisorType hypervisorType) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        throw new UnsupportedOperationException("Lightbits plugin: scope change not supported yet");
     }
 }
