@@ -22,8 +22,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.cloudstack.utils.qemu.QemuImg.PhysicalDiskFormat;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import com.cloud.storage.Storage;
 import com.cloud.storage.Storage.StoragePoolType;
@@ -39,7 +39,7 @@ import com.cloud.utils.script.Script;
  * by the Lightbits volume UUID at /dev/disk/by-id/nvme-uuid.<UUID>.
  */
 public class LightbitsStorageAdaptor implements StorageAdaptor {
-    private static final Logger LOG = LoggerFactory.getLogger(LightbitsStorageAdaptor.class);
+    private static final Logger LOG = LogManager.getLogger(LightbitsStorageAdaptor.class);
 
     private static final Map<String, KVMStoragePool> POOLS = new ConcurrentHashMap<>();
     private static final int DISCOVERY_PORT = 8009;
@@ -59,7 +59,8 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
                                             StoragePoolType type, Map<String, String> details, boolean isPrimaryStorage) {
         LightbitsStoragePool pool = new LightbitsStoragePool(uuid, host, port, getStoragePoolType(), this, details);
         POOLS.put(uuid, pool);
-        LOG.info("Registered Lightbits storage pool {} (discovery host {})", uuid, host);
+        LOG.info("Lightbits createStoragePool: registered pool {} host {} port {} (POOLS now has {})",
+                uuid, host, port, POOLS.keySet());
         return pool;
     }
 
@@ -71,18 +72,18 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     @Override
     public KVMStoragePool getStoragePool(String uuid, boolean refreshInfo) {
         KVMStoragePool pool = POOLS.get(uuid);
-        if (pool == null) {
-            // The pool may not have been registered on this agent yet (no ModifyStoragePool
-            // seen). Return a lightweight handle; connect uses the volume/pool details.
-            LOG.debug("Lightbits pool {} not yet cached on this agent", uuid);
-        }
+        LOG.info("Lightbits getStoragePool({}) -> {} (cached: {})", uuid,
+                pool == null ? "NULL" : "found", POOLS.keySet());
         return pool;
     }
 
     @Override
     public boolean connectPhysicalDisk(String volumePath, KVMStoragePool pool, Map<String, String> details, boolean isVMMigrate) {
+        LOG.info("Lightbits connectPhysicalDisk: volumePath={} pool={}", volumePath,
+                pool == null ? "null" : pool.getUuid());
         if (volumePath == null || pool == null) {
-            throw new CloudRuntimeException("Lightbits connectPhysicalDisk: missing volume path or pool");
+            throw new CloudRuntimeException("Lightbits connectPhysicalDisk: missing volume path ("
+                    + volumePath + ") or pool (" + (pool == null ? "null" : pool.getUuid()) + ")");
         }
         ensureNvmeTcpModule();
         // Discovery-connect to the cluster; all volumes ACL'd to this host's NQN attach.

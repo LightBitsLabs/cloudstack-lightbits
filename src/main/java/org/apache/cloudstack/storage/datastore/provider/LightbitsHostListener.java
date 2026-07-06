@@ -19,8 +19,8 @@ import javax.inject.Inject;
 
 import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreManager;
 import org.apache.cloudstack.engine.subsystem.api.storage.HypervisorHostListener;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.ModifyStoragePoolCommand;
@@ -46,7 +46,7 @@ import com.cloud.utils.exception.CloudRuntimeException;
  * exists; returning null NPEs and wedges the host in Alert.
  */
 public class LightbitsHostListener implements HypervisorHostListener {
-    private static final Logger LOG = LoggerFactory.getLogger(LightbitsHostListener.class);
+    private static final Logger LOG = LogManager.getLogger(LightbitsHostListener.class);
 
     @Inject
     private AgentManager agentMgr;
@@ -64,6 +64,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
 
     @Override
     public boolean hostConnect(long hostId, long poolId) {
+        LOG.info("Lightbits hostConnect: host={} pool={}", hostId, poolId);
         StoragePool pool = (StoragePool) dataStoreMgr.getDataStore(poolId, DataStoreRole.Primary);
 
         StoragePoolHostVO association = storagePoolHostDao.findByPoolHost(poolId, hostId);
