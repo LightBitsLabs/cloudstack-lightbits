@@ -32,12 +32,15 @@ import org.apache.cloudstack.engine.subsystem.api.storage.TemplateInfo;
 import org.apache.cloudstack.engine.subsystem.api.storage.VolumeInfo;
 import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
 import org.apache.cloudstack.storage.command.CommandResult;
+import org.apache.cloudstack.storage.command.CreateObjectAnswer;
+import org.apache.cloudstack.storage.to.VolumeObjectTO;
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
 import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
 import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
 import org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig;
 import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
 
+import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.to.DataObjectType;
 import com.cloud.agent.api.to.DataStoreTO;
 import com.cloud.agent.api.to.DataTO;
@@ -99,6 +102,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     public void createAsync(DataStore store, DataObject data, AsyncCompletionCallback<CreateCmdResult> callback) {
         String path = null;
         String errMsg = null;
+        Answer answer = new Answer(null, false, "not started");
         try {
             if (data.getType() == DataObjectType.VOLUME) {
                 VolumeInfo vol = (VolumeInfo) data;
@@ -107,16 +111,30 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                         clientFor(cfg).createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid()),
                                 vol.getSize(), cfg.getReplicaCount(), null);
-                // path identifies the backing volume; the M2 KVM adaptor resolves the NVMe
-                // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>).
+                // path identifies the backing volume; the KVM adaptor resolves the NVMe
+                // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>). The path must be
+                // returned inside a VolumeObjectTO so CloudStack persists it on the volume.
                 path = created.getUuid();
+                VolumeObjectTO to = (VolumeObjectTO) vol.getTO();
+                to.setPath(path);
+                answer = new CreateObjectAnswer(to);
             } else {
                 errMsg = "Lightbits plugin: createAsync supports VOLUME only (got " + data.getType() + ")";
+                answer = new Answer(null, false, errMsg);
             }
         } catch (Exception e) {
             errMsg = e.getMessage();
+            answer = new Answer(null, false, errMsg);
         }
-        completeCreate(callback, path, errMsg);
+        if (callback == null) {
+            if (errMsg != null) {
+                throw new CloudRuntimeException(errMsg);
+            }
+            return;
+        }
+        CreateCmdResult result = new CreateCmdResult(path, answer);
+        result.setResult(errMsg);
+        callback.complete(result);
     }
 
     @Override
