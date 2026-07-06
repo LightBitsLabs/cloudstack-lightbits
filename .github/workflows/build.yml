@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache CloudStack artifacts
+        id: cache-cloudstack
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/apache/cloudstack
+          key: cloudstack-4.22.0.0-m2
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ hashFiles('pom.xml') }}
+          restore-keys: m2-
+
+      # CloudStack does not publish artifacts to Maven Central; build the modules
+      # this plugin compiles against from source (cached across runs).
+      - name: Build CloudStack modules from source
+        if: steps.cache-cloudstack.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 4.22.0.0 https://github.com/apache/cloudstack.git /tmp/cloudstack
+          cd /tmp/cloudstack
+          mvn -B -q -DskipTests -Dmaven.javadoc.skip=true install \
+            -pl api,core,engine/api,engine/storage,engine/storage/volume,framework/ipc -am
+
+      - name: Compile plugin
+        run: mvn -B compile

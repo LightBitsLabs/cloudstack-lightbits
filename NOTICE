@@ -1,0 +1,7 @@
+cloudstack-lightbits
+Copyright 2026 Lightbits Labs Ltd.
+
+This product includes software developed at Lightbits Labs (https://www.lightbitslabs.com).
+
+Interfaces implemented in this plugin are defined by Apache CloudStack
+(https://cloudstack.apache.org), licensed under the Apache License 2.0.
