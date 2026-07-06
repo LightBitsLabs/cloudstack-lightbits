@@ -53,6 +53,11 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Inject
     private StoragePoolDetailsDao storagePoolDetailsDao;
+    @Inject
+    private com.cloud.host.dao.HostDetailsDao hostDetailsDao;
+
+    /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
+    public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
 
     /** Build an API client for a pool (by id) from its persisted (JWT-encrypted) details. */
     LightbitsApiClient clientForPool(long poolId) {
@@ -184,15 +189,51 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean grantAccess(DataObject dataObject, Host host, DataStore dataStore) {
-        // Adds the host's NQN to the volume ACL. Requires the host NQN, which is sourced
-        // and persisted by the HostListener/agent — delivered in M2. Until then, attach
-        // is not wired, so this is not reached in the M1 (control-plane) scope.
-        throw new UnsupportedOperationException("Lightbits plugin: host attach (grantAccess) lands in M2");
+        String nqn = hostNqn(host);
+        LightbitsApiClient client = clientForPool(dataStore.getId());
+        String name = LightbitsUtil.volumeName(dataObject.getUuid());
+        org.apache.cloudstack.storage.datastore.client.model.Volume v = client.getVolumeByName(name)
+                .orElseThrow(() -> new CloudRuntimeException("grantAccess: volume not found on cluster: " + name));
+        java.util.List<String> acl = currentAcl(v);
+        if (!acl.contains(nqn)) {
+            acl.add(nqn);
+            client.updateVolumeAcl(v.getUuid(), acl);
+        }
+        return true;
     }
 
     @Override
     public void revokeAccess(DataObject dataObject, Host host, DataStore dataStore) {
-        throw new UnsupportedOperationException("Lightbits plugin: host detach (revokeAccess) lands in M2");
+        String nqn = hostNqn(host);
+        LightbitsApiClient client = clientForPool(dataStore.getId());
+        String name = LightbitsUtil.volumeName(dataObject.getUuid());
+        client.getVolumeByName(name).ifPresent(v -> {
+            java.util.List<String> acl = currentAcl(v);
+            if (acl.remove(nqn)) {
+                client.updateVolumeAcl(v.getUuid(), acl);
+            }
+        });
+    }
+
+    private String hostNqn(Host host) {
+        com.cloud.host.DetailVO detail = hostDetailsDao.findDetail(host.getId(), HOST_NQN_DETAIL);
+        if (detail == null || detail.getValue() == null || detail.getValue().isBlank()) {
+            throw new CloudRuntimeException("host " + host.getId() + " has no '" + HOST_NQN_DETAIL
+                    + "' detail; cannot grant Lightbits volume access. (M2: HostListener should auto-populate this.)");
+        }
+        return detail.getValue();
+    }
+
+    private java.util.List<String> currentAcl(org.apache.cloudstack.storage.datastore.client.model.Volume v) {
+        java.util.List<String> acl = new java.util.ArrayList<>();
+        if (v.getAcl() != null && v.getAcl().getValues() != null) {
+            for (String val : v.getAcl().getValues()) {
+                if (!"ALLOW_NONE".equals(val)) {
+                    acl.add(val);
+                }
+            }
+        }
+        return acl;
     }
 
     @Override
@@ -257,6 +298,12 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     @Override
     public Pair<Long, Long> getVolumeStats(StoragePool storagePool, String volumeId) {
         throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+    }
+
+    @Override
+    public boolean volumesRequireGrantAccessWhenUsed() {
+        // NVMe/TCP volumes must be ACL'd to the host NQN before the agent can connect them.
+        return true;
     }
 
     @Override
