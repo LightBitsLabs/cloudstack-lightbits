@@ -1,22 +1,20 @@
-# Architecture (design sketch)
-
-> Working draft — this document describes the intended design; almost none of it is implemented yet.
+# Architecture
 
 ## Overview
 
 The plugin implements CloudStack **managed primary storage**: each CloudStack volume maps 1:1 to a Lightbits volume, provisioned on demand and attached to KVM hosts over NVMe/TCP.
 
 ```
-┌─────────────────────────────┐        REST API (443)      ┌──────────────────┐
-│ CloudStack Management Server │ ─────────────────────────▶ │                  │
-│  LightbitsPrimaryDataStore-  │   volume lifecycle, ACLs,  │ Lightbits cluster │
-│  Provider/LifeCycle/Driver   │   snapshots, stats         │                  │
-└─────────────────────────────┘                             │                  │
-┌─────────────────────────────┐      NVMe/TCP (4420)        │                  │
-│ KVM host (cloudstack-agent)  │ ─────────────────────────▶ │                  │
-│  Lightbits StorageAdaptor    │   block I/O                └──────────────────┘
-│  nvme-cli / nvme_tcp         │
-└─────────────────────────────┘
+┌──────────────────────────────┐      REST API (443)       ┌───────────────────┐
+│ CloudStack Management Server │ ────────────────────────▶ │                   │
+│  LightbitsPrimaryDataStore-  │  volume lifecycle, ACLs,  │                   │
+│  Provider/LifeCycle/Driver   │  snapshots, stats         │                   │
+└──────────────────────────────┘                           │ Lightbits cluster │
+┌──────────────────────────────┐      NVMe/TCP (4420)      │                   │
+│ KVM host (cloudstack-agent)  │ ────────────────────────▶ │                   │
+│  Lightbits StorageAdaptor    │  block I/O                │                   │
+│  nvme-cli / nvme_tcp         │                           └───────────────────┘
+└──────────────────────────────┘
 ```
 
 ## Management-server side
