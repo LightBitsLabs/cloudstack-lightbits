@@ -27,15 +27,19 @@ The plugin implements CloudStack **managed primary storage**: each CloudStack vo
 
 Control-path client: thin HTTPS/JSON client for the Lightbits REST API (JWT auth). **v1 targets a single Lightbits cluster per storage pool.** The endpoint is a plain configuration value, so richer Lightbits management endpoints (multi-cluster, data-management services) can be targeted in the future without plugin rework.
 
-## KVM agent side (not started)
+## KVM agent side (implemented)
 
-A `StorageAdaptor` implementation on the CloudStack KVM agent:
+`LightbitsStorageAdaptor` on the CloudStack KVM agent (auto-loaded via the agent's package
+scan — the jar just needs to be on the agent classpath):
 
-- `nvme connect`/`disconnect` (or the Lightbits discovery-client for multi-path/ANA failover)
-- device resolution by volume NQN/GUID
-- hands the raw block device to libvirt/QEMU
+- `nvme connect`/`disconnect` over NVMe/TCP; device resolution by the Lightbits volume UUID
+  at `/dev/disk/by-id/nvme-uuid.<uuid>`
+- hands the raw block device to libvirt/QEMU (attach/detach)
+- `grantAccess`/`revokeAccess` map the host's NVMe NQN into the volume ACL at attach/detach time
 
-Host prerequisites: `nvme_tcp` kernel module, `nvme-cli`, unique host NQN registered with the cluster.
+Host prerequisites: `nvme_tcp` kernel module and `nvme-cli`. The host NQN is registered with
+the cluster automatically — the HostListener reads `/etc/nvme/hostnqn` on host connect and
+stores it as a host detail (no manual step).
 
 ## Tenancy mapping
 
@@ -43,4 +47,7 @@ CloudStack account/domain → Lightbits project. Pool-level default project init
 
 ## Delivery model
 
-Ships as a **standalone out-of-tree plugin** installed onto existing CloudStack deployments (StorPool precedent), built against a source-built CloudStack. The layout deliberately matches what an in-tree `plugins/storage/volume/lightbits` module would look like (see the Linstor plugin, apache/cloudstack#4994), so upstream contribution remains a low-cost future option.
+Ships as a **standalone out-of-tree plugin** installed onto existing CloudStack deployments,
+built against a source-built CloudStack. The layout deliberately matches what an in-tree
+`plugins/storage/volume/lightbits` module would look like, so upstream contribution remains a
+low-cost future option.
