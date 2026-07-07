@@ -250,15 +250,17 @@ public class LightbitsApiClient {
 
     public Optional<Snapshot> getSnapshotByName(String name) {
         Map<String, String> q = new HashMap<>();
-        q.put("name", name);
+        // The snapshots list filter is case-sensitively mapped to the proto field 'Name'
+        // (capital N) — lowercase 'name' is SILENTLY IGNORED and the full list comes back,
+        // unlike the volumes endpoint which takes lowercase 'name'/'project_name'.
+        q.put("Name", name);
         String resp = execute("GET", projectColl("snapshots") + query(q), null);
         try {
             JsonNode root = mapper.readTree(resp);
             for (JsonNode n : root.path("snapshots")) {
                 Snapshot s = mapper.treeToValue(n, Snapshot.class);
-                // LightOS ignores the 'name' query param on the snapshot list (returns ALL
-                // snapshots), so filter by exact name client-side — taking the first entry
-                // blindly returned an arbitrary snapshot.
+                // exact-match client-side regardless — unknown params being silently ignored
+                // means server-side filtering can never be fully trusted here
                 if (!s.isDeletedOrDeleting() && name.equals(s.getName())) {
                     return Optional.of(s);
                 }
