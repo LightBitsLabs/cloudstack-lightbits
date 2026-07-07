@@ -41,16 +41,18 @@ provider is present:
 cmk list storageproviders type=primary | grep -i lightbits    # or check the UI provider list
 ```
 
-## 2. Register the host NVMe NQN (until auto-discovery lands)
+## 2. Host NVMe NQN (automatic)
 
-The plugin ACLs each volume to the connecting host's NVMe NQN. Until the host listener
-populates this automatically, set it once per KVM host:
+The plugin ACLs each volume to the connecting host's NVMe NQN. The host listener populates
+this automatically when a host connects while a Lightbits pool exists: the agent reports
+`/etc/nvme/hostnqn` (generating and pinning one via `nvme show-hostnqn` if the file is
+missing), and the listener stores it as the `nvme.hostnqn` host detail. Nothing to do —
+verify per host if desired:
 ```bash
-HOST_NQN=$(cat /etc/nvme/hostnqn)     # on the KVM host
-# on the management server, via API/cmk, for that host id:
-cmk add resourcedetail resourcetype=Host resourceid=<hostId> \
-    details[0].key=nvme.hostnqn details[0].value="$HOST_NQN"
+cmk list resourcedetails resourcetype=Host resourceid=<hostId> key=nvme.hostnqn
 ```
+If it is missing (e.g. nvme-cli was absent at connect time — the management log carries a
+warning), install nvme-cli on the host and reconnect the host.
 
 ## 3. Add the primary storage pool
 

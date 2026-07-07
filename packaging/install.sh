@@ -48,7 +48,7 @@ if [[ -d "$AGENT_LIB" ]]; then
     modprobe nvme-tcp 2>/dev/null && echo "nvme_tcp: loaded" || echo "WARN: could not load nvme_tcp module"
     [[ -f /etc/nvme/hostnqn ]] || { nvme gen-hostnqn > /etc/nvme/hostnqn 2>/dev/null && echo "generated /etc/nvme/hostnqn"; }
     echo "    host NQN: $(cat /etc/nvme/hostnqn 2>/dev/null || echo '(unavailable)')"
-    echo "    (register this NQN on the host via 'nvme.hostnqn' detail — see INSTALL.md)"
+    echo "    (auto-registered as the 'nvme.hostnqn' host detail on host connect)"
 fi
 
 echo ">>> done. Register a pool with provider=Lightbits (see INSTALL.md)."
