@@ -68,6 +68,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     private com.cloud.host.dao.HostDetailsDao hostDetailsDao;
     @Inject
     private EndPointSelector selector;
+    @Inject
+    private com.cloud.storage.dao.VMTemplatePoolDao vmTemplatePoolDao;
 
     /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
     public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
@@ -139,6 +141,17 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), tmpl.getUuid()),
                                 size, cfg.getReplicaCount(), null);
                 path = created.getUuid();
+                // The managed-template flow calls processEvent(OperationSucceeded) WITHOUT the
+                // answer, so the framework does not persist our path. Set install_path on the
+                // template_spool_ref ourselves (SolidFire/ScaleIO pattern) so the copy + attach
+                // reach the device by the Lightbits volume UUID.
+                com.cloud.storage.VMTemplateStoragePoolVO ref =
+                        vmTemplatePoolDao.findByPoolTemplate(store.getId(), tmpl.getId(), null);
+                if (ref != null) {
+                    ref.setInstallPath(path);
+                    ref.setLocalDownloadPath(path);
+                    vmTemplatePoolDao.update(ref.getId(), ref);
+                }
                 TemplateObjectTO to = (TemplateObjectTO) tmpl.getTO();
                 to.setPath(path);
                 answer = new CreateObjectAnswer(to);
