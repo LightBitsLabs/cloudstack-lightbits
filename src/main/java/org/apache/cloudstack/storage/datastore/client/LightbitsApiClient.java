@@ -208,7 +208,9 @@ public class LightbitsApiClient {
         body.put("sourceVolumeUUID", sourceVolumeUuid);
         body.put("projectName", project);
         try {
-            return parse(execute("POST", "/api/v2/snapshots", body.toString()), Snapshot.class);
+            // Snapshots live under the project-scoped collection; the non-scoped
+            // /api/v2/snapshots route does not exist on LightOS (404).
+            return parse(execute("POST", projectColl("snapshots"), body.toString()), Snapshot.class);
         } catch (LightbitsApiException e) {
             if (e.getKind() == Kind.CONFLICT) {
                 return getSnapshotByName(name).orElseThrow(() -> e);
@@ -220,8 +222,7 @@ public class LightbitsApiClient {
     public Optional<Snapshot> getSnapshotByName(String name) {
         Map<String, String> q = new HashMap<>();
         q.put("name", name);
-        q.put("project_name", project);
-        String resp = execute("GET", "/api/v2/snapshots" + query(q), null);
+        String resp = execute("GET", projectColl("snapshots") + query(q), null);
         try {
             JsonNode root = mapper.readTree(resp);
             for (JsonNode n : root.path("snapshots")) {
@@ -237,9 +238,11 @@ public class LightbitsApiClient {
     }
 
     /** Create a volume cloned from a snapshot (template-from-snapshot / volume-from-snapshot). */
-    public Volume createVolumeFromSnapshot(String name, String snapshotUuid, int replicaCount, List<String> aclNqns) {
+    public Volume createVolumeFromSnapshot(String name, String snapshotUuid, long sizeBytes, int replicaCount, List<String> aclNqns) {
         ObjectNode body = mapper.createObjectNode();
         body.put("name", name);
+        // LightOS requires an explicit size even when cloning; it must be >= the snapshot size.
+        body.put("size", String.valueOf(sizeBytes));
         body.put("projectName", project);
         body.put("replicaCount", replicaCount);
         body.put("sourceSnapshotUUID", snapshotUuid);
@@ -270,7 +273,11 @@ public class LightbitsApiClient {
     // ---------------- internals ----------------
 
     private String projectPath(String kind, String uuid) {
-        return "/api/v2/projects/" + urlenc(project) + "/" + kind + "/" + uuid;
+        return projectColl(kind) + "/" + uuid;
+    }
+
+    private String projectColl(String kind) {
+        return "/api/v2/projects/" + urlenc(project) + "/" + kind;
     }
 
     private Optional<Volume> firstLiveVolume(String listResponse) {

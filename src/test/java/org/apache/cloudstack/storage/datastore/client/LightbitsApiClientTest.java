@@ -201,7 +201,7 @@ class LightbitsApiClientTest {
 
     @Test
     void createSnapshotSendsProjectAndSource() {
-        wm.stubFor(post(urlEqualTo("/api/v2/snapshots"))
+        wm.stubFor(post(urlEqualTo("/api/v2/projects/default/snapshots"))
                 .withRequestBody(matchingJsonPath("$.projectName", equalTo(PROJECT)))
                 .withRequestBody(matchingJsonPath("$.sourceVolumeUUID", equalTo(VOL_UUID)))
                 .willReturn(aResponse().withStatus(200).withBody(
@@ -220,8 +220,9 @@ class LightbitsApiClientTest {
     void createVolumeFromSnapshotClones() {
         wm.stubFor(post(urlEqualTo("/api/v2/volumes"))
                 .withRequestBody(matchingJsonPath("$.sourceSnapshotUUID", equalTo("snap-1")))
+                .withRequestBody(matchingJsonPath("$.size", equalTo("1073741824")))
                 .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
-        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 3, null);
+        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null);
         assertEquals(VOL_UUID, v.getUuid());
     }
 

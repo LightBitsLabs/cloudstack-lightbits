@@ -35,6 +35,7 @@ import org.apache.cloudstack.engine.subsystem.api.storage.EndPointSelector;
 import org.apache.cloudstack.framework.async.AsyncCompletionCallback;
 import org.apache.cloudstack.storage.RemoteHostEndPoint;
 import org.apache.cloudstack.storage.command.CommandResult;
+import org.apache.cloudstack.storage.command.CopyCmdAnswer;
 import org.apache.cloudstack.storage.command.CopyCommand;
 import org.apache.cloudstack.storage.command.CreateObjectAnswer;
 import org.apache.cloudstack.storage.to.TemplateObjectTO;
@@ -53,7 +54,9 @@ import com.cloud.agent.api.to.DataObjectType;
 import com.cloud.agent.api.to.DataStoreTO;
 import com.cloud.agent.api.to.DataTO;
 import com.cloud.host.Host;
+import com.cloud.storage.DataStoreRole;
 import com.cloud.storage.Storage.StoragePoolType;
+import com.cloud.storage.VolumeVO;
 import com.cloud.storage.StoragePool;
 import com.cloud.storage.Volume;
 import com.cloud.utils.Pair;
@@ -70,6 +73,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     private EndPointSelector selector;
     @Inject
     private com.cloud.storage.dao.VMTemplatePoolDao vmTemplatePoolDao;
+    @Inject
+    private com.cloud.storage.dao.VolumeDao volumeDao;
 
     /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
     public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
@@ -97,6 +102,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         caps.put("STORAGE_SYSTEM_SNAPSHOT", "true");
         caps.put("CAN_CREATE_VOLUME_FROM_SNAPSHOT", "true");
         caps.put("CAN_CREATE_VOLUME_FROM_VOLUME", "true");
+        // Materialize root volumes from a cached template with a native Lightbits
+        // snapshot+clone (instant, no agent qemu-img). Drives root-disk-from-template boot
+        // via StorageSystemDataMotionStrategy.handleCreateVolumeFromTemplateBothOnStorageSystem.
+        caps.put("CAN_CLONE_VOLUME_FROM_TEMPLATE", "true");
         return caps;
     }
 
@@ -202,11 +211,32 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public void copyAsync(DataObject srcData, DataObject destData, Host destHost, AsyncCompletionCallback<CopyCommandResult> callback) {
-        // Delegate the actual data copy (template -> Lightbits volume, or volume->volume) to a
-        // KVM host via a CopyCommand. The agent connects the dest volume (our adaptor) and runs
-        // createDiskFromTemplate/qemu-img. This drives root-disk-from-template boot.
         Answer answer;
         String errMsg = null;
+
+        // Storage-side clone: when the source (a cached template, or another volume) already
+        // lives on THIS primary storage, materialize the destination volume with a native
+        // Lightbits snapshot+clone -- instant, no agent qemu-img. This is the
+        // CAN_CLONE_VOLUME_FROM_TEMPLATE path (StorageSystemDataMotionStrategy) and it drives
+        // root-disk-from-template boot. NB: the framework invokes this with a null callback,
+        // so the driver must persist the backing path itself.
+        boolean srcOnPrimary = srcData.getDataStore() != null
+                && srcData.getDataStore().getRole() == DataStoreRole.Primary;
+        if (destData.getType() == DataObjectType.VOLUME && srcOnPrimary
+                && (srcData.getType() == DataObjectType.TEMPLATE || srcData.getType() == DataObjectType.VOLUME)) {
+            try {
+                answer = new CopyCmdAnswer(cloneOnStorage(srcData, (VolumeInfo) destData));
+            } catch (Exception e) {
+                errMsg = e.getMessage() != null ? e.getMessage() : e.toString();
+                answer = new CopyCmdAnswer(errMsg);
+            }
+            completeCopy(callback, answer, errMsg);
+            return;
+        }
+
+        // Otherwise (e.g. secondary image-store template -> primary template cache) delegate the
+        // byte copy to a KVM host via a CopyCommand; the agent connects the dest volume (our
+        // adaptor) and runs qemu-img convert.
         try {
             int wait = StorageManager.PRIMARY_STORAGE_DOWNLOAD_WAIT.value();
             CopyCommand cmd = new CopyCommand(srcData.getTO(), destData.getTO(), wait,
@@ -222,9 +252,62 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             errMsg = e.getMessage();
             answer = new Answer(null, false, errMsg);
         }
+        if (answer != null && !answer.getResult() && errMsg == null) {
+            errMsg = answer.getDetails();
+        }
+        completeCopy(callback, answer, errMsg);
+    }
+
+    /**
+     * Create the destination volume as a native Lightbits clone of a source object already on
+     * this cluster (a cached template or another volume): snapshot the source, then create a
+     * volume from that snapshot. Persists the backing path on the volume (the clone path runs
+     * with a null callback, so the CopyCmdAnswer alone would not be applied) and returns the TO.
+     */
+    private VolumeObjectTO cloneOnStorage(DataObject srcData, VolumeInfo destVol) {
+        DataStore store = destVol.getDataStore();
+        LightbitsPoolConfig cfg = configForPool(store.getId());
+        LightbitsApiClient client = clientFor(cfg);
+
+        String srcName = LightbitsUtil.volumeName(cfg.getEnvironment(), srcData.getUuid());
+        org.apache.cloudstack.storage.datastore.client.model.Volume src = client.getVolumeByName(srcName)
+                .orElseThrow(() -> new CloudRuntimeException("clone source not found on cluster: " + srcName));
+
+        String destName = LightbitsUtil.volumeName(cfg.getEnvironment(), destVol.getUuid());
+        // Drop any empty placeholder createAsync may have pre-created under this name; the clone
+        // becomes the real backing volume.
+        client.getVolumeByName(destName).ifPresent(v -> client.deleteVolume(v.getUuid()));
+
+        org.apache.cloudstack.storage.datastore.client.model.Snapshot snap =
+                client.createSnapshot(destName + "-src", src.getUuid());
+        // Clone at the larger of the requested volume size and the source image size; LightOS
+        // requires an explicit size and rejects a clone smaller than its source.
+        long size = Math.max(destVol.getSize() != null ? destVol.getSize() : 0L, src.getSizeBytes());
+        org.apache.cloudstack.storage.datastore.client.model.Volume created =
+                client.createVolumeFromSnapshot(destName, snap.getUuid(), size, cfg.getReplicaCount(), null);
+        String path = created.getUuid();
+
+        VolumeVO vo = volumeDao.findById(destVol.getId());
+        if (vo != null) {
+            vo.setPath(path);
+            vo.setPoolId(store.getId());
+            volumeDao.update(vo.getId(), vo);
+        }
+        VolumeObjectTO to = (VolumeObjectTO) destVol.getTO();
+        to.setPath(path);
+        return to;
+    }
+
+    private void completeCopy(AsyncCompletionCallback<CopyCommandResult> callback, Answer answer, String errMsg) {
+        if (callback == null) {
+            if (errMsg != null) {
+                throw new CloudRuntimeException(errMsg);
+            }
+            return;
+        }
         CopyCommandResult result = new CopyCommandResult(null, answer);
-        if (answer != null && !answer.getResult()) {
-            result.setResult(answer.getDetails());
+        if (errMsg != null) {
+            result.setResult(errMsg);
         }
         callback.complete(result);
     }
