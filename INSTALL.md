@@ -41,16 +41,18 @@ provider is present:
 cmk list storageproviders type=primary | grep -i lightbits    # or check the UI provider list
 ```
 
-## 2. Register the host NVMe NQN (until auto-discovery lands)
+## 2. Host NVMe NQN (automatic)
 
-The plugin ACLs each volume to the connecting host's NVMe NQN. Until the host listener
-populates this automatically, set it once per KVM host:
+The plugin ACLs each volume to the connecting host's NVMe NQN. The host listener populates
+this automatically when a host connects while a Lightbits pool exists: the agent reports
+`/etc/nvme/hostnqn` (generating and pinning one via `nvme show-hostnqn` if the file is
+missing), and the listener stores it as the `nvme.hostnqn` host detail. Nothing to do —
+verify per host if desired:
 ```bash
-HOST_NQN=$(cat /etc/nvme/hostnqn)     # on the KVM host
-# on the management server, via API/cmk, for that host id:
-cmk add resourcedetail resourcetype=Host resourceid=<hostId> \
-    details[0].key=nvme.hostnqn details[0].value="$HOST_NQN"
+cmk list resourcedetails resourcetype=Host resourceid=<hostId> key=nvme.hostnqn
 ```
+If it is missing (e.g. nvme-cli was absent at connect time — the management log carries a
+warning), install nvme-cli on the host and reconnect the host.
 
 ## 3. Add the primary storage pool
 
@@ -64,6 +66,10 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
 ```
 - **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required) and
   optional `&replicas=1..3&compression=true&qosPolicy=<name>`
+- **replicas** — replica factor per volume, `1..3` (default `3`). The replica count must not
+  exceed the number of nodes in the Lightbits cluster, so on a **single-node cluster set
+  `replicas=1`** (2 nodes → `1..2`, 3+ nodes → `1..3`). Any cluster size is supported; the
+  plugin does not require three nodes.
 - **environment** — a short identifier for this CloudStack deployment (e.g. `prod-cs1`).
   **Required.** It is embedded in every Lightbits volume name (`cs-<environment>-<uuid>`) so that
   multiple CloudStacks sharing one cluster never collide and each deployment's volumes are
@@ -77,8 +83,13 @@ The pool reports capacity/usage live from the cluster and should show **Up**.
 ## 4. Use it
 
 Create a disk or compute offering with **storage tag `lightbits`**; volumes and VM root disks
-created against it are provisioned as Lightbits volumes (named `cs-<uuid>`), connected to KVM
-hosts over NVMe/TCP at attach time.
+created against it are provisioned as Lightbits volumes (named `cs-<environment>-<uuid>`),
+connected to KVM hosts over NVMe/TCP at attach time.
+
+Volume snapshots (take/revert/delete, create-volume-from-snapshot) map to native Lightbits
+snapshots. Volume resize grows the Lightbits volume in place; resize the disk while the VM is
+**stopped** — CloudStack does not permit online resize of managed KVM disks for out-of-tree
+storage providers, and shrinking is not supported.
 
 ## TLS note
 

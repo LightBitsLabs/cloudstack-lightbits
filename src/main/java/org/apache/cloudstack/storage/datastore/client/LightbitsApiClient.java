@@ -110,6 +110,17 @@ public class LightbitsApiClient {
         return parse(execute("GET", "/api/v2/cluster", null), ClusterInfo.class);
     }
 
+    /** Number of nodes in the cluster — a hard upper bound on a volume's replica count. */
+    public int countNodes() {
+        try {
+            JsonNode root = mapper.readTree(execute("GET", "/api/v2/nodes", null));
+            JsonNode nodes = root.isArray() ? root : root.path("nodes");
+            return nodes.isArray() ? nodes.size() : 0;
+        } catch (IOException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "malformed nodes list response", e);
+        }
+    }
+
     // ---------------- volumes ----------------
 
     /**
@@ -140,7 +151,7 @@ public class LightbitsApiClient {
         q.put("name", name);
         q.put("project_name", project);
         String resp = execute("GET", "/api/v2/volumes" + query(q), null);
-        return firstLiveVolume(resp);
+        return firstLiveVolume(resp, name);
     }
 
     public Optional<Volume> getVolume(String uuid) {
@@ -219,6 +230,24 @@ public class LightbitsApiClient {
         }
     }
 
+    /** All live (not deleted/deleting) snapshots in this client's project. */
+    public List<Snapshot> listSnapshots() {
+        String resp = execute("GET", projectColl("snapshots"), null);
+        List<Snapshot> live = new ArrayList<>();
+        try {
+            JsonNode root = mapper.readTree(resp);
+            for (JsonNode n : root.path("snapshots")) {
+                Snapshot s = mapper.treeToValue(n, Snapshot.class);
+                if (!s.isDeletedOrDeleting()) {
+                    live.add(s);
+                }
+            }
+        } catch (IOException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "malformed snapshot list response", e);
+        }
+        return live;
+    }
+
     public Optional<Snapshot> getSnapshotByName(String name) {
         Map<String, String> q = new HashMap<>();
         q.put("name", name);
@@ -227,7 +256,10 @@ public class LightbitsApiClient {
             JsonNode root = mapper.readTree(resp);
             for (JsonNode n : root.path("snapshots")) {
                 Snapshot s = mapper.treeToValue(n, Snapshot.class);
-                if (!s.isDeletedOrDeleting()) {
+                // LightOS ignores the 'name' query param on the snapshot list (returns ALL
+                // snapshots), so filter by exact name client-side — taking the first entry
+                // blindly returned an arbitrary snapshot.
+                if (!s.isDeletedOrDeleting() && name.equals(s.getName())) {
                     return Optional.of(s);
                 }
             }
@@ -258,6 +290,17 @@ public class LightbitsApiClient {
         }
     }
 
+    /**
+     * Roll a volume back to one of its snapshots, in place (PUT .../volumes/{uuid}/rollback).
+     * Destructive on the volume's current content; the caller ensures the volume is not in use.
+     */
+    public void rollbackVolume(String volumeUuid, String snapshotUuid) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("srcSnapshotUUID", snapshotUuid);
+        body.put("projectName", project);
+        execute("PUT", projectPath("volumes", volumeUuid) + "/rollback", body.toString());
+    }
+
     public boolean deleteSnapshot(String uuid) {
         try {
             execute("DELETE", projectPath("snapshots", uuid), null);
@@ -280,12 +323,14 @@ public class LightbitsApiClient {
         return "/api/v2/projects/" + urlenc(project) + "/" + kind;
     }
 
-    private Optional<Volume> firstLiveVolume(String listResponse) {
+    private Optional<Volume> firstLiveVolume(String listResponse, String expectedName) {
         try {
             JsonNode root = mapper.readTree(listResponse);
             for (JsonNode n : root.path("volumes")) {
                 Volume v = mapper.treeToValue(n, Volume.class);
-                if (!v.isDeletedOrDeleting()) {
+                // exact-name check client-side: the snapshots list ignores its 'name' query
+                // param (see getSnapshotByName), so don't trust server-side filtering here either
+                if (!v.isDeletedOrDeleting() && expectedName.equals(v.getName())) {
                     return Optional.of(v);
                 }
             }

@@ -21,7 +21,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/apache/cloudstack
-          key: cloudstack-4.22.1.0-m2
+          # bump the suffix when the module list below changes — on a cache hit
+          # the source build is skipped, so a stale cache misses new modules
+          key: cloudstack-4.22.1.0-m2-kvm
 
       - name: Cache Maven dependencies
         uses: actions/cache@v4
@@ -38,7 +40,7 @@ jobs:
           git clone --depth 1 --branch 4.22.1.0 https://github.com/apache/cloudstack.git /tmp/cloudstack
           cd /tmp/cloudstack
           mvn -B -q -DskipTests -Dmaven.javadoc.skip=true install \
-            -pl api,core,engine/api,engine/storage,engine/storage/volume,framework/ipc -am
+            -pl api,core,engine/api,engine/storage,engine/storage/volume,framework/ipc,plugins/hypervisors/kvm -am
 
       - name: Build, test, and enforce coverage gate
         run: mvn -B verify

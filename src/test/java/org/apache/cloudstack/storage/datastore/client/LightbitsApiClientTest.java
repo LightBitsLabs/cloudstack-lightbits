@@ -23,6 +23,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.put;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -207,6 +208,69 @@ class LightbitsApiClientTest {
                 .willReturn(aResponse().withStatus(200).withBody(
                     "{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\",\"sourceVolumeUUID\":\"" + VOL_UUID + "\"}")));
         assertEquals("snap-1", client.createSnapshot("cs-snap", VOL_UUID).getUuid());
+    }
+
+    @Test
+    void countNodesReturnsClusterNodeCount() {
+        wm.stubFor(get(urlEqualTo("/api/v2/nodes"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"nodes\":["
+                    + "{\"UUID\":\"n0\",\"state\":\"Active\"},"
+                    + "{\"UUID\":\"n1\",\"state\":\"Active\"},"
+                    + "{\"UUID\":\"n2\",\"state\":\"Active\"}]}")));
+        assertEquals(3, client.countNodes());
+    }
+
+    @Test
+    void countNodesHandlesSingleNode() {
+        wm.stubFor(get(urlEqualTo("/api/v2/nodes"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"nodes\":[{\"UUID\":\"n0\",\"state\":\"Active\"}]}")));
+        assertEquals(1, client.countNodes());
+    }
+
+    @Test
+    void listSnapshotsFiltersDeletedAndDeleting() {
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/snapshots"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"snapshots\":["
+                    + "{\"UUID\":\"snap-1\",\"name\":\"cs-env-a-src\",\"state\":\"Available\"},"
+                    + "{\"UUID\":\"snap-2\",\"name\":\"cs-env-b-src\",\"state\":\"Deleting\"},"
+                    + "{\"UUID\":\"snap-3\",\"name\":\"other\",\"state\":\"Available\"}]}")));
+        var live = client.listSnapshots();
+        assertEquals(2, live.size());
+        assertEquals("snap-1", live.get(0).getUuid());
+        assertEquals("other", live.get(1).getName());
+    }
+
+    @Test
+    void getSnapshotByNameMatchesExactNameEvenWhenServerIgnoresTheFilter() {
+        // LightOS returns ALL snapshots regardless of the ?name= param — the client must
+        // select by exact name, not take the first entry (regression: rollback grabbed an
+        // unrelated -src snapshot).
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/snapshots"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"snapshots\":["
+                    + "{\"UUID\":\"snap-src\",\"name\":\"cs-env-vol1-src\",\"state\":\"Available\"},"
+                    + "{\"UUID\":\"snap-user\",\"name\":\"cs-env-usersnap\",\"state\":\"Available\"}]}")));
+        assertEquals("snap-user", client.getSnapshotByName("cs-env-usersnap").orElseThrow().getUuid());
+        assertTrue(client.getSnapshotByName("cs-env-missing").isEmpty());
+    }
+
+    @Test
+    void getVolumeByNameMatchesExactNameEvenWhenServerIgnoresTheFilter() {
+        wm.stubFor(get(urlPathEqualTo("/api/v2/volumes"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":["
+                    + "{\"UUID\":\"v-1\",\"name\":\"cs-env-other\",\"state\":\"Available\"},"
+                    + "{\"UUID\":\"v-2\",\"name\":\"cs-env-wanted\",\"state\":\"Available\"}]}")));
+        assertEquals("v-2", client.getVolumeByName("cs-env-wanted").orElseThrow().getUuid());
+        assertTrue(client.getVolumeByName("cs-env-nope").isEmpty());
+    }
+
+    @Test
+    void rollbackVolumeUsesProjectScopedPut() {
+        wm.stubFor(put(urlEqualTo("/api/v2/projects/default/volumes/" + VOL_UUID + "/rollback"))
+                .withRequestBody(matchingJsonPath("$.srcSnapshotUUID", equalTo("snap-1")))
+                .willReturn(aResponse().withStatus(200).withBody("{}")));
+        client.rollbackVolume(VOL_UUID, "snap-1");
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(
+                urlEqualTo("/api/v2/projects/default/volumes/" + VOL_UUID + "/rollback")));
     }
 
     @Test
