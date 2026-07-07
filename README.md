@@ -24,11 +24,11 @@ Working today (KVM):
 - VM root disks from templates via native snapshot+clone (template cached once per pool)
 - Volume snapshots: take / revert (native in-place rollback) / delete, and create-volume-from-snapshot
 - Volume resize (grow, offline — online resize of managed KVM disks is restricted by CloudStack itself)
+- Per-volume replica factor via the `lightbitsReplicas` offering detail
 - Cluster-wide and zone-wide storage pools; full cluster-side cleanup on teardown
 
 Planned:
 - QoS mapping from CloudStack disk offerings to Lightbits QoS policies
-- Per-volume replica factor via disk-offering details
 
 See [docs/architecture.md](docs/architecture.md) for the design sketch.
 
