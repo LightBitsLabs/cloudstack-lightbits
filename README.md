@@ -4,6 +4,10 @@ Apache CloudStack primary storage plugin for [Lightbits](https://www.lightbitsla
 
 > **Status: pre-alpha, under active development.** Nothing here is ready for production use. APIs, layout, and behavior will change without notice.
 
+![Creating VMs on Lightbits block storage from CloudStack](docs/vm-on-lightbits.gif)
+
+*Registering the Lightbits cluster as primary storage, then deploying VMs whose root disks are Lightbits NVMe/TCP volumes.*
+
 ## What this is
 
 A CloudStack **managed primary storage** driver that provisions VM disks as Lightbits volumes served over NVMe/TCP — NVMe-class performance on standard TCP/IP networks, no special NICs or switch configuration required. Each CloudStack volume maps 1:1 to a Lightbits volume.
