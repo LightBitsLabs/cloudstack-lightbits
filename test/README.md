@@ -38,17 +38,49 @@ the scripted checks used during bring-up (see the internal repo `testing/scripts
 Full user-visible flows on a Tier-2 lab (KVM host(s) + Lightbits cluster), structured to be
 upstream-submittable. `test_lightbits_volumes.py` covers:
 
-- pool up + capacity from the cluster
+- pool up + capacity from the cluster (the suite registers its OWN pool with storage tag
+  `lb-ci` and its own environment, so it never interferes with other pools on the cluster)
 - volume create → attach (NVMe/TCP) → detach → delete; the backing `cs-<environment>-<uuid>`
-  volume is verified on the cluster
-- resize
+  volume is verified on the cluster, and verified GONE after delete
+- resize (attach-first so the managed volume is materialized, then offline grow)
 - rainy day: bad credentials rejected, missing `environment` rejected
-- **leak checker**: no orphaned `cs-<environment>-*` volumes left on the cluster
+- **leak checker**: every `cs-<environment>-*` cluster volume maps to a live CloudStack
+  volume or cached template
+
+### Installing Marvin (once per management server)
+
+Marvin's `cloudstackAPI` bindings are generated, not shipped. Generating them from the live
+management server guarantees they match the deployed version:
 
 ```bash
-export LB_API_ENDPOINT=<host> LB_JWT=<jwt> LB_PROJECT=default LB_ENVIRONMENT=ci-cs1
-nosetests --with-marvin --marvin-config=<zone>.cfg test/integration/plugin/test_lightbits_volumes.py
+# 1. enable the integration API port (dynamic setting) and confirm it answers
+cmk update configuration name=integration.api.port value=8096   # then restart mgmt once
+# 2. from the CloudStack source tree, copy tools/marvin to the mgmt server, then:
+cd marvin && python3 marvin/codegenerator.py -e localhost -o marvin && pip3 install .
+# 3. python3.9 dependency pins (newer pyvmomi requires >=3.10; system oauthlib too old):
+pip3 install "pyvmomi<9" -U oauthlib requests-oauthlib
 ```
+
+Note: the stock codegenerator crashes on 4.22's live `listApis` output (empty response
+entries); it needs a small patch to skip nameless entries at all three sites.
+
+### Environment prerequisites
+
+- `wait.detach.device` global setting ≥ `60000`. CloudStack reports a VM Running when qemu
+  starts, but a virtio disk unplug is only ACKed once the guest kernel is fully booted — with
+  the default 10s window, detach-after-attach on a freshly deployed VM fails ("device busy").
+  The suite additionally waits `LB_GUEST_SETTLE_SECS` (default 90) after deploying a VM.
+
+### Running
+
+```bash
+export LB_API_ENDPOINT=<cluster-api-host> LB_JWT=<jwt> LB_PROJECT=default LB_ENVIRONMENT=ci-cs1
+nosetests -v --with-marvin --marvin-config=<mgmt>.cfg --zone=<zone> --hypervisor=kvm \
+    test/integration/plugin/test_lightbits_volumes.py
+```
+
+Minimal marvin config (`<mgmt>.cfg`): `mgtSvr` (localhost:8096), `dbSvr` (cloud/cloud), and
+`zones: [{"name": "<zone>"}]`. Results land under the configured `logger.LogFolderPath`.
 
 ## 4. Web-UI validation (Playwright, internal repo)
 

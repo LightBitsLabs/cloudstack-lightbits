@@ -43,4 +43,24 @@ public final class LightbitsUtil {
     public static String volumeName(String environment, String cloudStackVolumeUuid) {
         return "cs-" + environment + "-" + cloudStackVolumeUuid;
     }
+
+    /**
+     * Parse the {@code lightbitsReplicas} offering detail: an integer 1..3. A malformed or
+     * out-of-range value fails the volume creation with a pointed message rather than being
+     * silently ignored — the operator explicitly asked for a replica factor.
+     */
+    public static int parseReplicasDetail(String value) {
+        int replicas;
+        try {
+            replicas = Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "offering detail lightbitsReplicas must be an integer 1..3 (got '" + value + "')");
+        }
+        if (replicas < 1 || replicas > 3) {
+            throw new IllegalArgumentException(
+                    "offering detail lightbitsReplicas must be between 1 and 3 (got " + replicas + ")");
+        }
+        return replicas;
+    }
 }

@@ -80,9 +80,49 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     private com.cloud.storage.dao.VMTemplatePoolDao vmTemplatePoolDao;
     @Inject
     private com.cloud.storage.dao.VolumeDao volumeDao;
+    @Inject
+    private org.apache.cloudstack.resourcedetail.dao.DiskOfferingDetailsDao diskOfferingDetailsDao;
+    @Inject
+    private com.cloud.service.dao.ServiceOfferingDao serviceOfferingDao;
+    @Inject
+    private com.cloud.service.dao.ServiceOfferingDetailsDao serviceOfferingDetailsDao;
 
     /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
     public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
+
+    /**
+     * Offering-detail key overriding the pool's replica factor per volume (I8).
+     * Set on a DISK offering ({@code details[0].lightbitsReplicas=N}) for data disks, or on a
+     * COMPUTE offering ({@code serviceofferingdetails[0].lightbitsReplicas=N}) for root disks.
+     */
+    public static final String REPLICAS_DETAIL = "lightbitsReplicas";
+
+    /**
+     * The replica factor for a volume: the offering's {@link #REPLICAS_DETAIL} when present
+     * (disk offering first; for root disks the volume's disk offering is the compute
+     * offering's implicit one, so fall through to the service-offering details), else the
+     * pool default.
+     */
+    private int replicasFor(VolumeInfo vol, LightbitsPoolConfig cfg) {
+        Long diskOfferingId = vol.getDiskOfferingId();
+        String value = null;
+        if (diskOfferingId != null) {
+            value = diskOfferingDetailsDao.getDetail(diskOfferingId, REPLICAS_DETAIL);
+            if (value == null) {
+                com.cloud.service.ServiceOfferingVO svc =
+                        serviceOfferingDao.findServiceOfferingByComputeOnlyDiskOffering(diskOfferingId, false);
+                if (svc != null) {
+                    value = serviceOfferingDetailsDao.getDetail(svc.getId(), REPLICAS_DETAIL);
+                }
+            }
+        }
+        if (value == null) {
+            return cfg.getReplicaCount();
+        }
+        int replicas = LightbitsUtil.parseReplicasDetail(value);
+        LOG.debug("Lightbits: volume {} uses offering replica override {}", vol.getUuid(), replicas);
+        return replicas;
+    }
 
     /** Rebuild the validated pool config (incl. environment) from persisted details. */
     LightbitsPoolConfig configForPool(long poolId) {
@@ -136,7 +176,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 org.apache.cloudstack.storage.datastore.client.model.Volume created =
                         clientFor(cfg).createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid()),
-                                vol.getSize(), cfg.getReplicaCount(), null);
+                                vol.getSize(), replicasFor(vol, cfg), null);
                 // path identifies the backing volume; the KVM adaptor resolves the NVMe
                 // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>). The path must be
                 // returned inside a VolumeObjectTO so CloudStack persists it on the volume.
@@ -307,28 +347,41 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
         org.apache.cloudstack.storage.datastore.client.model.Snapshot snap;
         long srcSize;
+        int srcReplicas;
         if (srcData.getType() == DataObjectType.SNAPSHOT) {
             // volume-from-snapshot: the Lightbits snapshot already exists (takeSnapshot made it)
             snap = client.getSnapshotByName(srcName).orElseThrow(
                     () -> new CloudRuntimeException("clone source snapshot not found on cluster: " + srcName));
             // floor the clone size at the snapshot's base-volume size when it still exists
             // (CloudStack normally passes it anyway; LightOS rejects too-small clones regardless)
-            srcSize = snap.getSourceVolumeUUID() == null ? 0L
-                    : client.getVolume(snap.getSourceVolumeUUID())
-                            .map(org.apache.cloudstack.storage.datastore.client.model.Volume::getSizeBytes)
-                            .orElse(0L);
+            org.apache.cloudstack.storage.datastore.client.model.Volume snapSrc =
+                    snap.getSourceVolumeUUID() == null ? null
+                            : client.getVolume(snap.getSourceVolumeUUID()).orElse(null);
+            srcSize = snapSrc == null ? 0L : snapSrc.getSizeBytes();
+            srcReplicas = snapSrc == null ? cfg.getReplicaCount() : snapSrc.getReplicaCount();
         } else {
             // template/volume source: snapshot it, then clone from that snapshot
             org.apache.cloudstack.storage.datastore.client.model.Volume src = client.getVolumeByName(srcName)
                     .orElseThrow(() -> new CloudRuntimeException("clone source not found on cluster: " + srcName));
             snap = client.createSnapshot(destName + "-src", src.getUuid());
             srcSize = src.getSizeBytes();
+            srcReplicas = src.getReplicaCount();
         }
         // Clone at the larger of the requested volume size and the source image size; LightOS
         // requires an explicit size and rejects a clone smaller than its source.
         long size = Math.max(destVol.getSize() != null ? destVol.getSize() : 0L, srcSize);
+        // LightOS requires a clone's replicaCount to EQUAL its source's (and replicaCount is
+        // immutable after create), so clones always inherit the source's replica factor. If
+        // the offering asks for a different lightbitsReplicas, warn — don't fail the deploy.
+        int replicas = srcReplicas > 0 ? srcReplicas : cfg.getReplicaCount();
+        int requested = replicasFor(destVol, cfg);
+        if (requested != replicas) {
+            LOG.warn("Lightbits: volume {} requested {} replicas via its offering, but clones inherit their "
+                    + "source's replica factor ({}) — LightOS requires clone == source and the count is "
+                    + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
+        }
         org.apache.cloudstack.storage.datastore.client.model.Volume created =
-                client.createVolumeFromSnapshot(destName, snap.getUuid(), size, cfg.getReplicaCount(), null);
+                client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null);
         String path = created.getUuid();
 
         VolumeVO vo = volumeDao.findById(destVol.getId());

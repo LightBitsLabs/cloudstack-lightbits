@@ -91,6 +91,24 @@ snapshots. Volume resize grows the Lightbits volume in place; resize the disk wh
 **stopped** — CloudStack does not permit online resize of managed KVM disks for out-of-tree
 storage providers, and shrinking is not supported.
 
+**Per-volume replica factor** — override the pool's `replicas` for volumes of a specific
+offering with the `lightbitsReplicas` offering detail (integer `1..3`, must not exceed the
+cluster's node count):
+```bash
+# data disks: on a disk offering
+cmk create diskoffering name=lb-2replica displaytext="Lightbits 2-replica" \
+    storagetype=shared customized=true tags=lightbits details[0].lightbitsReplicas=2
+```
+Volumes from offerings without the detail use the pool default.
+
+Scope: the override applies to volumes Lightbits creates **fresh** — data disks (and root
+disks of ISO-based instances). Volumes materialized as **clones inherit their source's
+replica factor** (LightOS requires clone == source, and the count is immutable after
+create): template-based root disks inherit the cached template volume (pool default), and
+create-volume-from-snapshot inherits the snapshot's base volume. A differing offering value
+on those is logged as a warning, not an error. The compute-offering variant
+(`serviceofferingdetails[0].lightbitsReplicas`) is honored only for ISO-based root disks.
+
 ## TLS note
 
 The management server validates the cluster's API certificate. If your LightOS cluster uses a
