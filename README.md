@@ -17,13 +17,18 @@ Two communication paths:
 - **Control path** — the CloudStack management server calls the Lightbits REST/gRPC API (volume lifecycle, snapshots, clones, ACLs, capacity).
 - **Data path** — KVM hosts connect to volumes with NVMe/TCP (`nvme-tcp` kernel module + `nvme-cli`) and hand the raw block device to QEMU.
 
-## Planned scope
+## Scope
 
-- KVM hypervisor first
-- Volume create/delete/resize, attach/detach via per-host NQN ACLs
-- Native Lightbits snapshots; templates via thin clones
-- Zone-wide and cluster-wide storage pools
+Working today (KVM):
+- Volume create/delete, attach/detach via per-host NQN ACLs (host NQN auto-registered)
+- VM root disks from templates via native snapshot+clone (template cached once per pool)
+- Volume snapshots: take / revert (native in-place rollback) / delete, and create-volume-from-snapshot
+- Volume resize (grow, offline — online resize of managed KVM disks is restricted by CloudStack itself)
+- Cluster-wide and zone-wide storage pools; full cluster-side cleanup on teardown
+
+Planned:
 - QoS mapping from CloudStack disk offerings to Lightbits QoS policies
+- Per-volume replica factor via disk-offering details
 
 See [docs/architecture.md](docs/architecture.md) for the design sketch.
 

@@ -358,10 +358,11 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canCopy(DataObject srcData, DataObject destData) {
-        // We can materialize a volume from a template (root-disk-from-template) and clone
-        // volume->volume within the cluster; the agent CopyCommand does the work.
+        // We can materialize a volume from a template (root-disk-from-template), clone
+        // volume->volume, and clone volume-from-snapshot within the cluster.
         return destData.getType() == DataObjectType.VOLUME
-                && (srcData.getType() == DataObjectType.TEMPLATE || srcData.getType() == DataObjectType.VOLUME);
+                && (srcData.getType() == DataObjectType.TEMPLATE || srcData.getType() == DataObjectType.VOLUME
+                    || srcData.getType() == DataObjectType.SNAPSHOT);
     }
 
     @Override
@@ -369,12 +370,25 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         String errMsg = null;
         try {
             VolumeInfo vol = (VolumeInfo) data;
+            // the NEW size travels in the ResizeVolumePayload; vol.getSize() is still the old
+            // size at this point (ScaleIO/SolidFire read the payload the same way)
+            com.cloud.storage.ResizeVolumePayload payload =
+                    (com.cloud.storage.ResizeVolumePayload) vol.getpayload();
+            long newSize = payload != null && payload.newSize != null ? payload.newSize : vol.getSize();
+
             LightbitsPoolConfig cfg = configForPool(data.getDataStore().getId());
             LightbitsApiClient client = clientFor(cfg);
             String name = LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid());
             org.apache.cloudstack.storage.datastore.client.model.Volume v = client.getVolumeByName(name)
                     .orElseThrow(() -> new CloudRuntimeException("volume not found on cluster: " + name));
-            client.resizeVolume(v.getUuid(), vol.getSize());
+            if (newSize < v.getSizeBytes()) {
+                throw new CloudRuntimeException("Lightbits volumes cannot shrink ("
+                        + v.getSizeBytes() + " -> " + newSize + " bytes)");
+            }
+            if (newSize > v.getSizeBytes()) {
+                client.resizeVolume(v.getUuid(), newSize);
+                LOG.info("Lightbits: resized volume {} from {} to {} bytes", name, v.getSizeBytes(), newSize);
+            }
         } catch (Exception e) {
             errMsg = e.getMessage();
         }

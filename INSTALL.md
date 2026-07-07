@@ -86,6 +86,11 @@ Create a disk or compute offering with **storage tag `lightbits`**; volumes and 
 created against it are provisioned as Lightbits volumes (named `cs-<environment>-<uuid>`),
 connected to KVM hosts over NVMe/TCP at attach time.
 
+Volume snapshots (take/revert/delete, create-volume-from-snapshot) map to native Lightbits
+snapshots. Volume resize grows the Lightbits volume in place; resize the disk while the VM is
+**stopped** — CloudStack does not permit online resize of managed KVM disks for out-of-tree
+storage providers, and shrinking is not supported.
+
 ## TLS note
 
 The management server validates the cluster's API certificate. If your LightOS cluster uses a
