@@ -88,6 +88,21 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
             throw new IllegalArgumentException("Lightbits cluster is not healthy (state="
                     + (info.getHealth() == null ? "unknown" : info.getHealth().getState()) + ")");
         }
+        // A volume cannot have more replicas than there are nodes. Fail fast at registration
+        // (with actionable guidance) instead of at the first volume create. Any cluster size is
+        // supported — e.g. a single-node cluster works with replicas=1. Tolerant: if the node
+        // count can't be determined, skip the check rather than block registration.
+        int nodes = 0;
+        try {
+            nodes = client.countNodes();
+        } catch (RuntimeException ignore) {
+            LOG.debug("Lightbits: could not list cluster nodes for replica validation; skipping");
+        }
+        if (nodes > 0 && cfg.getReplicaCount() > nodes) {
+            throw new IllegalArgumentException("replicas=" + cfg.getReplicaCount() + " but the Lightbits cluster"
+                    + " has only " + nodes + " node" + (nodes == 1 ? "" : "s")
+                    + "; set replicas=1.." + nodes + " in the pool URL (single-node clusters use replicas=1)");
+        }
         long capacity = info.getStatistics() == null ? 0L : info.getStatistics().effectiveBytes();
 
         Map<String, String> persisted = new HashMap<>(cfg.toDetailsWithoutSecret());

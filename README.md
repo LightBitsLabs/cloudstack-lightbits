@@ -36,7 +36,7 @@ credential rotation.
 ## Requirements (target)
 
 - Apache CloudStack 4.22+
-- Lightbits cluster ≥ 3.x, reachable from management server (API, port 443) and KVM hosts (NVMe/TCP, port 4420)
+- Lightbits cluster running LightOS ≥ 3.x, reachable from the management server (API, port 443) and KVM hosts (NVMe/TCP, port 4420). Any cluster size works — from a single node (use `replicas=1`) up to a full multi-node cluster; three nodes are **not** required.
 - KVM hosts: `nvme-cli`, `nvme_tcp` kernel module
 
 ## Building

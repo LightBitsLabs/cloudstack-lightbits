@@ -67,16 +67,53 @@ class LightbitsLifeCyclePreflightTest {
         return m;
     }
 
-    @Test
-    void preflightSucceedsAgainstHealthyCluster() {
+    /** Stub a healthy cluster with the given number of nodes. */
+    private void stubHealthyCluster(int nodeCount) {
         wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(200).withBody(
             "{\"UUID\":\"c-1\",\"health\":{\"state\":\"OK\"},"
             + "\"statistics\":{\"effectivePhysicalStorage\":\"102392961820261\"}}")));
+        StringBuilder nodes = new StringBuilder("{\"nodes\":[");
+        for (int i = 0; i < nodeCount; i++) {
+            nodes.append(i == 0 ? "" : ",").append("{\"UUID\":\"n").append(i).append("\",\"state\":\"Active\"}");
+        }
+        nodes.append("]}");
+        wm.stubFor(get(urlEqualTo("/api/v2/nodes")).willReturn(aResponse().withStatus(200).withBody(nodes.toString())));
+    }
+
+    @Test
+    void preflightSucceedsAgainstHealthyCluster() {
+        stubHealthyCluster(3);
         PreflightResult r = lc.preflight(dsInfos("lightbits://10.19.43.20/default?replicas=3&environment=cs1", "jwt-x"));
         assertEquals("default", r.config.getProject());
         assertEquals(102392961820261L, r.capacityBytes);
         assertFalse(r.detailsWithoutSecret.containsKey(LightbitsPoolConfig.KEY_JWT),
                 "persisted details must not carry the JWT");
+    }
+
+    @Test
+    void preflightSucceedsOnSingleNodeClusterWithOneReplica() {
+        stubHealthyCluster(1);
+        PreflightResult r = lc.preflight(dsInfos("lightbits://h/default?replicas=1&environment=cs1", "jwt"));
+        assertEquals(1, r.config.getReplicaCount());
+    }
+
+    @Test
+    void preflightRejectsMoreReplicasThanNodes() {
+        stubHealthyCluster(1);
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt")));
+        assertTrue(e.getMessage().contains("only 1 node"), e.getMessage());
+        assertTrue(e.getMessage().contains("replicas=1"), e.getMessage());
+    }
+
+    @Test
+    void preflightSkipsReplicaCheckWhenNodesUnavailable() {
+        // /api/v2/cluster healthy, /api/v2/nodes not stubbed (404) -> check skipped, not fatal
+        wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(200).withBody(
+            "{\"UUID\":\"c-1\",\"health\":{\"state\":\"OK\"},"
+            + "\"statistics\":{\"effectivePhysicalStorage\":\"1\"}}")));
+        PreflightResult r = lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt"));
+        assertEquals(3, r.config.getReplicaCount());
     }
 
     @Test

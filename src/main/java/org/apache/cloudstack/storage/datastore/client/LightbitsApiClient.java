@@ -110,6 +110,17 @@ public class LightbitsApiClient {
         return parse(execute("GET", "/api/v2/cluster", null), ClusterInfo.class);
     }
 
+    /** Number of nodes in the cluster — a hard upper bound on a volume's replica count. */
+    public int countNodes() {
+        try {
+            JsonNode root = mapper.readTree(execute("GET", "/api/v2/nodes", null));
+            JsonNode nodes = root.isArray() ? root : root.path("nodes");
+            return nodes.isArray() ? nodes.size() : 0;
+        } catch (IOException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "malformed nodes list response", e);
+        }
+    }
+
     // ---------------- volumes ----------------
 
     /**

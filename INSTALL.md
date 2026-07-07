@@ -66,6 +66,10 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
 ```
 - **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required) and
   optional `&replicas=1..3&compression=true&qosPolicy=<name>`
+- **replicas** — replica factor per volume, `1..3` (default `3`). The replica count must not
+  exceed the number of nodes in the Lightbits cluster, so on a **single-node cluster set
+  `replicas=1`** (2 nodes → `1..2`, 3+ nodes → `1..3`). Any cluster size is supported; the
+  plugin does not require three nodes.
 - **environment** — a short identifier for this CloudStack deployment (e.g. `prod-cs1`).
   **Required.** It is embedded in every Lightbits volume name (`cs-<environment>-<uuid>`) so that
   multiple CloudStacks sharing one cluster never collide and each deployment's volumes are

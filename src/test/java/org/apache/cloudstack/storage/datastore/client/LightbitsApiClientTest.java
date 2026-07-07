@@ -210,6 +210,23 @@ class LightbitsApiClientTest {
     }
 
     @Test
+    void countNodesReturnsClusterNodeCount() {
+        wm.stubFor(get(urlEqualTo("/api/v2/nodes"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"nodes\":["
+                    + "{\"UUID\":\"n0\",\"state\":\"Active\"},"
+                    + "{\"UUID\":\"n1\",\"state\":\"Active\"},"
+                    + "{\"UUID\":\"n2\",\"state\":\"Active\"}]}")));
+        assertEquals(3, client.countNodes());
+    }
+
+    @Test
+    void countNodesHandlesSingleNode() {
+        wm.stubFor(get(urlEqualTo("/api/v2/nodes"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"nodes\":[{\"UUID\":\"n0\",\"state\":\"Active\"}]}")));
+        assertEquals(1, client.countNodes());
+    }
+
+    @Test
     void listSnapshotsFiltersDeletedAndDeleting() {
         wm.stubFor(get(urlEqualTo("/api/v2/projects/default/snapshots"))
                 .willReturn(aResponse().withStatus(200).withBody("{\"snapshots\":["
