@@ -391,7 +391,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         com.cloud.host.DetailVO detail = hostDetailsDao.findDetail(host.getId(), HOST_NQN_DETAIL);
         if (detail == null || detail.getValue() == null || detail.getValue().isBlank()) {
             throw new CloudRuntimeException("host " + host.getId() + " has no '" + HOST_NQN_DETAIL
-                    + "' detail; cannot grant Lightbits volume access. (M2: HostListener should auto-populate this.)");
+                    + "' detail; cannot grant Lightbits volume access. The HostListener auto-populates it on host"
+                    + " connect - check nvme-cli on the host, then reconnect the host (see the listener warn log).");
         }
         return detail.getValue();
     }

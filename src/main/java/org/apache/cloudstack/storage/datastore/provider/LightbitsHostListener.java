@@ -19,14 +19,19 @@ import javax.inject.Inject;
 
 import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreManager;
 import org.apache.cloudstack.engine.subsystem.api.storage.HypervisorHostListener;
+import org.apache.cloudstack.storage.datastore.command.LightbitsGetHostNqnAnswer;
+import org.apache.cloudstack.storage.datastore.command.LightbitsGetHostNqnCommand;
+import org.apache.cloudstack.storage.datastore.driver.LightbitsPrimaryDataStoreDriver;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.cloud.agent.api.Answer;
 import com.cloud.agent.api.ModifyStoragePoolCommand;
 import com.cloud.agent.AgentManager;
+import com.cloud.host.DetailVO;
 import com.cloud.host.Host;
 import com.cloud.host.dao.HostDao;
+import com.cloud.host.dao.HostDetailsDao;
 import com.cloud.storage.DataStoreRole;
 import com.cloud.storage.StoragePool;
 import com.cloud.storage.StoragePoolHostVO;
@@ -55,6 +60,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
     @Inject
     private HostDao hostDao;
     @Inject
+    private HostDetailsDao hostDetailsDao;
+    @Inject
     private StoragePoolHostDao storagePoolHostDao;
 
     @Override
@@ -82,7 +89,35 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     + " on host " + hostId + ": " + detail);
         }
         LOG.info("Lightbits pool {} registered on host {}", poolId, hostId);
+
+        ensureHostNqnDetail(hostId);
         return true;
+    }
+
+    /**
+     * Auto-populate host_details['nvme.hostnqn'] (I10): ask the agent for /etc/nvme/hostnqn
+     * and persist it, so the driver's grantAccess works with no manual step. A failure is
+     * logged but does not fail hostConnect — the pool is registered and usable; only a later
+     * volume attach on THIS host would fail, with a pointed error from the driver.
+     */
+    private void ensureHostNqnDetail(long hostId) {
+        String key = LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL;
+        DetailVO existing = hostDetailsDao.findDetail(hostId, key);
+        if (existing != null && existing.getValue() != null && !existing.getValue().isBlank()) {
+            LOG.debug("Lightbits: host {} already has '{}' = {}", hostId, key, existing.getValue());
+            return;
+        }
+        Answer answer = agentMgr.easySend(hostId, new LightbitsGetHostNqnCommand());
+        if (answer instanceof LightbitsGetHostNqnAnswer && answer.getResult()
+                && ((LightbitsGetHostNqnAnswer) answer).getHostNqn() != null) {
+            String nqn = ((LightbitsGetHostNqnAnswer) answer).getHostNqn();
+            hostDetailsDao.persist(new DetailVO(hostId, key, nqn));
+            LOG.info("Lightbits: host {} '{}' auto-populated: {}", hostId, key, nqn);
+        } else {
+            String detail = answer == null ? "no answer" : answer.getDetails();
+            LOG.warn("Lightbits: could not auto-populate '{}' for host {} ({}); volume attach on this host "
+                    + "will fail until it is set - check nvme-cli on the host, then reconnect it", key, hostId, detail);
+        }
     }
 
     @Override
