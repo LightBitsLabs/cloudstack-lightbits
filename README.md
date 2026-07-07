@@ -82,7 +82,7 @@ path **and** the failure it must handle). The coverage gate covers the `client`,
 
 ## Delivery model
 
-This is a **standalone (out-of-tree) plugin**, installed onto existing CloudStack deployments — the same model as [StorPool's CloudStack integration](https://github.com/storpool/storpool-cloudstack-integration) and our own [pve-lightbits](https://github.com/LightBitsLabs/pve-lightbits). The codebase is kept upstream-compatible (Apache 2.0, ASF-clean dependencies, in-tree-compatible layout) so contribution to `apache/cloudstack` remains an option in the future.
+This is a **standalone (out-of-tree) plugin**, installed onto existing CloudStack deployments. The codebase is kept upstream-compatible (Apache 2.0, ASF-clean dependencies, in-tree-compatible layout) so contribution to `apache/cloudstack` remains an option in the future.
 
 ## Contributing
 
