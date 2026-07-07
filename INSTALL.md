@@ -79,8 +79,8 @@ The pool reports capacity/usage live from the cluster and should show **Up**.
 ## 4. Use it
 
 Create a disk or compute offering with **storage tag `lightbits`**; volumes and VM root disks
-created against it are provisioned as Lightbits volumes (named `cs-<uuid>`), connected to KVM
-hosts over NVMe/TCP at attach time.
+created against it are provisioned as Lightbits volumes (named `cs-<environment>-<uuid>`),
+connected to KVM hosts over NVMe/TCP at attach time.
 
 ## TLS note
 
