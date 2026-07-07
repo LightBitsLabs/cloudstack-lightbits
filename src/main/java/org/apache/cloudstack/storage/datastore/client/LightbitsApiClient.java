@@ -219,6 +219,24 @@ public class LightbitsApiClient {
         }
     }
 
+    /** All live (not deleted/deleting) snapshots in this client's project. */
+    public List<Snapshot> listSnapshots() {
+        String resp = execute("GET", projectColl("snapshots"), null);
+        List<Snapshot> live = new ArrayList<>();
+        try {
+            JsonNode root = mapper.readTree(resp);
+            for (JsonNode n : root.path("snapshots")) {
+                Snapshot s = mapper.treeToValue(n, Snapshot.class);
+                if (!s.isDeletedOrDeleting()) {
+                    live.add(s);
+                }
+            }
+        } catch (IOException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "malformed snapshot list response", e);
+        }
+        return live;
+    }
+
     public Optional<Snapshot> getSnapshotByName(String name) {
         Map<String, String> q = new HashMap<>();
         q.put("name", name);

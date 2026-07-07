@@ -29,9 +29,12 @@ import org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreParame
 import org.apache.cloudstack.engine.subsystem.api.storage.ZoneScope;
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
 import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
+import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
 import org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig;
 import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
 import org.apache.cloudstack.storage.volume.datastore.PrimaryDataStoreHelper;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import com.cloud.agent.api.StoragePoolInfo;
 import com.cloud.hypervisor.Hypervisor;
@@ -41,12 +44,18 @@ import com.cloud.utils.crypt.DBEncryptionUtil;
 
 public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeCycle {
 
+    private static final Logger LOG = LogManager.getLogger(LightbitsPrimaryDataStoreLifeCycle.class);
+
     @Inject
     PrimaryDataStoreHelper dataStoreHelper;
     @Inject
     com.cloud.storage.StorageManager storageMgr;
     @Inject
     com.cloud.resource.ResourceManager resourceMgr;
+    @Inject
+    StoragePoolDetailsDao storagePoolDetailsDao;
+    @Inject
+    com.cloud.storage.dao.VMTemplatePoolDao templatePoolDao;
 
     /**
      * Parse + validate pool params and preflight the cluster (auth, project, health,
@@ -199,7 +208,56 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     @Override
     public boolean deleteDataStore(DataStore store) {
+        cleanupClusterObjects(store);
         return dataStoreHelper.deletePrimaryDataStore(store);
+    }
+
+    /**
+     * Remove everything the plugin created on the Lightbits cluster for this pool before the
+     * pool row goes away: cached template volumes (template_spool_ref) and any leftover
+     * environment-prefixed volumes/snapshots (e.g. clone-source snapshots whose deletion was
+     * deferred because the clone still existed). Guest volumes are already gone — CloudStack
+     * refuses to delete a pool that still has volumes.
+     *
+     * The sweep is scoped to this pool's project AND its {@code cs-<environment>-} name
+     * prefix; the environment is required to be unique per pool, so objects of other pools /
+     * CloudStack deployments sharing the cluster are never touched.
+     *
+     * Best-effort by design: an unreachable cluster must not wedge pool removal. Failures are
+     * logged with the objects left behind.
+     */
+    private void cleanupClusterObjects(DataStore store) {
+        try {
+            Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(store.getId());
+            String jwt = DBEncryptionUtil.decrypt(LightbitsPoolConfig.readChunked(details, LightbitsPoolConfig.KEY_JWT));
+            LightbitsPoolConfig cfg = LightbitsPoolConfig.fromDetails(details, jwt);
+            LightbitsApiClient client = clientFactory.create(cfg);
+
+            for (com.cloud.storage.VMTemplateStoragePoolVO ref : templatePoolDao.listByPoolId(store.getId())) {
+                if (ref.getInstallPath() != null && !ref.getInstallPath().isBlank()) {
+                    client.deleteVolume(ref.getInstallPath());
+                    LOG.info("Lightbits pool {} delete: removed cached template volume {}", store.getId(), ref.getInstallPath());
+                }
+                templatePoolDao.remove(ref.getId());
+            }
+
+            String prefix = LightbitsUtil.volumeName(cfg.getEnvironment(), "");
+            for (org.apache.cloudstack.storage.datastore.client.model.Snapshot s : client.listSnapshots()) {
+                if (s.getName() != null && s.getName().startsWith(prefix)) {
+                    client.deleteSnapshot(s.getUuid());
+                    LOG.info("Lightbits pool {} delete: swept snapshot {}", store.getId(), s.getName());
+                }
+            }
+            for (org.apache.cloudstack.storage.datastore.client.model.Volume v : client.listVolumes()) {
+                if (v.getName() != null && v.getName().startsWith(prefix)) {
+                    client.deleteVolume(v.getUuid());
+                    LOG.info("Lightbits pool {} delete: swept volume {}", store.getId(), v.getName());
+                }
+            }
+        } catch (Exception e) {
+            LOG.warn("Lightbits pool {} delete: cluster-side cleanup incomplete ({}); "
+                    + "check the cluster for leftover cs-<environment>-* objects", store.getId(), e.getMessage());
+        }
     }
 
     @Override

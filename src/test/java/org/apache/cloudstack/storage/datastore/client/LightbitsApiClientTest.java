@@ -210,6 +210,19 @@ class LightbitsApiClientTest {
     }
 
     @Test
+    void listSnapshotsFiltersDeletedAndDeleting() {
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/snapshots"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"snapshots\":["
+                    + "{\"UUID\":\"snap-1\",\"name\":\"cs-env-a-src\",\"state\":\"Available\"},"
+                    + "{\"UUID\":\"snap-2\",\"name\":\"cs-env-b-src\",\"state\":\"Deleting\"},"
+                    + "{\"UUID\":\"snap-3\",\"name\":\"other\",\"state\":\"Available\"}]}")));
+        var live = client.listSnapshots();
+        assertEquals(2, live.size());
+        assertEquals("snap-1", live.get(0).getUuid());
+        assertEquals("other", live.get(1).getName());
+    }
+
+    @Test
     void deleteSnapshotUsesProjectScopedRouteAndIsIdempotent() {
         wm.stubFor(delete(urlEqualTo("/api/v2/projects/default/snapshots/snap-1"))
                 .willReturn(aResponse().withStatus(404).withBody("{\"message\":\"gone\"}")));

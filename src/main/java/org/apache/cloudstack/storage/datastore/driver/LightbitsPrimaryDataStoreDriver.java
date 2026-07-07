@@ -40,6 +40,8 @@ import org.apache.cloudstack.storage.command.CopyCommand;
 import org.apache.cloudstack.storage.command.CreateObjectAnswer;
 import org.apache.cloudstack.storage.to.TemplateObjectTO;
 import org.apache.cloudstack.storage.to.VolumeObjectTO;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import com.cloud.storage.StorageManager;
 import com.cloud.vm.VirtualMachineManager;
@@ -64,6 +66,8 @@ import com.cloud.utils.crypt.DBEncryptionUtil;
 import com.cloud.utils.exception.CloudRuntimeException;
 
 public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
+
+    private static final Logger LOG = LogManager.getLogger(LightbitsPrimaryDataStoreDriver.class);
 
     @Inject
     private StoragePoolDetailsDao storagePoolDetailsDao;
@@ -187,11 +191,14 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     public void deleteAsync(DataStore store, DataObject data, AsyncCompletionCallback<CommandResult> callback) {
         String errMsg = null;
         try {
-            if (data.getType() == DataObjectType.VOLUME) {
+            // TEMPLATE = the cached template's cluster volume (template eviction / storage
+            // cleanup); VOLUME = a guest disk. Same naming scheme for both.
+            if (data.getType() == DataObjectType.VOLUME || data.getType() == DataObjectType.TEMPLATE) {
                 LightbitsPoolConfig cfg = configForPool(store.getId());
                 LightbitsApiClient client = clientFor(cfg);
                 String name = LightbitsUtil.volumeName(cfg.getEnvironment(), data.getUuid());
                 client.getVolumeByName(name).ifPresent(v -> client.deleteVolume(v.getUuid()));
+                deleteCloneSourceSnapshot(client, name);
             }
         } catch (Exception e) {
             errMsg = e.getMessage();
@@ -201,6 +208,21 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         }
         if (errMsg != null && callback == null) {
             throw new CloudRuntimeException(errMsg);
+        }
+    }
+
+    /**
+     * Drop the clone-source snapshot cloneOnStorage left behind (named {@code <cloneName>-src},
+     * taken on the clone's source). Best-effort: LightOS refuses to delete a snapshot whose
+     * clone still exists (e.g. clone deletion still in flight); the pool-delete sweep in the
+     * lifecycle catches any such straggler.
+     */
+    private void deleteCloneSourceSnapshot(LightbitsApiClient client, String cloneName) {
+        try {
+            client.getSnapshotByName(cloneName + "-src").ifPresent(s -> client.deleteSnapshot(s.getUuid()));
+        } catch (Exception e) {
+            LOG.warn("Lightbits: could not delete clone-source snapshot {}-src ({}); "
+                    + "it will be swept when the pool is deleted", cloneName, e.getMessage());
         }
     }
 
