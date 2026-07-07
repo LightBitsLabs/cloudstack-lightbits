@@ -12,7 +12,7 @@ Apache CloudStack primary storage plugin for [Lightbits](https://www.lightbitsla
 
 A CloudStack **managed primary storage** driver that provisions VM disks as Lightbits volumes served over NVMe/TCP — NVMe-class performance on standard TCP/IP networks, no special NICs or switch configuration required. Each CloudStack volume maps 1:1 to a Lightbits volume.
 
-Two communication paths, mirroring our [Proxmox plugin](https://github.com/LightBitsLabs/pve-lightbits):
+Two communication paths:
 
 - **Control path** — the CloudStack management server calls the Lightbits REST/gRPC API (volume lifecycle, snapshots, clones, ACLs, capacity).
 - **Data path** — KVM hosts connect to volumes with NVMe/TCP (`nvme-tcp` kernel module + `nvme-cli`) and hand the raw block device to QEMU.
