@@ -241,13 +241,25 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
 
     @Override
     public KVMPhysicalDisk copyPhysicalDisk(KVMPhysicalDisk disk, String name, KVMStoragePool destPool, int timeout) {
-        throw new UnsupportedOperationException("Lightbits: copyPhysicalDisk not supported");
+        // Copy a source disk (e.g. a template on NFS secondary, qcow2) onto the connected
+        // Lightbits raw NVMe device. Used by copyTemplateToPrimaryStorage and volume clones.
+        KVMPhysicalDisk dest = getPhysicalDisk(name, destPool);
+        if (dest == null) {
+            throw new CloudRuntimeException("Lightbits copyPhysicalDisk: dest volume " + name + " not connected");
+        }
+        String cmd = String.format("qemu-img convert -n -O raw %s %s", disk.getPath(), dest.getPath());
+        String out = timeout > 0 ? Script.runSimpleBashScript(cmd, timeout) : Script.runSimpleBashScript(cmd);
+        LOG.info("Lightbits copyPhysicalDisk: qemu-img convert {} -> {} : {}", disk.getPath(), dest.getPath(), out);
+        dest.setFormat(PhysicalDiskFormat.RAW);
+        dest.setVirtualSize(disk.getVirtualSize());
+        return dest;
     }
 
     @Override
     public KVMPhysicalDisk copyPhysicalDisk(KVMPhysicalDisk disk, String name, KVMStoragePool destPool, int timeout,
                                             byte[] srcPassphrase, byte[] dstPassphrase, Storage.ProvisioningType provisioningType) {
-        throw new UnsupportedOperationException("Lightbits: copyPhysicalDisk not supported");
+        // v1: no volume encryption (open item); delegate to the plain copy.
+        return copyPhysicalDisk(disk, name, destPool, timeout);
     }
 
     private void ensureNvmeTcpModule() {
