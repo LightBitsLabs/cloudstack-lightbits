@@ -47,7 +47,6 @@ import org.apache.logging.log4j.Logger;
 import com.cloud.storage.StorageManager;
 import com.cloud.vm.VirtualMachineManager;
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
-import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
 import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
 import org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig;
 import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
@@ -59,6 +58,7 @@ import com.cloud.agent.api.to.DataTO;
 import com.cloud.host.Host;
 import com.cloud.storage.DataStoreRole;
 import com.cloud.storage.Storage.StoragePoolType;
+import com.cloud.storage.Storage.ImageFormat;
 import com.cloud.storage.VolumeVO;
 import com.cloud.storage.StoragePool;
 import com.cloud.storage.Volume;
@@ -124,6 +124,40 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         return replicas;
     }
 
+    /**
+     * Offering-detail key overriding the pool's QoS policy per volume, mirroring
+     * {@link #REPLICAS_DETAIL}. Set on a DISK offering
+     * ({@code details[0].lightbitsQosPolicy=<name>}) for data disks, or on a COMPUTE offering
+     * ({@code serviceofferingdetails[0].lightbitsQosPolicy=<name>}) for root disks.
+     */
+    public static final String QOS_POLICY_DETAIL = "lightbitsQosPolicy";
+
+    /**
+     * The effective QoS policy NAME for a volume: the offering's {@link #QOS_POLICY_DETAIL}
+     * when present (disk offering first, then the compute offering's details for root disks),
+     * else the pool default ({@code ?qosPolicy=} → cfg.getQosPolicy()). Null/blank means no
+     * QoS policy — the volume is created without one. The name is passed straight to volume
+     * create (matching lbcli --qos-policy-name and the CSI driver); no UUID resolution.
+     */
+    private String qosPolicyNameFor(VolumeInfo vol, LightbitsPoolConfig cfg) {
+        String value = null;
+        Long diskOfferingId = vol.getDiskOfferingId();
+        if (diskOfferingId != null) {
+            value = diskOfferingDetailsDao.getDetail(diskOfferingId, QOS_POLICY_DETAIL);
+            if (value == null) {
+                com.cloud.service.ServiceOfferingVO svc =
+                        serviceOfferingDao.findServiceOfferingByComputeOnlyDiskOffering(diskOfferingId, false);
+                if (svc != null) {
+                    value = serviceOfferingDetailsDao.getDetail(svc.getId(), QOS_POLICY_DETAIL);
+                }
+            }
+        }
+        if (value == null || value.isBlank()) {
+            value = cfg.getQosPolicy(); // pool default (may be null)
+        }
+        return (value == null || value.isBlank()) ? null : value;
+    }
+
     /** Rebuild the validated pool config (incl. environment) from persisted details. */
     LightbitsPoolConfig configForPool(long poolId) {
         Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(poolId);
@@ -147,6 +181,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         caps.put("STORAGE_SYSTEM_SNAPSHOT", "true");
         caps.put("CAN_CREATE_VOLUME_FROM_SNAPSHOT", "true");
         caps.put("CAN_CREATE_VOLUME_FROM_VOLUME", "true");
+        caps.put("CAN_CREATE_TEMPLATE_FROM_SNAPSHOT", "true");
         // Materialize root volumes from a cached template with a native Lightbits
         // snapshot+clone (instant, no agent qemu-img). Drives root-disk-from-template boot
         // via StorageSystemDataMotionStrategy.handleCreateVolumeFromTemplateBothOnStorageSystem.
@@ -173,16 +208,26 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             if (data.getType() == DataObjectType.VOLUME) {
                 VolumeInfo vol = (VolumeInfo) data;
                 LightbitsPoolConfig cfg = configForPool(store.getId());
+                LightbitsApiClient client = clientFor(cfg);
                 org.apache.cloudstack.storage.datastore.client.model.Volume created =
-                        clientFor(cfg).createVolume(
-                                LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid()),
-                                vol.getSize(), replicasFor(vol, cfg), null);
+                        client.createVolume(
+                                LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), vol.getUuid()),
+                                vol.getSize(), replicasFor(vol, cfg), null, 512, cfg.isCompression(),
+                                qosPolicyNameFor(vol, cfg));
                 // path identifies the backing volume; the KVM adaptor resolves the NVMe
                 // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>). The path must be
                 // returned inside a VolumeObjectTO so CloudStack persists it on the volume.
                 path = created.getUuid();
                 VolumeObjectTO to = (VolumeObjectTO) vol.getTO();
                 to.setPath(path);
+                // Managed block volumes have no image-file format, but CloudStack's snapshot
+                // path (StorageSystemSnapshotStrategy.verifyFormat) rejects a null format with
+                // "Only VHD, OVA, QCOW2, RAW are supported". Stamp RAW so snapshots/clones work.
+                VolumeVO vo = volumeDao.findById(vol.getId());
+                if (vo != null && vo.getFormat() != ImageFormat.RAW) {
+                    vo.setFormat(ImageFormat.RAW);
+                    volumeDao.update(vo.getId(), vo);
+                }
                 answer = new CreateObjectAnswer(to);
             } else if (data.getType() == DataObjectType.TEMPLATE) {
                 // Managed-template caching: create a Lightbits volume to hold the template.
@@ -192,8 +237,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 long size = tmpl.getSize() != null && tmpl.getSize() > 0 ? tmpl.getSize() : (1L << 30);
                 org.apache.cloudstack.storage.datastore.client.model.Volume created =
                         clientFor(cfg).createVolume(
-                                LightbitsUtil.volumeName(cfg.getEnvironment(), tmpl.getUuid()),
-                                size, cfg.getReplicaCount(), null);
+                                LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), tmpl.getUuid()),
+                                size, cfg.getReplicaCount(), null, 512, cfg.isCompression(), null);
                 path = created.getUuid();
                 // The managed-template flow calls processEvent(OperationSucceeded) WITHOUT the
                 // answer, so the framework does not persist our path. Set install_path on the
@@ -234,17 +279,17 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         try {
             // TEMPLATE = the cached template's cluster volume (template eviction / storage
             // cleanup); VOLUME = a guest disk; SNAPSHOT = a user volume snapshot. Same
-            // cs-<environment>-<uuid> naming scheme for all three.
+            // cs-<environment>-p<poolId>-<uuid> naming scheme for all three.
             if (data.getType() == DataObjectType.VOLUME || data.getType() == DataObjectType.TEMPLATE) {
                 LightbitsPoolConfig cfg = configForPool(store.getId());
                 LightbitsApiClient client = clientFor(cfg);
-                String name = LightbitsUtil.volumeName(cfg.getEnvironment(), data.getUuid());
+                String name = LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), data.getUuid());
                 client.getVolumeByName(name).ifPresent(v -> client.deleteVolume(v.getUuid()));
                 deleteCloneSourceSnapshot(client, name);
             } else if (data.getType() == DataObjectType.SNAPSHOT) {
                 LightbitsPoolConfig cfg = configForPool(store.getId());
                 LightbitsApiClient client = clientFor(cfg);
-                String name = LightbitsUtil.volumeName(cfg.getEnvironment(), data.getUuid());
+                String name = LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), data.getUuid());
                 client.getSnapshotByName(name).ifPresent(s -> client.deleteSnapshot(s.getUuid()));
             }
         } catch (Exception e) {
@@ -333,14 +378,23 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      * this cluster (a cached template or another volume): snapshot the source, then create a
      * volume from that snapshot. Persists the backing path on the volume (the clone path runs
      * with a null callback, so the CopyCmdAnswer alone would not be applied) and returns the TO.
+     *
+     * Source and destination may live on DIFFERENT pools (e.g. a template cached on one pool
+     * cloned into a volume on another, or a cross-pool volume clone), so each name is built
+     * with ITS OWN pool id. Both objects share one Lightbits project/cluster, so a single
+     * client (built from the destination pool's config) can see both.
      */
     private VolumeObjectTO cloneOnStorage(DataObject srcData, VolumeInfo destVol) {
         DataStore store = destVol.getDataStore();
-        LightbitsPoolConfig cfg = configForPool(store.getId());
+        long destPoolId = store.getId();
+        long srcPoolId = srcData.getDataStore() != null ? srcData.getDataStore().getId() : destPoolId;
+        LightbitsPoolConfig cfg = configForPool(destPoolId);
+        // environment can differ per pool; resolve the source's own environment for its name.
+        LightbitsPoolConfig srcCfg = srcPoolId == destPoolId ? cfg : configForPool(srcPoolId);
         LightbitsApiClient client = clientFor(cfg);
 
-        String srcName = LightbitsUtil.volumeName(cfg.getEnvironment(), srcData.getUuid());
-        String destName = LightbitsUtil.volumeName(cfg.getEnvironment(), destVol.getUuid());
+        String srcName = LightbitsUtil.volumeName(srcCfg.getEnvironment(), srcPoolId, srcData.getUuid());
+        String destName = LightbitsUtil.volumeName(cfg.getEnvironment(), destPoolId, destVol.getUuid());
         // Drop any empty placeholder createAsync may have pre-created under this name; the clone
         // becomes the real backing volume.
         client.getVolumeByName(destName).ifPresent(v -> client.deleteVolume(v.getUuid()));
@@ -381,13 +435,16 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
         }
         org.apache.cloudstack.storage.datastore.client.model.Volume created =
-                client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null);
+                client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null, 512,
+                        cfg.isCompression(), qosPolicyNameFor(destVol, cfg));
         String path = created.getUuid();
 
         VolumeVO vo = volumeDao.findById(destVol.getId());
         if (vo != null) {
             vo.setPath(path);
             vo.setPoolId(store.getId());
+            // See createAsync: RAW so the snapshot path's verifyFormat accepts this volume.
+            vo.setFormat(ImageFormat.RAW);
             volumeDao.update(vo.getId(), vo);
         }
         VolumeObjectTO to = (VolumeObjectTO) destVol.getTO();
@@ -429,9 +486,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     (com.cloud.storage.ResizeVolumePayload) vol.getpayload();
             long newSize = payload != null && payload.newSize != null ? payload.newSize : vol.getSize();
 
-            LightbitsPoolConfig cfg = configForPool(data.getDataStore().getId());
+            long poolId = data.getDataStore().getId();
+            LightbitsPoolConfig cfg = configForPool(poolId);
             LightbitsApiClient client = clientFor(cfg);
-            String name = LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid());
+            String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, vol.getUuid());
             org.apache.cloudstack.storage.datastore.client.model.Volume v = client.getVolumeByName(name)
                     .orElseThrow(() -> new CloudRuntimeException("volume not found on cluster: " + name));
             if (newSize < v.getSizeBytes()) {
@@ -471,9 +529,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     @Override
     public boolean grantAccess(DataObject dataObject, Host host, DataStore dataStore) {
         String nqn = hostNqn(host);
-        LightbitsPoolConfig cfg = configForPool(dataStore.getId());
+        long poolId = dataStore.getId();
+        LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
-        String name = LightbitsUtil.volumeName(cfg.getEnvironment(), dataObject.getUuid());
+        String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
         org.apache.cloudstack.storage.datastore.client.model.Volume v = client.getVolumeByName(name)
                 .orElseThrow(() -> new CloudRuntimeException("grantAccess: volume not found on cluster: " + name));
         java.util.List<String> acl = currentAcl(v);
@@ -487,9 +546,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     @Override
     public void revokeAccess(DataObject dataObject, Host host, DataStore dataStore) {
         String nqn = hostNqn(host);
-        LightbitsPoolConfig cfg = configForPool(dataStore.getId());
+        long poolId = dataStore.getId();
+        LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
-        String name = LightbitsUtil.volumeName(cfg.getEnvironment(), dataObject.getUuid());
+        String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
         client.getVolumeByName(name).ifPresent(v -> {
             java.util.List<String> acl = currentAcl(v);
             if (acl.remove(nqn)) {
@@ -533,8 +593,26 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public long getUsedBytes(StoragePool storagePool) {
-        ClusterInfo info = clientForPool(storagePool.getId()).getClusterInfo();
-        return info.getStatistics() == null ? 0L : info.getStatistics().usedBytes();
+        // Cluster stats (GET /api/v2/cluster) are not readable by a project-scoped token.
+        // Report provisioned bytes = sum of this project's live volume sizes, which the
+        // token CAN read via the project-scoped volume list.
+        return provisionedBytes(storagePool.getId());
+    }
+
+    /** Sum of live volume sizes in this pool's project (project-scoped; no cluster read). */
+    private long provisionedBytes(long poolId) {
+        try {
+            long total = 0L;
+            for (org.apache.cloudstack.storage.datastore.client.model.Volume v
+                    : clientForPool(poolId).listVolumes()) {
+                total += v.getSizeBytes();
+            }
+            return total;
+        } catch (Exception e) {
+            LOG.warn("Lightbits: could not compute provisioned bytes for pool {} ({}); reporting 0",
+                    poolId, e.getMessage());
+            return 0L;
+        }
     }
 
     @Override
@@ -548,16 +626,17 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         try {
             VolumeInfo vol = snapshot.getBaseVolume();
             VolumeVO volVO = volumeDao.findById(vol.getId());
-            LightbitsPoolConfig cfg = configForPool(volVO.getPoolId());
+            long poolId = volVO.getPoolId();
+            LightbitsPoolConfig cfg = configForPool(poolId);
             LightbitsApiClient client = clientFor(cfg);
 
-            String volName = LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid());
+            String volName = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, vol.getUuid());
             org.apache.cloudstack.storage.datastore.client.model.Volume lbVol =
                     client.getVolumeByName(volName).orElseThrow(() -> new CloudRuntimeException(
                             "base volume not found on cluster: " + volName));
 
-            // Native Lightbits snapshot, named like volumes: cs-<environment>-<snapshotUuid>
-            String snapName = LightbitsUtil.volumeName(cfg.getEnvironment(), snapshot.getUuid());
+            // Native Lightbits snapshot, named like volumes: cs-<environment>-p<poolId>-<snapshotUuid>
+            String snapName = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, snapshot.getUuid());
             org.apache.cloudstack.storage.datastore.client.model.Snapshot s =
                     client.createSnapshot(snapName, lbVol.getUuid());
 
@@ -584,14 +663,15 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             if (volVO == null || volVO.getRemoved() != null) {
                 throw new CloudRuntimeException("the volume this snapshot belongs to no longer exists");
             }
-            LightbitsPoolConfig cfg = configForPool(volVO.getPoolId());
+            long poolId = volVO.getPoolId();
+            LightbitsPoolConfig cfg = configForPool(poolId);
             LightbitsApiClient client = clientFor(cfg);
 
-            String volName = LightbitsUtil.volumeName(cfg.getEnvironment(), vol.getUuid());
+            String volName = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, vol.getUuid());
             org.apache.cloudstack.storage.datastore.client.model.Volume lbVol =
                     client.getVolumeByName(volName).orElseThrow(() -> new CloudRuntimeException(
                             "base volume not found on cluster: " + volName));
-            String snapName = LightbitsUtil.volumeName(cfg.getEnvironment(), snapshot.getUuid());
+            String snapName = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, snapshot.getUuid());
             org.apache.cloudstack.storage.datastore.client.model.Snapshot s =
                     client.getSnapshotByName(snapName).orElseThrow(() -> new CloudRuntimeException(
                             "snapshot not found on cluster: " + snapName));
@@ -613,18 +693,21 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canProvideStorageStats() {
-        return true;   // capacity/usage come from the cluster API
+        // The pool credential is PROJECT-scoped and cannot read cluster capacity
+        // (GET /api/v2/cluster is 403), and LightOS exposes no per-project space quota — so
+        // there is no authoritative per-pool capacity/usage the plugin can report. Return
+        // false: CloudStack then uses its own allocation accounting (sum of provisioned
+        // volumes vs. the pool's seeded capacity and storage.overprovisioning.factor) instead
+        // of polling the backend. Capacity is seeded once at registration (see the lifecycle
+        // preflight) purely to satisfy the non-null capacity column.
+        return false;
     }
 
     @Override
     public Pair<Long, Long> getStorageStats(StoragePool storagePool) {
-        ClusterInfo info = clientForPool(storagePool.getId()).getClusterInfo();
-        ClusterInfo.Statistics s = info.getStatistics();
-        if (s == null) {
-            return null;
-        }
-        // Pair<capacity, used>
-        return new Pair<>(s.effectiveBytes(), s.usedBytes());
+        // Not used: canProvideStorageStats() is false, so CloudStack does not poll backend
+        // stats. Returning null is the documented contract for "no stats available".
+        return null;
     }
 
     @Override

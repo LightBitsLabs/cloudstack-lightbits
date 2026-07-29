@@ -25,7 +25,6 @@ import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.put;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
-import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -47,6 +46,9 @@ import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 class LightbitsApiClientTest {
     private static final String VOL_UUID = "1514b669-a22e-4af4-af0b-f7b8b26f951c";
     private static final String PROJECT = "default";
+    // Project-scoped volume collection — the client uses this route (a project-scoped JWT is
+    // denied the flat /api/v2/volumes?project_name= route).
+    private static final String VOLUMES = "/api/v2/projects/default/volumes";
 
     private WireMockServer wm;
     private LightbitsApiClient client;
@@ -86,12 +88,12 @@ class LightbitsApiClientTest {
     @Test
     void createVolumeSendsMandatoryProjectName() {
         // trial finding F1: projectName is mandatory — assert we always send it
-        wm.stubFor(post(urlEqualTo("/api/v2/volumes"))
+        wm.stubFor(post(urlEqualTo(VOLUMES))
                 .withRequestBody(matchingJsonPath("$.projectName", equalTo(PROJECT)))
                 .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
-        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null);
+        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, 512, false, null);
         assertEquals(VOL_UUID, v.getUuid());
-        wm.verify(postRequestedFor(urlEqualTo("/api/v2/volumes"))
+        wm.verify(postRequestedFor(urlEqualTo(VOLUMES))
                 .withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo("ALLOW_NONE"))));
     }
 
@@ -114,7 +116,7 @@ class LightbitsApiClientTest {
     @Test
     void getVolumeByNameFiltersDeletedStates() {
         // trial finding F3: deleted volumes linger in list responses
-        wm.stubFor(get(urlPathEqualTo("/api/v2/volumes"))
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(200).withBody(
                     "{\"volumes\":[" + volumeJson("Deleted") + "," + volumeJson("Available") + "]}")));
         Optional<Volume> v = client.getVolumeByName("cs-abc");
@@ -124,7 +126,7 @@ class LightbitsApiClientTest {
 
     @Test
     void listVolumesExcludesDeletedAndDeleting() {
-        wm.stubFor(get(urlPathEqualTo("/api/v2/volumes"))
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(200).withBody(
                     "{\"volumes\":[" + volumeJson("Deleted") + "," + volumeJson("Deleting") + "," + volumeJson("Available") + "]}")));
         List<Volume> vols = client.listVolumes();
@@ -135,11 +137,11 @@ class LightbitsApiClientTest {
 
     @Test
     void createVolumeIsIdempotentOnConflict() {
-        wm.stubFor(post(urlEqualTo("/api/v2/volumes"))
+        wm.stubFor(post(urlEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(409).withBody("{\"message\":\"already exists\"}")));
-        wm.stubFor(get(urlPathEqualTo("/api/v2/volumes"))
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Available") + "]}")));
-        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null);
+        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, 512, false, null);
         assertEquals(VOL_UUID, v.getUuid());
     }
 
@@ -184,19 +186,19 @@ class LightbitsApiClientTest {
 
     @Test
     void missingProjectNameErrorMapsToInvalid() {
-        wm.stubFor(post(urlEqualTo("/api/v2/volumes"))
+        wm.stubFor(post(urlEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(400).withBody("{\"code\":3,\"message\":\"ProjectName must be provided\"}")));
         LightbitsApiException e = assertThrows(LightbitsApiException.class,
-                () -> client.createVolume("cs-abc", 1L, 3, null));
+                () -> client.createVolume("cs-abc", 1L, 3, null, 512, false, null));
         assertEquals(Kind.INVALID, e.getKind());
     }
 
     @Test
     void quotaExhaustionMapsToQuota() {
-        wm.stubFor(post(urlEqualTo("/api/v2/volumes"))
+        wm.stubFor(post(urlEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(507).withBody("{\"message\":\"quota exceeded\"}")));
         LightbitsApiException e = assertThrows(LightbitsApiException.class,
-                () -> client.createVolume("cs-abc", 1L, 3, null));
+                () -> client.createVolume("cs-abc", 1L, 3, null, 512, false, null));
         assertEquals(Kind.QUOTA, e.getKind());
     }
 
@@ -249,13 +251,14 @@ class LightbitsApiClientTest {
                 .willReturn(aResponse().withStatus(200).withBody("{\"snapshots\":["
                     + "{\"UUID\":\"snap-src\",\"name\":\"cs-env-vol1-src\",\"state\":\"Available\"},"
                     + "{\"UUID\":\"snap-user\",\"name\":\"cs-env-usersnap\",\"state\":\"Available\"}]}")));
+
         assertEquals("snap-user", client.getSnapshotByName("cs-env-usersnap").orElseThrow().getUuid());
         assertTrue(client.getSnapshotByName("cs-env-missing").isEmpty());
     }
 
     @Test
     void getVolumeByNameMatchesExactNameEvenWhenServerIgnoresTheFilter() {
-        wm.stubFor(get(urlPathEqualTo("/api/v2/volumes"))
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":["
                     + "{\"UUID\":\"v-1\",\"name\":\"cs-env-other\",\"state\":\"Available\"},"
                     + "{\"UUID\":\"v-2\",\"name\":\"cs-env-wanted\",\"state\":\"Available\"}]}")));
@@ -282,11 +285,11 @@ class LightbitsApiClientTest {
 
     @Test
     void createVolumeFromSnapshotClones() {
-        wm.stubFor(post(urlEqualTo("/api/v2/volumes"))
+        wm.stubFor(post(urlEqualTo(VOLUMES))
                 .withRequestBody(matchingJsonPath("$.sourceSnapshotUUID", equalTo("snap-1")))
                 .withRequestBody(matchingJsonPath("$.size", equalTo("1073741824")))
                 .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
-        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null);
+        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null, 512, false, null);
         assertEquals(VOL_UUID, v.getUuid());
     }
 
@@ -320,5 +323,89 @@ class LightbitsApiClientTest {
         } catch (LightbitsApiException e) {
             assertFalse(String.valueOf(e.getMessage()).contains("test-jwt"));
         }
+    }
+
+    // ---- verifyProjectAccess: project-scoped reachability probe ----
+
+    @Test
+    void verifyProjectAccessSucceedsAndReturnsProjectUuid() {
+        // (1) volume list via the project-scoped route — the authorization proof
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[]}")));
+        // (2) project object — best-effort UUID
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default"))
+                .willReturn(aResponse().withStatus(200).withBody(
+                    "{\"UUID\":\"12f11016-15cf-419a-887c-cefc791e52d3\",\"name\":\"default\"}")));
+        assertEquals("12f11016-15cf-419a-887c-cefc791e52d3", client.verifyProjectAccess());
+        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlPathEqualTo(VOLUMES)));
+    }
+
+    @Test
+    void verifyProjectAccessThrowsWhenVolumeListDenied() {
+        // A token that cannot even list the project's volumes must fail registration.
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
+                .willReturn(aResponse().withStatus(403).withBody("{\"message\":\"permission denied\"}")));
+        assertThrows(LightbitsApiException.class, () -> client.verifyProjectAccess());
+    }
+
+    @Test
+    void verifyProjectAccessSucceedsEvenIfProjectObjectUnavailable() {
+        // Reachability is proven by the volume list; the project-object read is best-effort,
+        // so a failure there must NOT fail the probe (UUID just comes back null).
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[]}")));
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default"))
+                .willReturn(aResponse().withStatus(403).withBody("{\"message\":\"permission denied\"}")));
+        assertEquals(null, client.verifyProjectAccess());
+    }
+
+    // ---- QoS policy: attach by name + registration-time existence check ----
+
+    @Test
+    void createVolumeSendsQosPolicyNameWhenProvided() {
+        wm.stubFor(post(urlEqualTo(VOLUMES))
+                .withRequestBody(matchingJsonPath("$.qosPolicyName", equalTo("256rw")))
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, 512, false, "256rw");
+        assertEquals(VOL_UUID, v.getUuid());
+        wm.verify(postRequestedFor(urlEqualTo(VOLUMES))
+                .withRequestBody(matchingJsonPath("$.qosPolicyName", equalTo("256rw"))));
+    }
+
+    @Test
+    void createVolumeFromSnapshotSendsQosPolicyName() {
+        wm.stubFor(post(urlEqualTo(VOLUMES))
+                .withRequestBody(matchingJsonPath("$.sourceSnapshotUUID", equalTo("snap-1")))
+                .withRequestBody(matchingJsonPath("$.qosPolicyName", equalTo("256rw")))
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null, 512, false, "256rw");
+        assertEquals(VOL_UUID, v.getUuid());
+    }
+
+    @Test
+    void qosPolicyExistsMatchesByExactNameForProject() {
+        wm.stubFor(get(urlPathEqualTo("/api/v2/policies"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"policies\":["
+                    + "{\"UUID\":\"5a8c979f-8992-4f40-b64e-e7a854c570df\",\"name\":\"no-limit-policy\",\"state\":\"Active\"},"
+                    + "{\"UUID\":\"86d734f2-5557-48ee-abd7-3bdaf4841f11\",\"name\":\"256rw\",\"state\":\"Active\"}]}")));
+        assertTrue(client.qosPolicyExists("256rw"));
+        assertTrue(client.qosPolicyExists("no-limit-policy"));
+        // server may ignore the ?name= filter and return the full list; exact match client-side
+        assertFalse(client.qosPolicyExists("does-not-exist"));
+        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlPathEqualTo("/api/v2/policies"))
+                .withQueryParam("projectName", equalTo(PROJECT)));
+    }
+
+    @Test
+    void qosPolicyExistsFalseForNullOrBlank() {
+        assertFalse(client.qosPolicyExists(null));
+        assertFalse(client.qosPolicyExists("   "));
+    }
+
+    @Test
+    void qosPolicyExistsEmptyListMeansAbsent() {
+        wm.stubFor(get(urlPathEqualTo("/api/v2/policies"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"policies\":[]}")));
+        assertFalse(client.qosPolicyExists("256rw"));
     }
 }

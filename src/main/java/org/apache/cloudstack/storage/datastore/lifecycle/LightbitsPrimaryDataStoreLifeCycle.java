@@ -28,7 +28,6 @@ import org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreLifeCy
 import org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreParameters;
 import org.apache.cloudstack.engine.subsystem.api.storage.ZoneScope;
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
-import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
 import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
 import org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig;
 import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
@@ -45,6 +44,10 @@ import com.cloud.utils.crypt.DBEncryptionUtil;
 public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeCycle {
 
     private static final Logger LOG = LogManager.getLogger(LightbitsPrimaryDataStoreLifeCycle.class);
+
+    // Fallback capacity seed used only when the node list can't be read at registration.
+    // Not authoritative (canProvideStorageStats=false); CloudStack tracks real allocation.
+    private static final long NOMINAL_CAPACITY_BYTES = 1L << 50; // 1 PiB placeholder
 
     @Inject
     PrimaryDataStoreHelper dataStoreHelper;
@@ -64,6 +67,11 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
      * excluded; the caller encrypts it into storage_pool_details separately) and
      * cluster-derived capacity via {@link PreflightResult}.
      *
+     * Multiple Lightbits pools may share one project (e.g. different replica factors or
+     * compression settings): each pool's volumes are namespaced by the CloudStack pool id
+     * (see LightbitsUtil.poolPrefix), so pools never collide and pool deletion only ever
+     * removes that pool's own volumes.
+     *
      * Note: the actual DataStore creation goes through PrimaryDataStoreHelper, which
      * needs the Spring-wired managed context, so it is exercised by the live/Marvin
      * tests rather than unit tests. This method isolates the unit-testable logic.
@@ -77,33 +85,69 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         LightbitsPoolConfig cfg = LightbitsPoolConfig.fromUrl(url, jwt);
 
         LightbitsApiClient client = clientFactory.create(cfg);
-        ClusterInfo info;
+
+        // Project-scoped reachability + authorization check. The pool credential is a
+        // PROJECT-scoped JWT (project-admin on cfg.getProject()); it is denied the
+        // cluster-wide GET /api/v2/cluster (HTTP 403). verifyProjectAccess() instead lists
+        // the project's volumes and reads the project object — calls this token is allowed —
+        // proving in one step: endpoint reachable, credential valid, project exists/accessible.
         try {
-            info = client.getClusterInfo();
+            String projectUuid = client.verifyProjectAccess();
+            LOG.info("Lightbits: verified access to project '{}'{}", cfg.getProject(),
+                    projectUuid == null ? "" : " (uuid=" + projectUuid + ")");
         } catch (RuntimeException e) {
-            throw new IllegalArgumentException("cannot reach Lightbits cluster at " + cfg.apiEndpoint()
-                    + " with the supplied credentials: " + e.getMessage());
+            throw new IllegalArgumentException("cannot access Lightbits project '" + cfg.getProject()
+                    + "' at " + cfg.apiEndpoint() + " with the supplied credentials: " + e.getMessage()
+                    + " — check the JWT is a project-admin token for this project and that the project exists");
         }
-        if (!info.isHealthy()) {
-            throw new IllegalArgumentException("Lightbits cluster is not healthy (state="
-                    + (info.getHealth() == null ? "unknown" : info.getHealth().getState()) + ")");
+
+        // If a pool-default QoS policy is configured (?qosPolicy=<name>), verify it exists for
+        // this project now, so a typo fails registration instead of every volume create. Per-offering
+        // overrides (lightbitsQosPolicy) are validated at volume-create time in the driver.
+        String qosName = cfg.getQosPolicy();
+        if (qosName != null && !qosName.isBlank()) {
+            if (!client.qosPolicyExists(qosName)) {
+                throw new IllegalArgumentException("Lightbits QoS policy '" + qosName + "' (from ?qosPolicy=) "
+                        + "was not found or is not visible to project '" + cfg.getProject() + "'. "
+                        + "Create the policy, or make it Global or scoped to include this project, "
+                        + "or remove ?qosPolicy= from the pool URL.");
+            }
+            LOG.info("Lightbits: pool default QoS policy '{}' validated for project '{}'", qosName, cfg.getProject());
         }
-        // A volume cannot have more replicas than there are nodes. Fail fast at registration
-        // (with actionable guidance) instead of at the first volume create. Any cluster size is
-        // supported — e.g. a single-node cluster works with replicas=1. Tolerant: if the node
-        // count can't be determined, skip the check rather than block registration.
-        int nodes = 0;
+
+        // Node list (GET /api/v2/nodes) is readable by a project-scoped token. It gives two
+        // things: the replica-vs-node check, and a one-time capacity SEED for the pool's
+        // (non-null) capacity column. Capacity is not authoritative — the driver reports
+        // canProvideStorageStats()=false, so CloudStack does its own allocation accounting;
+        // this seed just gives the dashboard a sane initial figure. Because it is only a seed,
+        // a nodes read failure must NOT block registration.
+        LightbitsApiClient.NodeCapacity nc = null;
         try {
-            nodes = client.countNodes();
-        } catch (RuntimeException ignore) {
-            LOG.debug("Lightbits: could not list cluster nodes for replica validation; skipping");
+            nc = client.nodeCapacity();
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not read node list for capacity seed / replica check ({}); "
+                    + "registering with a nominal capacity — CloudStack tracks allocation itself", e.getMessage());
         }
-        if (nodes > 0 && cfg.getReplicaCount() > nodes) {
+
+        // A volume cannot have more replicas than there are nodes (checked only if known).
+        if (nc != null && nc.nodeCount > 0 && cfg.getReplicaCount() > nc.nodeCount) {
             throw new IllegalArgumentException("replicas=" + cfg.getReplicaCount() + " but the Lightbits cluster"
-                    + " has only " + nodes + " node" + (nodes == 1 ? "" : "s")
-                    + "; set replicas=1.." + nodes + " in the pool URL (single-node clusters use replicas=1)");
+                    + " has only " + nc.nodeCount + " node" + (nc.nodeCount == 1 ? "" : "s")
+                    + "; set replicas=1.." + nc.nodeCount + " in the pool URL (single-node clusters use replicas=1)");
         }
-        long capacity = info.getStatistics() == null ? 0L : info.getStatistics().effectiveBytes();
+
+        // One-time capacity seed = raw effective physical across nodes / replica count. Falls
+        // back to a nominal value if the node list was unavailable. Not refreshed at runtime.
+        long capacity;
+        if (nc != null && nc.effectivePhysicalBytes > 0) {
+            capacity = cfg.getReplicaCount() > 0
+                    ? nc.effectivePhysicalBytes / cfg.getReplicaCount()
+                    : nc.effectivePhysicalBytes;
+        } else {
+            capacity = NOMINAL_CAPACITY_BYTES;
+        }
+        LOG.info("Lightbits: seeded capacity for project '{}' = {} bytes (informational only; "
+                + "canProvideStorageStats=false, CloudStack tracks allocation)", cfg.getProject(), capacity);
 
         Map<String, String> persisted = new HashMap<>(cfg.toDetailsWithoutSecret());
         return new PreflightResult(cfg, persisted, capacity);
@@ -228,15 +272,17 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
     }
 
     /**
-     * Remove everything the plugin created on the Lightbits cluster for this pool before the
+     * Remove everything the plugin created on the Lightbits cluster for THIS pool before the
      * pool row goes away: cached template volumes (template_spool_ref) and any leftover
-     * environment-prefixed volumes/snapshots (e.g. clone-source snapshots whose deletion was
-     * deferred because the clone still existed). Guest volumes are already gone — CloudStack
-     * refuses to delete a pool that still has volumes.
+     * volumes/snapshots (e.g. clone-source snapshots whose deletion was deferred because the
+     * clone still existed). Guest volumes are already gone — CloudStack refuses to delete a
+     * pool that still has volumes.
      *
-     * The sweep is scoped to this pool's project AND its {@code cs-<environment>-} name
-     * prefix; the environment is required to be unique per pool, so objects of other pools /
-     * CloudStack deployments sharing the cluster are never touched.
+     * The sweep is scoped to this pool's project AND its per-pool name prefix
+     * {@code cs-<environment>-p<poolId>-} (see LightbitsUtil.poolPrefix). Because the prefix
+     * contains this pool's numeric id, it can only ever match volumes THIS pool created —
+     * so sibling pools sharing the same project and environment (e.g. a 2x-replica pool and
+     * a 3x-replica pool) are never touched.
      *
      * Best-effort by design: an unreachable cluster must not wedge pool removal. Failures are
      * logged with the objects left behind.
@@ -256,7 +302,9 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
                 templatePoolDao.remove(ref.getId());
             }
 
-            String prefix = LightbitsUtil.volumeName(cfg.getEnvironment(), "");
+            // Per-pool prefix: cs-<environment>-p<poolId>- — unique to THIS pool, so the
+            // project-wide list can be filtered safely without touching sibling pools.
+            String prefix = LightbitsUtil.poolPrefix(cfg.getEnvironment(), store.getId());
             for (org.apache.cloudstack.storage.datastore.client.model.Snapshot s : client.listSnapshots()) {
                 if (s.getName() != null && s.getName().startsWith(prefix)) {
                     client.deleteSnapshot(s.getUuid());
@@ -271,7 +319,7 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
             }
         } catch (Exception e) {
             LOG.warn("Lightbits pool {} delete: cluster-side cleanup incomplete ({}); "
-                    + "check the cluster for leftover cs-<environment>-* objects", store.getId(), e.getMessage());
+                    + "check the cluster for leftover cs-<environment>-p{}-* objects", store.getId(), e.getMessage(), store.getId());
         }
     }
 

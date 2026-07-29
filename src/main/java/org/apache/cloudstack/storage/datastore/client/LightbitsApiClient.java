@@ -55,6 +55,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  *  - idempotency: create tolerates "already exists" (returns existing volume),
  *    delete tolerates "already gone" (returns false)
  *  - transient failures (5xx, timeouts) retry with backoff
+ *
+ * Credential scope: the JWT may be PROJECT-scoped (project-admin on {@code project}).
+ * Such a token can operate on {@code /api/v2/projects/{p}/...} and can read
+ * {@code /api/v2/nodes}, but is denied the cluster-wide {@code GET /api/v2/cluster}
+ * (HTTP 403). Callers that must work under a project-scoped token should use
+ * {@link #verifyProjectAccess()} for reachability rather than {@link #getClusterInfo()}.
  */
 public class LightbitsApiClient {
     private static final int MAX_ATTEMPTS = 3;
@@ -106,38 +112,160 @@ public class LightbitsApiClient {
 
     // ---------------- cluster ----------------
 
+    /**
+     * Cluster-wide info. Requires a cluster-scoped credential; a PROJECT-scoped JWT is
+     * denied this route (HTTP 403). For reachability under a project-scoped token use
+     * {@link #verifyProjectAccess()} instead.
+     */
     public ClusterInfo getClusterInfo() {
         return parse(execute("GET", "/api/v2/cluster", null), ClusterInfo.class);
     }
 
     /** Number of nodes in the cluster — a hard upper bound on a volume's replica count. */
     public int countNodes() {
+        return nodeCapacity().nodeCount;
+    }
+
+    // ---------------- QoS policies ----------------
+
+    /**
+     * Check whether a QoS policy of the given NAME is visible to this client's project, via
+     * {@code GET /api/v2/policies?name=<name>&projectName=<project>} (readable by a
+     * project-scoped token). Used to validate a configured policy name at pool registration;
+     * volumes attach QoS by name (see createVolume), matching lbcli and the CSI driver.
+     */
+    public boolean qosPolicyExists(String policyName) {
+        if (policyName == null || policyName.isBlank()) {
+            return false;
+        }
+        Map<String, String> q = new HashMap<>();
+        q.put("name", policyName);
+        q.put("projectName", project);
+        String resp = execute("GET", "/api/v2/policies" + query(q), null);
+        try {
+            JsonNode root = mapper.readTree(resp);
+            for (JsonNode p : root.path("policies")) {
+                // exact name match client-side; server-side filtering isn't fully trusted
+                // (same caution as volume/snapshot name filters).
+                if (policyName.equals(p.path("name").asText(null))) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (IOException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "malformed policies list response", e);
+        }
+    }
+
+    /**
+     * Raw physical capacity aggregated across all cluster nodes, read from
+     * {@code GET /api/v2/nodes} (which a project-scoped token is permitted to read, unlike
+     * {@code GET /api/v2/cluster}). Values are RAW physical bytes; usable capacity for a
+     * given pool is {@code effective / replicaCount} (each logical byte costs replicaCount
+     * physical bytes).
+     *
+     * NOTE: this is CLUSTER-wide capacity — LightOS exposes no per-project space quota on
+     * the project object, so it cannot be scoped to a single project. Callers advertising
+     * this as a pool's capacity in a multi-tenant (project-per-tenant) setup should be aware
+     * that every pool on the cluster will report the same underlying capacity.
+     */
+    public NodeCapacity nodeCapacity() {
         try {
             JsonNode root = mapper.readTree(execute("GET", "/api/v2/nodes", null));
             JsonNode nodes = root.isArray() ? root : root.path("nodes");
-            return nodes.isArray() ? nodes.size() : 0;
+            long effective = 0L;
+            long free = 0L;
+            int count = 0;
+            if (nodes.isArray()) {
+                for (JsonNode n : nodes) {
+                    count++;
+                    JsonNode st = n.path("statistics");
+                    effective += parseLongField(st, "effectivePhysicalStorage");
+                    free += parseLongField(st, "freePhysicalStorage");
+                }
+            }
+            return new NodeCapacity(count, effective, free);
         } catch (IOException e) {
             throw new LightbitsApiException(Kind.UNKNOWN, "malformed nodes list response", e);
+        }
+    }
+
+    private static long parseLongField(JsonNode obj, String field) {
+        JsonNode v = obj.get(field);
+        if (v == null || v.isNull()) {
+            return 0L;
+        }
+        // LightOS returns these as JSON strings ("326315802624"); tolerate numbers too.
+        try {
+            return v.isTextual() ? Long.parseLong(v.asText()) : v.asLong();
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    /** Aggregated raw physical capacity across cluster nodes (see {@link #nodeCapacity()}). */
+    public static final class NodeCapacity {
+        public final int nodeCount;
+        public final long effectivePhysicalBytes;
+        public final long freePhysicalBytes;
+
+        public NodeCapacity(int nodeCount, long effectivePhysicalBytes, long freePhysicalBytes) {
+            this.nodeCount = nodeCount;
+            this.effectivePhysicalBytes = effectivePhysicalBytes;
+            this.freePhysicalBytes = freePhysicalBytes;
         }
     }
 
     // ---------------- volumes ----------------
 
     /**
+     * Project-scoped reachability + authorization check, safe for a project-scoped JWT.
+     *
+     * A project-scoped token is denied the cluster-wide {@code GET /api/v2/cluster}
+     * (HTTP 403) but is allowed to list its own project's volumes. A successful call
+     * proves, in one request: the endpoint is reachable, the credential is valid, and
+     * the configured project exists and is accessible to this token. Returns the
+     * project's UUID (best-effort, for logging); throws {@link LightbitsApiException}
+     * on any failure so the caller can turn it into an actionable registration error.
+     */
+    public String verifyProjectAccess() {
+        // (1) list this project's volumes via the PROJECT-SCOPED route — the exact route CSI
+        // uses. A project-scoped token (e.g. role "<project>:admin") is authorized here but is
+        // DENIED the flat /api/v2/volumes?project_name= route (HTTP 403), so this must use the
+        // project-scoped collection.
+        execute("GET", projectColl("volumes"), null);
+        // (2) best-effort: read the project object for its UUID (also project-scoped, HTTP 200).
+        try {
+            JsonNode root = mapper.readTree(execute("GET", "/api/v2/projects/" + urlenc(project), null));
+            JsonNode uuid = root.get("UUID");
+            return uuid == null ? null : uuid.asText();
+        } catch (Exception e) {
+            return null; // reachability already proven by (1); UUID is optional
+        }
+    }
+
+    /**
      * Idempotent create: name collisions (409) resolve to the existing volume,
      * so a retried CloudStack job converges instead of failing.
      */
-    public Volume createVolume(String name, long sizeBytes, int replicaCount, List<String> aclNqns) {
+    public Volume createVolume(String name, long sizeBytes, int replicaCount, List<String> aclNqns, int sectorSize, boolean compression, String qosPolicyName) {
         ObjectNode body = mapper.createObjectNode();
         body.put("name", name);
         body.put("size", String.valueOf(sizeBytes));
         body.put("replicaCount", replicaCount);
         body.put("projectName", project);
+        body.put("compression", String.valueOf(compression)); // String "true"/"false"
+        body.put("sectorSize", 512);
+        if (qosPolicyName != null && !qosPolicyName.isBlank()) {
+            // Attach QoS by policy NAME (matches lbcli --qos-policy-name and the CSI driver).
+            body.put("qosPolicyName", qosPolicyName);
+        }
         ObjectNode acl = body.putObject("acl");
         ArrayNode values = acl.putArray("values");
         (aclNqns == null || aclNqns.isEmpty() ? List.of("ALLOW_NONE") : aclNqns).forEach(values::add);
         try {
-            return parse(execute("POST", "/api/v2/volumes", body.toString()), Volume.class);
+            // Project-scoped route: a project-scoped token is denied the flat /api/v2/volumes.
+            return parse(execute("POST", projectColl("volumes"), body.toString()), Volume.class);
         } catch (LightbitsApiException e) {
             if (e.getKind() == Kind.CONFLICT) {
                 return getVolumeByName(name).orElseThrow(() -> e);
@@ -147,16 +275,16 @@ public class LightbitsApiClient {
     }
 
     public Optional<Volume> getVolumeByName(String name) {
-        Map<String, String> q = new HashMap<>();
-        q.put("name", name);
-        q.put("project_name", project);
-        String resp = execute("GET", "/api/v2/volumes" + query(q), null);
+        // Project-scoped list route (flat /api/v2/volumes?project_name= is denied to a
+        // project-scoped token). Server-side name filtering isn't trusted anyway — firstLiveVolume
+        // does an exact client-side match — so no query param is needed.
+        String resp = execute("GET", projectColl("volumes"), null);
         return firstLiveVolume(resp, name);
     }
 
     public Optional<Volume> getVolume(String uuid) {
         try {
-            String resp = execute("GET", "/api/v2/volumes/" + uuid + query(Map.of("project_name", project)), null);
+            String resp = execute("GET", projectPath("volumes", uuid), null);
             Volume v = parse(resp, Volume.class);
             return v.isDeletedOrDeleting() ? Optional.empty() : Optional.of(v);
         } catch (LightbitsApiException e) {
@@ -168,7 +296,9 @@ public class LightbitsApiClient {
     }
 
     public List<Volume> listVolumes() {
-        String resp = execute("GET", "/api/v2/volumes" + query(Map.of("project_name", project)), null);
+        // Project-scoped list route; the flat /api/v2/volumes?project_name= is denied to a
+        // project-scoped token (HTTP 403).
+        String resp = execute("GET", projectColl("volumes"), null);
         List<Volume> live = new ArrayList<>();
         try {
             JsonNode root = mapper.readTree(resp);
@@ -183,6 +313,7 @@ public class LightbitsApiClient {
         }
         return live;
     }
+
 
     /** Mutations must use the project-scoped route (trial finding F2). */
     public void resizeVolume(String uuid, long newSizeBytes) {
@@ -272,7 +403,7 @@ public class LightbitsApiClient {
     }
 
     /** Create a volume cloned from a snapshot (template-from-snapshot / volume-from-snapshot). */
-    public Volume createVolumeFromSnapshot(String name, String snapshotUuid, long sizeBytes, int replicaCount, List<String> aclNqns) {
+    public Volume createVolumeFromSnapshot(String name, String snapshotUuid, long sizeBytes, int replicaCount, List<String> aclNqns, int sectorSize, boolean compression, String qosPolicyName) {
         ObjectNode body = mapper.createObjectNode();
         body.put("name", name);
         // LightOS requires an explicit size even when cloning; it must be >= the snapshot size.
@@ -280,10 +411,16 @@ public class LightbitsApiClient {
         body.put("projectName", project);
         body.put("replicaCount", replicaCount);
         body.put("sourceSnapshotUUID", snapshotUuid);
+        body.put("compression", String.valueOf(compression)); // "true"/"false"
+        body.put("sectorSize", 512);
+        if (qosPolicyName != null && !qosPolicyName.isBlank()) {
+            body.put("qosPolicyName", qosPolicyName);
+        }
         ArrayNode values = body.putObject("acl").putArray("values");
         (aclNqns == null || aclNqns.isEmpty() ? List.of("ALLOW_NONE") : aclNqns).forEach(values::add);
         try {
-            return parse(execute("POST", "/api/v2/volumes", body.toString()), Volume.class);
+            // Project-scoped route (flat /api/v2/volumes is denied to a project-scoped token).
+            return parse(execute("POST", projectColl("volumes"), body.toString()), Volume.class);
         } catch (LightbitsApiException e) {
             if (e.getKind() == Kind.CONFLICT) {
                 return getVolumeByName(name).orElseThrow(() -> e);
