@@ -18,10 +18,44 @@ contains both the management-side storage provider and the agent-side `StorageAd
   dnf install -y nvme-cli        # or: apt-get install -y nvme-cli
   modprobe nvme-tcp && echo nvme-tcp > /etc/modules-load.d/nvme-tcp.conf
   ```
-- A **project-scoped** LightOS JWT (project-admin role on the target **project**). Do **not**
-  use the cluster-wide system JWT: the plugin only calls project-scoped routes plus
-  `GET /api/v2/nodes`, so the credential each pool stores should be limited to its own
-  project. A cluster-admin token still works, but grants far more than the pool needs.
+- A **project-scoped** LightOS JWT (project-admin role on the target **project**) — see
+  [Creating a project-scoped JWT](#creating-a-project-scoped-jwt) below. Never store the
+  cluster-wide system JWT (the one in `/etc/lbcli/lbcli.yaml` on cluster nodes) as a pool
+  credential: the plugin only calls project-scoped routes plus `GET /api/v2/nodes`, so the
+  credential each pool holds must be limited to its own project. Cluster-admin access is
+  needed exactly once, by the cluster operator, to register the signing credential below —
+  it is not what CloudStack stores.
+
+### Creating a project-scoped JWT
+
+Tokens are minted from a key pair whose **public** half is registered on the cluster as a
+project **credential** — no cluster secrets are involved, and the cluster never sees the
+private key. On any cluster node (or wherever `lbcli` has cluster-admin access):
+
+```bash
+# one-time per project: create the project and register a signing credential
+lbcli create project --name=<project>
+openssl genrsa -out cs-key.pem 2048
+openssl rsa -in cs-key.pem -pubout -out cs-pub.pem
+lbcli create credential --project-name=<project> --id=cs-cred --type=rsa256pubkey cs-pub.pem
+
+# mint the token (repeat any time — this is also the rotation path, see docs/jwt-rotation.md)
+lbcli create jwt --role <project>:admin --key=cs-key.pem --key-id=<project>:cs-cred \
+    --issuer=<admin@example.com> --subject=cloudstack \
+    --expiry=2027-01-01T00:00:00+00:00
+```
+
+Keep `cs-key.pem` safe — anyone holding it can mint tokens for the project. To confirm the
+token's scope before registering the pool: it must be able to list the project's volumes
+(`GET /api/v2/projects/<project>/volumes` returns 200) and must be **denied** the
+cluster-wide route (`GET /api/v2/cluster` returns 403):
+
+```bash
+curl -sk -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer <JWT>" \
+    https://<api-host>/api/v2/projects/<project>/volumes    # expect 200
+curl -sk -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer <JWT>" \
+    https://<api-host>/api/v2/cluster                       # expect 403
+```
 
 ## 1. Install the jar
 
@@ -77,8 +111,13 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
   **Required.** It is embedded in every Lightbits volume name (`cs-<environment>-p<poolId>-<uuid>`) so that
   multiple CloudStacks sharing one cluster never collide and each deployment's volumes are
   easily identifiable in `lbcli`/the cluster UI.
-- **details[0].jwt** — the JWT; stored **encrypted** in `storage_pool_details` (chunked, since it
-  exceeds the 255-char column). It is never written in cleartext or logged.
+- **details[0].jwt** — the **project-scoped** JWT for `<project>` (see
+  [Creating a project-scoped JWT](#creating-a-project-scoped-jwt)); stored **encrypted** in
+  `storage_pool_details` (chunked, since it exceeds the 255-char column). It is never written
+  in cleartext or logged by the plugin — but note that passing it as a command-line argument
+  exposes it to shell history and process listings on the machine you run `cmk` from. Prefer
+  the UI form, or mitigate (e.g. `HISTCONTROL=ignorespace` with a leading space, and run it
+  where untrusted users cannot read `/proc`).
 - **tags=lightbits** — reference this tag from disk/compute offerings to place volumes on Lightbits.
 
 The pool reports capacity/usage live from the cluster and should show **Up**.
