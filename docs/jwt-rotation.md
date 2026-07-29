@@ -16,10 +16,11 @@ never written in cleartext or logged. Tokens expire, so you will need to roll th
 
 ## When to rotate
 
-- Before the token's `exp` — check it with `lbcli parse jwt -J "<jwt>"` (prints header +
-  payload, including `exp`). Off-cluster without lbcli, mind that JWT payloads are unpadded
-  **base64url** (plain `base64 -d` can choke on missing padding and `-`/`_`):
-  `python3 -c 'import base64,json,sys;p=sys.argv[1].split(".")[1];print(json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4)))["exp"])' "<jwt>"`
+- Before the token's `exp` — check it with `lbcli parse jwt --jwt-file=/path/to/jwt` (prints
+  header + payload, including `exp`; the file form keeps the token out of argv/shell history).
+  Off-cluster without lbcli, mind that JWT payloads are unpadded **base64url** (plain
+  `base64 -d` can choke on missing padding and `-`/`_`) — read from the file, not argv:
+  `python3 -c 'import base64,json,sys;p=sys.stdin.read().split(".")[1];print(json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4)))["exp"])' < /path/to/jwt`
 - On suspected **token** compromise — and if the signing **private key** may be compromised,
   token renewal is not enough: see "Signing-key compromise" below
 - On a policy-driven schedule (recommended: issue shorter-lived project-scoped tokens and
@@ -44,6 +45,10 @@ unaffected (no JWT on the data path).
    ```
    > If `updateStoragePool` does not accept a new JWT in your build yet, use the fallback below.
 
+   The token on the `cmk` command line is exposed to shell history and process listings —
+   the same caveat (and mitigations) as pool registration; see the `details[0].jwt` note in
+   [INSTALL.md](../INSTALL.md).
+
    **Fallback (until in-place update lands): only safe for a pool with no volumes.**
    Re-register the pool with the new token — put it in maintenance, delete, and re-create
    with the same `url` + new `details[0].jwt`. ⚠️ Volume names embed the CloudStack pool id
@@ -56,7 +61,11 @@ unaffected (no JWT on the data path).
 3. **Verify** the new token works: trigger a control-plane op (e.g. list/refresh the pool, or
    create+delete a small test volume) and confirm success and that pool capacity still reports.
 
-4. **Revoke the old JWT** on the cluster once step 3 is confirmed.
+4. **Retire the old JWT.** LightOS JWTs are stateless bearer tokens validated by signature —
+   there is **no per-token revocation**: the old token stays technically valid until its
+   `exp`. Issue short-lived tokens so this window is small. If the old token may have been
+   **exposed**, expiry is not enough — rotate the signing credential instead (next section),
+   which immediately invalidates every token signed with that key.
 
 ## Signing-key compromise (credential rotation, not just token renewal)
 
