@@ -19,11 +19,12 @@ contains both the management-side storage provider and the agent-side `StorageAd
   modprobe nvme-tcp && echo nvme-tcp > /etc/modules-load.d/nvme-tcp.conf
   ```
 - A **project-scoped** LightOS JWT (project-admin role on the target **project**) — see
-  [Creating a project-scoped JWT](#creating-a-project-scoped-jwt) below. Do **not** use the
-  cluster-wide system JWT (the one in `/etc/lbcli/lbcli.yaml` on cluster nodes): the plugin
-  only calls project-scoped routes plus `GET /api/v2/nodes`, so the credential each pool
-  stores should be limited to its own project. A cluster-admin token still works, but grants
-  far more than the pool needs.
+  [Creating a project-scoped JWT](#creating-a-project-scoped-jwt) below. Never store the
+  cluster-wide system JWT (the one in `/etc/lbcli/lbcli.yaml` on cluster nodes) as a pool
+  credential: the plugin only calls project-scoped routes plus `GET /api/v2/nodes`, so the
+  credential each pool holds must be limited to its own project. Cluster-admin access is
+  needed exactly once, by the cluster operator, to register the signing credential below —
+  it is not what CloudStack stores.
 
 ### Creating a project-scoped JWT
 
@@ -113,7 +114,10 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
 - **details[0].jwt** — the **project-scoped** JWT for `<project>` (see
   [Creating a project-scoped JWT](#creating-a-project-scoped-jwt)); stored **encrypted** in
   `storage_pool_details` (chunked, since it exceeds the 255-char column). It is never written
-  in cleartext or logged.
+  in cleartext or logged by the plugin — but note that passing it as a command-line argument
+  exposes it to shell history and process listings on the machine you run `cmk` from. Prefer
+  the UI form, or mitigate (e.g. `HISTCONTROL=ignorespace` with a leading space, and run it
+  where untrusted users cannot read `/proc`).
 - **tags=lightbits** — reference this tag from disk/compute offerings to place volumes on Lightbits.
 
 The pool reports capacity/usage live from the cluster and should show **Up**.

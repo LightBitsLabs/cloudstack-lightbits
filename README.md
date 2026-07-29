@@ -27,9 +27,11 @@ Working today (KVM):
 - Per-volume replica factor via the `lightbitsReplicas` offering detail
 - Per-pool compression (`?compression=true`) and QoS policy (`?qosPolicy=<name>`, validated at
   registration), with a per-offering QoS override via the `lightbitsQosPolicy` offering detail
-- Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), several
-  pools can share one Lightbits project safely (per-pool volume-name prefix), and cluster-side
-  cleanup only ever touches the pool's own objects
+- Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and
+  cluster-side cleanup only ever touches the pool's own objects. Several pools can share one
+  Lightbits project **operationally** (a per-pool volume-name prefix keeps names, stats, and
+  cleanup collision-free) — but that is not a security boundary: a pool's JWT can read every
+  volume in its project, so tenant-level isolation requires **one Lightbits project per pool**
 - Cluster-wide and zone-wide storage pools; full cluster-side cleanup on teardown
 
 See [docs/architecture.md](docs/architecture.md) for the design sketch.

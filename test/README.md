@@ -75,7 +75,8 @@ entries); it needs a small patch to skip nameless entries at all three sites.
 ### Running
 
 ```bash
-export LB_API_ENDPOINT=<cluster-api-host> LB_JWT=<project-scoped-jwt> LB_PROJECT=default LB_ENVIRONMENT=ci-cs1
+# LB_PROJECT must match the project the JWT is scoped to
+export LB_API_ENDPOINT=<cluster-api-host> LB_JWT=<project-scoped-jwt> LB_PROJECT=<project> LB_ENVIRONMENT=ci-cs1
 nosetests -v --with-marvin --marvin-config=<mgmt>.cfg --zone=<zone> --hypervisor=kvm \
     test/integration/plugin/test_lightbits_volumes.py
 ```

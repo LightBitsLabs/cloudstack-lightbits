@@ -21,7 +21,7 @@ The plugin implements CloudStack **managed primary storage**: each CloudStack vo
 
 - **`LightbitsPrimaryDatastoreProvider`** — registers the provider (name `Lightbits`), exposes lifecycle + driver, `DataStoreProviderType.PRIMARY`.
 - **`LightbitsPrimaryDataStoreLifeCycle`** — storage pool creation from URL/parameters (API endpoint, JWT, project, replica count, compression), zone-wide and cluster-wide scope, maintenance mode, capacity registration.
-- **`LightbitsPrimaryDataStoreDriver`** — volume CRUD (`createAsync`/`deleteAsync`/`resize`), `grantAccess`/`revokeAccess` mapped to per-host NQN ACLs, snapshots via native Lightbits snapshots, template copy via thin clones, capacity/usage stats from the node list (`GET /api/v2/nodes`, scaled by the pool's replica factor).
+- **`LightbitsPrimaryDataStoreDriver`** — volume CRUD (`createAsync`/`deleteAsync`/`resize`), `grantAccess`/`revokeAccess` mapped to per-host NQN ACLs, snapshots via native Lightbits snapshots, template copy via thin clones, capacity/usage stats from the node list (`GET /api/v2/nodes`). Stat semantics: raw **physical cluster totals divided by the pool's default replica factor** — a logical-capacity approximation. Volumes using a `lightbitsReplicas` override or a clone-inherited factor consume physically more/less than this ratio implies, and pools sharing one cluster each report the same underlying physical capacity. CloudStack's own allocated-bytes accounting (which sums each volume's logical size) is exact per pool.
 
 Control-path client: thin HTTPS/JSON client for the Lightbits REST API, authenticated with a **project-scoped JWT** (`<project>:admin` — see INSTALL.md for minting; never the cluster-wide system JWT). The client deliberately exposes no cluster-scoped calls: a project token is denied routes like `GET /api/v2/cluster`, so every pool operation runs against `/api/v2/projects/<p>/...` plus the project-readable node list. **v1 targets a single Lightbits cluster per storage pool.** The endpoint is a plain configuration value, so richer Lightbits management endpoints (multi-cluster, data-management services) can be targeted in the future without plugin rework.
 
@@ -32,8 +32,12 @@ scan — the jar just needs to be on the agent classpath):
 
 - `nvme connect-all` over NVMe/TCP (fans out to all advertised cluster nodes); device
   resolution by the Lightbits volume UUID at `/dev/disk/by-id/nvme-uuid.<uuid>`. Per-volume
-  detach keeps the shared subsystem connected; controller teardown on pool removal is not
-  yet implemented.
+  detach deliberately keeps the shared subsystem connected (other volumes ride the same
+  controllers). Controller teardown on **pool removal** is not yet implemented: after
+  deleting a pool, its idle NVMe controllers (zero namespaces) remain on each KVM host until
+  a manual `nvme disconnect -n <subsystem-nqn>` or host reboot. This is hygiene, not a
+  correctness issue — the volumes and their ACLs are already gone cluster-side — and
+  automatic teardown is tracked as a hardening item.
 - hands the raw block device to libvirt/QEMU (attach/detach)
 - `grantAccess`/`revokeAccess` map the host's NVMe NQN into the volume ACL at attach/detach time
 

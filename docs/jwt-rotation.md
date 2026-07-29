@@ -16,8 +16,12 @@ never written in cleartext or logged. Tokens expire, so you will need to roll th
 
 ## When to rotate
 
-- Before the token's `exp` — check it: `echo <jwt> | cut -d. -f2 | base64 -d | jq .exp`
-- On suspected credential compromise
+- Before the token's `exp` — check it with `lbcli parse jwt -J "<jwt>"` (prints header +
+  payload, including `exp`). Off-cluster without lbcli, mind that JWT payloads are unpadded
+  **base64url** (plain `base64 -d` can choke on missing padding and `-`/`_`):
+  `python3 -c 'import base64,json,sys;p=sys.argv[1].split(".")[1];print(json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4)))["exp"])' "<jwt>"`
+- On suspected **token** compromise — and if the signing **private key** may be compromised,
+  token renewal is not enough: see "Signing-key compromise" below
 - On a policy-driven schedule (recommended: issue shorter-lived project-scoped tokens and
   rotate regularly rather than relying on one long-lived token)
 
@@ -53,6 +57,21 @@ unaffected (no JWT on the data path).
    create+delete a small test volume) and confirm success and that pool capacity still reports.
 
 4. **Revoke the old JWT** on the cluster once step 3 is confirmed.
+
+## Signing-key compromise (credential rotation, not just token renewal)
+
+Renewing the JWT with the **same key pair** does nothing if the private key itself leaked —
+the holder can keep minting valid tokens. In that case rotate the **credential**:
+
+1. Register a fresh key pair as a NEW credential (new `--id`) on the project — same flow as
+   the initial setup in INSTALL.md.
+2. Mint a new JWT signed with the new key (`--key-id=<project>:<new-cred-id>`). The pool
+   accepts it via the same `updateStoragePool` step above: the cluster validates a JWT
+   against whichever registered credential its `kid` names, so a token from a newly
+   registered credential works without any plugin-side change.
+3. **Delete the compromised credential**: `lbcli delete credential
+   --project-name=<project> --id=<old-cred-id>`. This immediately invalidates every token
+   signed with the old key, so do it only after step 2 is verified.
 
 ## Verifying the stored credential is encrypted
 
