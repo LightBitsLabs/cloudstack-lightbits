@@ -593,25 +593,28 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public long getUsedBytes(StoragePool storagePool) {
-        // Cluster stats (GET /api/v2/cluster) are not readable by a project-scoped token.
-        // Report provisioned bytes = sum of this project's live volume sizes, which the
-        // token CAN read via the project-scoped volume list.
-        return provisionedBytes(storagePool.getId());
-    }
-
-    /** Sum of live volume sizes in this pool's project (project-scoped; no cluster read). */
-    private long provisionedBytes(long poolId) {
+        // Cluster-wide used bytes (GET /api/v2/cluster) are not readable by the pool's
+        // project-scoped JWT. Report provisioned bytes = sum of THIS pool's live volume
+        // sizes — a project can host several pools, so filter by the per-pool name prefix —
+        // read via the project-scoped volume list the token is allowed.
+        //
+        // Failures propagate: this value feeds allocation decisions, and a fabricated 0
+        // ("pool is empty") would green-light allocations against unknown state.
+        long poolId = storagePool.getId();
+        LightbitsPoolConfig cfg = configForPool(poolId);
+        String prefix = LightbitsUtil.poolPrefix(cfg.getEnvironment(), poolId);
         try {
             long total = 0L;
             for (org.apache.cloudstack.storage.datastore.client.model.Volume v
-                    : clientForPool(poolId).listVolumes()) {
-                total += v.getSizeBytes();
+                    : clientFor(cfg).listVolumes()) {
+                if (v.getName() != null && v.getName().startsWith(prefix)) {
+                    total += v.getSizeBytes();
+                }
             }
             return total;
         } catch (Exception e) {
-            LOG.warn("Lightbits: could not compute provisioned bytes for pool {} ({}); reporting 0",
-                    poolId, e.getMessage());
-            return 0L;
+            throw new CloudRuntimeException("Lightbits: cannot compute provisioned bytes for pool "
+                    + poolId + ": " + e.getMessage(), e);
         }
     }
 
@@ -693,21 +696,38 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canProvideStorageStats() {
-        // The pool credential is PROJECT-scoped and cannot read cluster capacity
-        // (GET /api/v2/cluster is 403), and LightOS exposes no per-project space quota — so
-        // there is no authoritative per-pool capacity/usage the plugin can report. Return
-        // false: CloudStack then uses its own allocation accounting (sum of provisioned
-        // volumes vs. the pool's seeded capacity and storage.overprovisioning.factor) instead
-        // of polling the backend. Capacity is seeded once at registration (see the lifecycle
-        // preflight) purely to satisfy the non-null capacity column.
-        return false;
+        // Capacity/usage come from GET /api/v2/nodes, which the pool's project-scoped JWT IS
+        // allowed to read (the cluster-wide GET /api/v2/cluster is not). This keeps capacity
+        // refreshed at runtime — cluster scale-out is picked up on the next stats cycle
+        // instead of being frozen at registration time.
+        return true;
     }
 
     @Override
     public Pair<Long, Long> getStorageStats(StoragePool storagePool) {
-        // Not used: canProvideStorageStats() is false, so CloudStack does not poll backend
-        // stats. Returning null is the documented contract for "no stats available".
-        return null;
+        // Pair<capacity, used>, both scaled by the pool's replica factor: raw physical bytes
+        // across nodes / replicaCount = logical bytes this pool can provision. Values are
+        // CLUSTER-wide (LightOS has no per-project space quota), so pools sharing a cluster
+        // all report the same underlying capacity — a known, documented double-count.
+        try {
+            long poolId = storagePool.getId();
+            LightbitsPoolConfig cfg = configForPool(poolId);
+            LightbitsApiClient.NodeCapacity nc = clientFor(cfg).nodeCapacity();
+            if (nc.effectivePhysicalBytes <= 0) {
+                LOG.warn("Lightbits: nodes report no effective capacity for pool {}; skipping stats cycle", poolId);
+                return null;
+            }
+            long replicas = Math.max(1, cfg.getReplicaCount());
+            long capacity = nc.effectivePhysicalBytes / replicas;
+            long used = Math.max(0L, nc.effectivePhysicalBytes - nc.freePhysicalBytes) / replicas;
+            return new Pair<>(capacity, used);
+        } catch (Exception e) {
+            // The stats path must degrade gracefully and never wedge the collector; null is
+            // the documented contract for "no stats this cycle".
+            LOG.warn("Lightbits: could not read node capacity for pool {} ({}); skipping stats cycle",
+                    storagePool.getId(), e.getMessage());
+            return null;
+        }
     }
 
     @Override

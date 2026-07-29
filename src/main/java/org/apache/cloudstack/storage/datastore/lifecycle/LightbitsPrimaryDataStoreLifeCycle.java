@@ -45,10 +45,6 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     private static final Logger LOG = LogManager.getLogger(LightbitsPrimaryDataStoreLifeCycle.class);
 
-    // Fallback capacity seed used only when the node list can't be read at registration.
-    // Not authoritative (canProvideStorageStats=false); CloudStack tracks real allocation.
-    private static final long NOMINAL_CAPACITY_BYTES = 1L << 50; // 1 PiB placeholder
-
     @Inject
     PrimaryDataStoreHelper dataStoreHelper;
     @Inject
@@ -61,11 +57,13 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
     com.cloud.storage.dao.VMTemplatePoolDao templatePoolDao;
 
     /**
-     * Parse + validate pool params and preflight the cluster (auth, project, health,
+     * Parse + validate pool params and preflight the cluster (auth, project access,
      * capacity) BEFORE any pool row is created — a bad endpoint/JWT fails fast here
-     * rather than leaving a half-registered pool. Returns the details map (JWT
-     * excluded; the caller encrypts it into storage_pool_details separately) and
-     * cluster-derived capacity via {@link PreflightResult}.
+     * rather than leaving a half-registered pool. The credential is a PROJECT-scoped
+     * JWT by design (never the cluster-wide system JWT), so every check here uses
+     * routes such a token is allowed. Returns the details map (JWT excluded; the
+     * caller encrypts it into storage_pool_details separately) and node-derived
+     * capacity via {@link PreflightResult}.
      *
      * Multiple Lightbits pools may share one project (e.g. different replica factors or
      * compression settings): each pool's volumes are namespaced by the CloudStack pool id
@@ -102,8 +100,9 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         }
 
         // If a pool-default QoS policy is configured (?qosPolicy=<name>), verify it exists for
-        // this project now, so a typo fails registration instead of every volume create. Per-offering
-        // overrides (lightbitsQosPolicy) are validated at volume-create time in the driver.
+        // this project now, so a typo fails registration instead of every volume create.
+        // Per-offering overrides (lightbitsQosPolicy) are NOT validated anywhere yet — an
+        // unknown name there surfaces as the cluster's error at volume create.
         String qosName = cfg.getQosPolicy();
         if (qosName != null && !qosName.isBlank()) {
             if (!client.qosPolicyExists(qosName)) {
@@ -115,39 +114,43 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
             LOG.info("Lightbits: pool default QoS policy '{}' validated for project '{}'", qosName, cfg.getProject());
         }
 
-        // Node list (GET /api/v2/nodes) is readable by a project-scoped token. It gives two
-        // things: the replica-vs-node check, and a one-time capacity SEED for the pool's
-        // (non-null) capacity column. Capacity is not authoritative — the driver reports
-        // canProvideStorageStats()=false, so CloudStack does its own allocation accounting;
-        // this seed just gives the dashboard a sane initial figure. Because it is only a seed,
-        // a nodes read failure must NOT block registration.
-        LightbitsApiClient.NodeCapacity nc = null;
+        // Node list (GET /api/v2/nodes) is readable by a project-scoped token and is this
+        // pool's capacity source — the initial capacity here and every runtime stats cycle
+        // (driver getStorageStats). It also feeds the replica-vs-node check. If it cannot be
+        // read, registration fails with an actionable error rather than seeding a made-up
+        // figure that CloudStack would allocate against.
+        LightbitsApiClient.NodeCapacity nc;
         try {
             nc = client.nodeCapacity();
         } catch (RuntimeException e) {
-            LOG.warn("Lightbits: could not read node list for capacity seed / replica check ({}); "
-                    + "registering with a nominal capacity — CloudStack tracks allocation itself", e.getMessage());
+            throw new IllegalArgumentException("cannot read the Lightbits node list (GET /api/v2/nodes) at "
+                    + cfg.apiEndpoint() + ": " + e.getMessage()
+                    + " — the node list supplies the pool's capacity and the replica-count check and is"
+                    + " readable by a project-scoped JWT; check connectivity and the token's permissions");
         }
 
-        // A volume cannot have more replicas than there are nodes (checked only if known).
-        if (nc != null && nc.nodeCount > 0 && cfg.getReplicaCount() > nc.nodeCount) {
+        // A volume cannot have more replicas than there are nodes.
+        if (nc.nodeCount > 0 && cfg.getReplicaCount() > nc.nodeCount) {
             throw new IllegalArgumentException("replicas=" + cfg.getReplicaCount() + " but the Lightbits cluster"
                     + " has only " + nc.nodeCount + " node" + (nc.nodeCount == 1 ? "" : "s")
                     + "; set replicas=1.." + nc.nodeCount + " in the pool URL (single-node clusters use replicas=1)");
         }
 
-        // One-time capacity seed = raw effective physical across nodes / replica count. Falls
-        // back to a nominal value if the node list was unavailable. Not refreshed at runtime.
-        long capacity;
-        if (nc != null && nc.effectivePhysicalBytes > 0) {
-            capacity = cfg.getReplicaCount() > 0
-                    ? nc.effectivePhysicalBytes / cfg.getReplicaCount()
-                    : nc.effectivePhysicalBytes;
-        } else {
-            capacity = NOMINAL_CAPACITY_BYTES;
+        // Initial capacity = raw effective physical across nodes / replica count (logical bytes
+        // this pool can provision). Refreshed at runtime via the driver's getStorageStats, which
+        // reads the same node list. Refuse to register against a cluster reporting no capacity —
+        // a fabricated figure would be worse than a pointed error.
+        if (nc.effectivePhysicalBytes <= 0) {
+            throw new IllegalArgumentException("the Lightbits nodes at " + cfg.apiEndpoint()
+                    + " report no effective physical capacity; refusing to register the pool"
+                    + " (is the cluster fully installed and its nodes Active?)");
         }
-        LOG.info("Lightbits: seeded capacity for project '{}' = {} bytes (informational only; "
-                + "canProvideStorageStats=false, CloudStack tracks allocation)", cfg.getProject(), capacity);
+        long capacity = cfg.getReplicaCount() > 0
+                ? nc.effectivePhysicalBytes / cfg.getReplicaCount()
+                : nc.effectivePhysicalBytes;
+        LOG.info("Lightbits: initial capacity for project '{}' = {} bytes ({} nodes, replicas={});"
+                + " refreshed each stats cycle from GET /api/v2/nodes",
+                cfg.getProject(), capacity, nc.nodeCount, cfg.getReplicaCount());
 
         Map<String, String> persisted = new HashMap<>(cfg.toDetailsWithoutSecret());
         return new PreflightResult(cfg, persisted, capacity);

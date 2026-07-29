@@ -18,7 +18,10 @@ contains both the management-side storage provider and the agent-side `StorageAd
   dnf install -y nvme-cli        # or: apt-get install -y nvme-cli
   modprobe nvme-tcp && echo nvme-tcp > /etc/modules-load.d/nvme-tcp.conf
   ```
-- A LightOS **JWT** with permission to manage volumes in the target **project**
+- A **project-scoped** LightOS JWT (project-admin role on the target **project**). Do **not**
+  use the cluster-wide system JWT: the plugin only calls project-scoped routes plus
+  `GET /api/v2/nodes`, so the credential each pool stores should be limited to its own
+  project. A cluster-admin token still works, but grants far more than the pool needs.
 
 ## 1. Install the jar
 
@@ -71,7 +74,7 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
   `replicas=1`** (2 nodes → `1..2`, 3+ nodes → `1..3`). Any cluster size is supported; the
   plugin does not require three nodes.
 - **environment** — a short identifier for this CloudStack deployment (e.g. `prod-cs1`).
-  **Required.** It is embedded in every Lightbits volume name (`cs-<environment>-<uuid>`) so that
+  **Required.** It is embedded in every Lightbits volume name (`cs-<environment>-p<poolId>-<uuid>`) so that
   multiple CloudStacks sharing one cluster never collide and each deployment's volumes are
   easily identifiable in `lbcli`/the cluster UI.
 - **details[0].jwt** — the JWT; stored **encrypted** in `storage_pool_details` (chunked, since it
@@ -83,7 +86,7 @@ The pool reports capacity/usage live from the cluster and should show **Up**.
 ## 4. Use it
 
 Create a disk or compute offering with **storage tag `lightbits`**; volumes and VM root disks
-created against it are provisioned as Lightbits volumes (named `cs-<environment>-<uuid>`),
+created against it are provisioned as Lightbits volumes (named `cs-<environment>-p<poolId>-<uuid>`),
 connected to KVM hosts over NVMe/TCP at attach time.
 
 Volume snapshots (take/revert/delete, create-volume-from-snapshot) map to native Lightbits

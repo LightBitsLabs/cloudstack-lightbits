@@ -18,6 +18,7 @@ package org.apache.cloudstack.storage.datastore.lifecycle;
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -36,6 +37,11 @@ import org.junit.jupiter.api.Test;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 
+/**
+ * Preflight runs entirely with a PROJECT-scoped JWT: access is proven via the
+ * project-scoped volume list (not the cluster-wide GET /api/v2/cluster, which such a
+ * token is denied), and capacity comes from GET /api/v2/nodes.
+ */
 class LightbitsLifeCyclePreflightTest {
     private WireMockServer wm;
     private LightbitsPrimaryDataStoreLifeCycle lc;
@@ -67,39 +73,52 @@ class LightbitsLifeCyclePreflightTest {
         return m;
     }
 
-    /** Stub a healthy cluster with the given number of nodes. */
-    private void stubHealthyCluster(int nodeCount) {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(200).withBody(
-            "{\"UUID\":\"c-1\",\"health\":{\"state\":\"OK\"},"
-            + "\"statistics\":{\"effectivePhysicalStorage\":\"102392961820261\"}}")));
+    /** Stub the project-scoped access probe: volume list + project object. */
+    private void stubProjectAccess() {
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/volumes"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[]}")));
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default"))
+                .willReturn(aResponse().withStatus(200).withBody(
+                    "{\"UUID\":\"12f11016-15cf-419a-887c-cefc791e52d3\",\"name\":\"default\"}")));
+    }
+
+    /** Stub the node list with the given per-node capacity statistics. */
+    private void stubNodes(int nodeCount, long effectivePerNode, long freePerNode) {
         StringBuilder nodes = new StringBuilder("{\"nodes\":[");
         for (int i = 0; i < nodeCount; i++) {
-            nodes.append(i == 0 ? "" : ",").append("{\"UUID\":\"n").append(i).append("\",\"state\":\"Active\"}");
+            nodes.append(i == 0 ? "" : ",").append("{\"UUID\":\"n").append(i).append("\",\"state\":\"Active\",")
+                 .append("\"statistics\":{\"effectivePhysicalStorage\":\"").append(effectivePerNode)
+                 .append("\",\"freePhysicalStorage\":\"").append(freePerNode).append("\"}}");
         }
         nodes.append("]}");
         wm.stubFor(get(urlEqualTo("/api/v2/nodes")).willReturn(aResponse().withStatus(200).withBody(nodes.toString())));
     }
 
     @Test
-    void preflightSucceedsAgainstHealthyCluster() {
-        stubHealthyCluster(3);
+    void preflightSucceedsWithProjectScopedToken() {
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
         PreflightResult r = lc.preflight(dsInfos("lightbits://10.19.43.20/default?replicas=3&environment=cs1", "jwt-x"));
         assertEquals("default", r.config.getProject());
-        assertEquals(102392961820261L, r.capacityBytes);
+        // capacity = sum of effectivePhysicalStorage across nodes / replicas
+        assertEquals(3 * 30_000_000_000L / 3, r.capacityBytes);
         assertFalse(r.detailsWithoutSecret.containsKey(LightbitsPoolConfig.KEY_JWT),
                 "persisted details must not carry the JWT");
     }
 
     @Test
     void preflightSucceedsOnSingleNodeClusterWithOneReplica() {
-        stubHealthyCluster(1);
+        stubProjectAccess();
+        stubNodes(1, 10_000_000_000L, 9_000_000_000L);
         PreflightResult r = lc.preflight(dsInfos("lightbits://h/default?replicas=1&environment=cs1", "jwt"));
         assertEquals(1, r.config.getReplicaCount());
+        assertEquals(10_000_000_000L, r.capacityBytes);
     }
 
     @Test
     void preflightRejectsMoreReplicasThanNodes() {
-        stubHealthyCluster(1);
+        stubProjectAccess();
+        stubNodes(1, 10_000_000_000L, 9_000_000_000L);
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt")));
         assertTrue(e.getMessage().contains("only 1 node"), e.getMessage());
@@ -107,31 +126,70 @@ class LightbitsLifeCyclePreflightTest {
     }
 
     @Test
-    void preflightSkipsReplicaCheckWhenNodesUnavailable() {
-        // /api/v2/cluster healthy, /api/v2/nodes not stubbed (404) -> check skipped, not fatal
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(200).withBody(
-            "{\"UUID\":\"c-1\",\"health\":{\"state\":\"OK\"},"
-            + "\"statistics\":{\"effectivePhysicalStorage\":\"1\"}}")));
-        PreflightResult r = lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt"));
-        assertEquals(3, r.config.getReplicaCount());
+    void preflightRejectsWhenNodeListUnavailable() {
+        // The node list is the pool's capacity source; without it registration must fail
+        // with an actionable error, never proceed on a fabricated capacity figure.
+        stubProjectAccess();
+        // /api/v2/nodes not stubbed -> 404
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt")));
+        assertTrue(e.getMessage().contains("node list"), e.getMessage());
     }
 
     @Test
-    void preflightRejectsUnhealthyCluster() {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(200).withBody(
-            "{\"UUID\":\"c-1\",\"health\":{\"state\":\"Degraded\"}}")));
+    void preflightRejectsWhenNodesReportNoCapacity() {
+        stubProjectAccess();
+        stubNodes(3, 0L, 0L);
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt")));
+        assertTrue(e.getMessage().contains("no effective physical capacity"), e.getMessage());
+    }
+
+    @Test
+    void preflightRejectsWhenProjectAccessDenied() {
+        // A token that cannot list the project's volumes (403) must fail registration
+        // with a message pointing at the project-scoped JWT requirement.
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/volumes"))
+                .willReturn(aResponse().withStatus(403).withBody("{\"message\":\"permission denied\"}")));
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> lc.preflight(dsInfos("lightbits://h/default?environment=cs1", "jwt")));
-        assertTrue(e.getMessage().contains("not healthy"));
+        assertTrue(e.getMessage().contains("cannot access Lightbits project"), e.getMessage());
+        assertTrue(e.getMessage().contains("project-admin"), e.getMessage());
     }
 
     @Test
     void preflightRejectsUnreachableClusterWithActionableMessage() {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(401).withBody("denied")));
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/volumes"))
+                .willReturn(aResponse().withStatus(401).withBody("denied")));
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                 () -> lc.preflight(dsInfos("lightbits://h/default?environment=cs1", "bad-jwt")));
-        assertTrue(e.getMessage().contains("cannot reach Lightbits cluster"));
+        assertTrue(e.getMessage().contains("cannot access Lightbits project"), e.getMessage());
         assertFalse(e.getMessage().contains("bad-jwt"), "credentials must not leak into errors");
+    }
+
+    @Test
+    void preflightRejectsUnknownQosPolicy() {
+        // A pool-default ?qosPolicy= that the project cannot see must fail registration,
+        // not every subsequent volume create.
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        wm.stubFor(get(urlPathEqualTo("/api/v2/policies"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"policies\":[]}")));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1&qosPolicy=256rw", "jwt")));
+        assertTrue(e.getMessage().contains("QoS policy '256rw'"), e.getMessage());
+    }
+
+    @Test
+    void preflightAcceptsKnownQosPolicy() {
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        wm.stubFor(get(urlPathEqualTo("/api/v2/policies"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"policies\":["
+                    + "{\"UUID\":\"86d734f2-5557-48ee-abd7-3bdaf4841f11\",\"name\":\"256rw\",\"state\":\"Active\"}]}")));
+        PreflightResult r = lc.preflight(
+                dsInfos("lightbits://h/default?replicas=3&environment=cs1&qosPolicy=256rw", "jwt"));
+        assertEquals("256rw", r.config.getQosPolicy());
     }
 
     @Test

@@ -34,7 +34,6 @@ import java.util.List;
 import java.util.Optional;
 
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind;
-import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
 import org.apache.cloudstack.storage.datastore.client.model.Volume;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -74,15 +73,15 @@ class LightbitsApiClientTest {
     // ---- sunny day ----
 
     @Test
-    void clusterInfoParsesHealthAndCapacity() {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster")).willReturn(aResponse().withStatus(200).withBody(
-            "{\"UUID\":\"c-1\",\"subsystemNQN\":\"nqn.2016-01.com.lightbitslabs:uuid:x\","
-            + "\"health\":{\"state\":\"OK\"},"
-            + "\"statistics\":{\"effectivePhysicalStorage\":\"1000\",\"freePhysicalStorage\":\"800\",\"physicalUsedStorage\":\"200\"}}")));
-        ClusterInfo info = client.getClusterInfo();
-        assertTrue(info.isHealthy());
-        assertEquals(1000L, info.getStatistics().effectiveBytes());
-        assertEquals(800L, info.getStatistics().freeBytes());
+    void nodeCapacityAggregatesStatisticsAcrossNodes() {
+        wm.stubFor(get(urlEqualTo("/api/v2/nodes")).willReturn(aResponse().withStatus(200).withBody(
+            "{\"nodes\":["
+            + "{\"UUID\":\"n0\",\"state\":\"Active\",\"statistics\":{\"effectivePhysicalStorage\":\"1000\",\"freePhysicalStorage\":\"800\"}},"
+            + "{\"UUID\":\"n1\",\"state\":\"Active\",\"statistics\":{\"effectivePhysicalStorage\":\"1000\",\"freePhysicalStorage\":\"600\"}}]}")));
+        LightbitsApiClient.NodeCapacity nc = client.nodeCapacity();
+        assertEquals(2, nc.nodeCount);
+        assertEquals(2000L, nc.effectivePhysicalBytes);
+        assertEquals(1400L, nc.freePhysicalBytes);
     }
 
     @Test
@@ -156,32 +155,32 @@ class LightbitsApiClientTest {
 
     @Test
     void transientServerErrorRetriesThenSucceeds() {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster")).inScenario("flaky")
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).inScenario("flaky")
                 .whenScenarioStateIs("Started")
                 .willReturn(aResponse().withStatus(503).withBody("busy"))
                 .willSetStateTo("second"));
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster")).inScenario("flaky")
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).inScenario("flaky")
                 .whenScenarioStateIs("second")
-                .willReturn(aResponse().withStatus(200).withBody("{\"UUID\":\"c-1\",\"health\":{\"state\":\"OK\"}}")));
-        assertTrue(client.getClusterInfo().isHealthy());
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Available") + "]}")));
+        assertEquals(1, client.listVolumes().size());
     }
 
     @Test
     void transientErrorGivesUpAfterMaxAttempts() {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster"))
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(500).withBody("boom")));
-        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.getClusterInfo());
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.listVolumes());
         assertEquals(Kind.TRANSIENT, e.getKind());
-        wm.verify(3, com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo("/api/v2/cluster")));
+        wm.verify(3, com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlPathEqualTo(VOLUMES)));
     }
 
     @Test
     void authFailureMapsToAuthKindAndDoesNotRetry() {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster"))
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(401).withBody("{\"message\":\"bad token\"}")));
-        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.getClusterInfo());
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.listVolumes());
         assertEquals(Kind.AUTH, e.getKind());
-        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo("/api/v2/cluster")));
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlPathEqualTo(VOLUMES)));
     }
 
     @Test
@@ -262,7 +261,11 @@ class LightbitsApiClientTest {
                 .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":["
                     + "{\"UUID\":\"v-1\",\"name\":\"cs-env-other\",\"state\":\"Available\"},"
                     + "{\"UUID\":\"v-2\",\"name\":\"cs-env-wanted\",\"state\":\"Available\"}]}")));
+        // the name filter is sent as a server-side hint (hot path; avoids pulling the
+        // full project list), but matching stays exact and client-side
         assertEquals("v-2", client.getVolumeByName("cs-env-wanted").orElseThrow().getUuid());
+        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlPathEqualTo(VOLUMES))
+                .withQueryParam("name", equalTo("cs-env-wanted")));
         assertTrue(client.getVolumeByName("cs-env-nope").isEmpty());
     }
 
@@ -303,18 +306,18 @@ class LightbitsApiClientTest {
 
     @Test
     void malformedResponseIsAClearError() {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster"))
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(200).withBody("this is not json")));
-        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.getClusterInfo());
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.listVolumes());
         assertEquals(Kind.UNKNOWN, e.getKind());
     }
 
     @Test
     void jwtIsSentAsBearerAndNeverLogged() {
-        wm.stubFor(get(urlEqualTo("/api/v2/cluster"))
-                .willReturn(aResponse().withStatus(200).withBody("{\"UUID\":\"c-1\",\"health\":{\"state\":\"OK\"}}")));
-        client.getClusterInfo();
-        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo("/api/v2/cluster"))
+        wm.stubFor(get(urlPathEqualTo(VOLUMES))
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[]}")));
+        client.listVolumes();
+        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlPathEqualTo(VOLUMES))
                 .withHeader("Authorization", equalTo("Bearer test-jwt")));
         // error messages must not contain the token
         wm.stubFor(get(urlEqualTo("/api/v2/nodes")).willReturn(aResponse().withStatus(401).withBody("denied")));

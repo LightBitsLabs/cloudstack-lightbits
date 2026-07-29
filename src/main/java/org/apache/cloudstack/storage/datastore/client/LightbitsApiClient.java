@@ -36,7 +36,6 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind;
-import org.apache.cloudstack.storage.datastore.client.model.ClusterInfo;
 import org.apache.cloudstack.storage.datastore.client.model.Snapshot;
 import org.apache.cloudstack.storage.datastore.client.model.Volume;
 
@@ -56,11 +55,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  *    delete tolerates "already gone" (returns false)
  *  - transient failures (5xx, timeouts) retry with backoff
  *
- * Credential scope: the JWT may be PROJECT-scoped (project-admin on {@code project}).
- * Such a token can operate on {@code /api/v2/projects/{p}/...} and can read
- * {@code /api/v2/nodes}, but is denied the cluster-wide {@code GET /api/v2/cluster}
- * (HTTP 403). Callers that must work under a project-scoped token should use
- * {@link #verifyProjectAccess()} for reachability rather than {@link #getClusterInfo()}.
+ * Credential scope: the JWT is PROJECT-scoped by design (project-admin on {@code project}),
+ * never the cluster-wide system JWT. Such a token can operate on
+ * {@code /api/v2/projects/{p}/...} and can read {@code /api/v2/nodes}, but is denied
+ * cluster-wide routes like {@code GET /api/v2/cluster} (HTTP 403) — so this client exposes
+ * no cluster-scoped calls. Reachability checks use {@link #verifyProjectAccess()}; capacity
+ * comes from {@link #nodeCapacity()}.
  */
 public class LightbitsApiClient {
     private static final int MAX_ATTEMPTS = 3;
@@ -110,16 +110,7 @@ public class LightbitsApiClient {
         return project;
     }
 
-    // ---------------- cluster ----------------
-
-    /**
-     * Cluster-wide info. Requires a cluster-scoped credential; a PROJECT-scoped JWT is
-     * denied this route (HTTP 403). For reachability under a project-scoped token use
-     * {@link #verifyProjectAccess()} instead.
-     */
-    public ClusterInfo getClusterInfo() {
-        return parse(execute("GET", "/api/v2/cluster", null), ClusterInfo.class);
-    }
+    // ---------------- nodes ----------------
 
     /** Number of nodes in the cluster — a hard upper bound on a volume's replica count. */
     public int countNodes() {
@@ -276,9 +267,14 @@ public class LightbitsApiClient {
 
     public Optional<Volume> getVolumeByName(String name) {
         // Project-scoped list route (flat /api/v2/volumes?project_name= is denied to a
-        // project-scoped token). Server-side name filtering isn't trusted anyway — firstLiveVolume
-        // does an exact client-side match — so no query param is needed.
-        String resp = execute("GET", projectColl("volumes"), null);
+        // project-scoped token). This is a HOT path (grant/revoke on every VM start/stop,
+        // resize, delete), so send the name filter as a hint — without it every lookup pulls
+        // the project's full volume list, and a paginated response could hide the match.
+        // firstLiveVolume still exact-matches client-side: server-side filtering is a
+        // best-effort narrowing, never trusted (same caution as getSnapshotByName).
+        Map<String, String> q = new HashMap<>();
+        q.put("name", name);
+        String resp = execute("GET", projectColl("volumes") + query(q), null);
         return firstLiveVolume(resp, name);
     }
 
