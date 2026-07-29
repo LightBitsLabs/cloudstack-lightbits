@@ -21,17 +21,19 @@ The plugin implements CloudStack **managed primary storage**: each CloudStack vo
 
 - **`LightbitsPrimaryDatastoreProvider`** — registers the provider (name `Lightbits`), exposes lifecycle + driver, `DataStoreProviderType.PRIMARY`.
 - **`LightbitsPrimaryDataStoreLifeCycle`** — storage pool creation from URL/parameters (API endpoint, JWT, project, replica count, compression), zone-wide and cluster-wide scope, maintenance mode, capacity registration.
-- **`LightbitsPrimaryDataStoreDriver`** — volume CRUD (`createAsync`/`deleteAsync`/`resize`), `grantAccess`/`revokeAccess` mapped to per-host NQN ACLs, snapshots via native Lightbits snapshots, template copy via thin clones, capacity/usage stats from the cluster API.
+- **`LightbitsPrimaryDataStoreDriver`** — volume CRUD (`createAsync`/`deleteAsync`/`resize`), `grantAccess`/`revokeAccess` mapped to per-host NQN ACLs, snapshots via native Lightbits snapshots, template copy via thin clones, capacity/usage stats from the node list (`GET /api/v2/nodes`, scaled by the pool's replica factor).
 
-Control-path client: thin HTTPS/JSON client for the Lightbits REST API (JWT auth). **v1 targets a single Lightbits cluster per storage pool.** The endpoint is a plain configuration value, so richer Lightbits management endpoints (multi-cluster, data-management services) can be targeted in the future without plugin rework.
+Control-path client: thin HTTPS/JSON client for the Lightbits REST API, authenticated with a **project-scoped JWT** (`<project>:admin` — see INSTALL.md for minting; never the cluster-wide system JWT). The client deliberately exposes no cluster-scoped calls: a project token is denied routes like `GET /api/v2/cluster`, so every pool operation runs against `/api/v2/projects/<p>/...` plus the project-readable node list. **v1 targets a single Lightbits cluster per storage pool.** The endpoint is a plain configuration value, so richer Lightbits management endpoints (multi-cluster, data-management services) can be targeted in the future without plugin rework.
 
 ## KVM agent side (implemented)
 
 `LightbitsStorageAdaptor` on the CloudStack KVM agent (auto-loaded via the agent's package
 scan — the jar just needs to be on the agent classpath):
 
-- `nvme connect`/`disconnect` over NVMe/TCP; device resolution by the Lightbits volume UUID
-  at `/dev/disk/by-id/nvme-uuid.<uuid>`
+- `nvme connect-all` over NVMe/TCP (fans out to all advertised cluster nodes); device
+  resolution by the Lightbits volume UUID at `/dev/disk/by-id/nvme-uuid.<uuid>`. Per-volume
+  detach keeps the shared subsystem connected; controller teardown on pool removal is not
+  yet implemented.
 - hands the raw block device to libvirt/QEMU (attach/detach)
 - `grantAccess`/`revokeAccess` map the host's NVMe NQN into the volume ACL at attach/detach time
 

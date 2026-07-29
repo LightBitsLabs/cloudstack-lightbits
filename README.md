@@ -25,10 +25,12 @@ Working today (KVM):
 - Volume snapshots: take / revert (native in-place rollback) / delete, and create-volume-from-snapshot
 - Volume resize (grow, offline — online resize of managed KVM disks is restricted by CloudStack itself)
 - Per-volume replica factor via the `lightbitsReplicas` offering detail
+- Per-pool compression (`?compression=true`) and QoS policy (`?qosPolicy=<name>`, validated at
+  registration), with a per-offering QoS override via the `lightbitsQosPolicy` offering detail
+- Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), several
+  pools can share one Lightbits project safely (per-pool volume-name prefix), and cluster-side
+  cleanup only ever touches the pool's own objects
 - Cluster-wide and zone-wide storage pools; full cluster-side cleanup on teardown
-
-Planned:
-- QoS mapping from CloudStack disk offerings to Lightbits QoS policies
 
 See [docs/architecture.md](docs/architecture.md) for the design sketch.
 
@@ -42,6 +44,7 @@ credential rotation.
 
 - Apache CloudStack 4.22+
 - Lightbits cluster running LightOS ≥ 3.x, reachable from the management server (API, port 443) and KVM hosts (NVMe/TCP, port 4420). Any cluster size works — from a single node (use `replicas=1`) up to a full multi-node cluster; three nodes are **not** required.
+- A **project-scoped** LightOS JWT per storage pool (`<project>:admin` role) — **not** the cluster-wide system JWT. Minting instructions: [INSTALL.md](INSTALL.md#creating-a-project-scoped-jwt).
 - KVM hosts: `nvme-cli`, `nvme_tcp` kernel module
 
 ## Building

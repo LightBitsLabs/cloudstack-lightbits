@@ -13,7 +13,7 @@ and TLS/JWT behavior is exercised directly.
 | `client/LightbitsApiClientTest` | volume/snapshot CRUD, idempotency (409/404), typed error mapping, retry/backoff |
 | `client/LightbitsApiClientTlsTest` | TLS cert validation — self-signed rejected; dev bypass still enforces hostname verification |
 | `util/LightbitsPoolConfigTest` | pool-URL parse/validate, required `environment`, JWT chunking/never-persisted-plaintext |
-| `lifecycle/LightbitsLifeCyclePreflightTest` | pool preflight against a stubbed cluster (health/auth/params) |
+| `lifecycle/LightbitsLifeCyclePreflightTest` | pool preflight against a stubbed cluster (project access via project-scoped token, node capacity, replica check, QoS validation, params) |
 
 ```bash
 mvn -B verify        # compile + unit tests + JaCoCo coverage gate (fails < 60%)
@@ -40,12 +40,13 @@ upstream-submittable. `test_lightbits_volumes.py` covers:
 
 - pool up + capacity from the cluster (the suite registers its OWN pool with storage tag
   `lb-ci` and its own environment, so it never interferes with other pools on the cluster)
-- volume create → attach (NVMe/TCP) → detach → delete; the backing `cs-<environment>-<uuid>`
-  volume is verified on the cluster, and verified GONE after delete
+- volume create → attach (NVMe/TCP) → detach → delete; the backing
+  `cs-<environment>-p<poolId>-<uuid>` volume is verified on the cluster, and verified GONE
+  after delete
 - resize (attach-first so the managed volume is materialized, then offline grow)
 - rainy day: bad credentials rejected, missing `environment` rejected
-- **leak checker**: every `cs-<environment>-*` cluster volume maps to a live CloudStack
-  volume or cached template
+- **leak checker**: every `cs-<environment>-p<poolId>-*` cluster volume maps to a live
+  CloudStack volume or cached template
 
 ### Installing Marvin (once per management server)
 
@@ -74,7 +75,7 @@ entries); it needs a small patch to skip nameless entries at all three sites.
 ### Running
 
 ```bash
-export LB_API_ENDPOINT=<cluster-api-host> LB_JWT=<jwt> LB_PROJECT=default LB_ENVIRONMENT=ci-cs1
+export LB_API_ENDPOINT=<cluster-api-host> LB_JWT=<project-scoped-jwt> LB_PROJECT=default LB_ENVIRONMENT=ci-cs1
 nosetests -v --with-marvin --marvin-config=<mgmt>.cfg --zone=<zone> --hypervisor=kvm \
     test/integration/plugin/test_lightbits_volumes.py
 ```
