@@ -212,7 +212,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 org.apache.cloudstack.storage.datastore.client.model.Volume created =
                         client.createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), vol.getUuid()),
-                                vol.getSize(), replicasFor(vol, cfg), null, 512, cfg.isCompression(),
+                                vol.getSize(), replicasFor(vol, cfg), null, cfg.isCompression(),
                                 qosPolicyNameFor(vol, cfg));
                 // path identifies the backing volume; the KVM adaptor resolves the NVMe
                 // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>). The path must be
@@ -238,7 +238,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 org.apache.cloudstack.storage.datastore.client.model.Volume created =
                         clientFor(cfg).createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), tmpl.getUuid()),
-                                size, cfg.getReplicaCount(), null, 512, cfg.isCompression(), null);
+                                size, cfg.getReplicaCount(), null, cfg.isCompression(), null);
                 path = created.getUuid();
                 // The managed-template flow calls processEvent(OperationSucceeded) WITHOUT the
                 // answer, so the framework does not persist our path. Set install_path on the
@@ -391,6 +391,15 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(destPoolId);
         // environment can differ per pool; resolve the source's own environment for its name.
         LightbitsPoolConfig srcCfg = srcPoolId == destPoolId ? cfg : configForPool(srcPoolId);
+        // The single (destination-pool) client can only see the source if both pools live on
+        // the same cluster and project. Fail with a pointed message instead of the confusing
+        // "clone source not found on cluster" a cross-project lookup would produce.
+        if (!srcCfg.getProject().equals(cfg.getProject())
+                || !srcCfg.apiEndpoint().equals(cfg.apiEndpoint())) {
+            throw new CloudRuntimeException("Lightbits: cannot clone across pools in different projects/clusters ("
+                    + srcCfg.apiEndpoint() + "/" + srcCfg.getProject() + " -> "
+                    + cfg.apiEndpoint() + "/" + cfg.getProject() + ")");
+        }
         LightbitsApiClient client = clientFor(cfg);
 
         String srcName = LightbitsUtil.volumeName(srcCfg.getEnvironment(), srcPoolId, srcData.getUuid());
@@ -435,7 +444,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
         }
         org.apache.cloudstack.storage.datastore.client.model.Volume created =
-                client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null, 512,
+                client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null,
                         cfg.isCompression(), qosPolicyNameFor(destVol, cfg));
         String path = created.getUuid();
 
@@ -629,6 +638,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         try {
             VolumeInfo vol = snapshot.getBaseVolume();
             VolumeVO volVO = volumeDao.findById(vol.getId());
+            if (volVO == null || volVO.getRemoved() != null || volVO.getPoolId() == null) {
+                throw new CloudRuntimeException("the volume this snapshot belongs to is no longer on a"
+                        + " Lightbits pool (volume " + vol.getUuid() + ")");
+            }
             long poolId = volVO.getPoolId();
             LightbitsPoolConfig cfg = configForPool(poolId);
             LightbitsApiClient client = clientFor(cfg);
@@ -663,8 +676,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         try {
             VolumeInfo vol = snapshot.getBaseVolume();
             VolumeVO volVO = volumeDao.findById(vol.getId());
-            if (volVO == null || volVO.getRemoved() != null) {
-                throw new CloudRuntimeException("the volume this snapshot belongs to no longer exists");
+            if (volVO == null || volVO.getRemoved() != null || volVO.getPoolId() == null) {
+                throw new CloudRuntimeException("the volume this snapshot belongs to no longer exists"
+                        + " or is not on a Lightbits pool");
             }
             long poolId = volVO.getPoolId();
             LightbitsPoolConfig cfg = configForPool(poolId);

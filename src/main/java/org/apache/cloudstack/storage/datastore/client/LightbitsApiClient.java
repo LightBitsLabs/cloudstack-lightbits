@@ -38,6 +38,8 @@ import javax.net.ssl.X509TrustManager;
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind;
 import org.apache.cloudstack.storage.datastore.client.model.Snapshot;
 import org.apache.cloudstack.storage.datastore.client.model.Volume;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -63,6 +65,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * comes from {@link #nodeCapacity()}.
  */
 public class LightbitsApiClient {
+    private static final Logger LOG = LogManager.getLogger(LightbitsApiClient.class);
     private static final int MAX_ATTEMPTS = 3;
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
@@ -112,7 +115,7 @@ public class LightbitsApiClient {
 
     // ---------------- nodes ----------------
 
-    /** Number of nodes in the cluster — a hard upper bound on a volume's replica count. */
+    /** Number of ACTIVE nodes in the cluster — a hard upper bound on a volume's replica count. */
     public int countNodes() {
         return nodeCapacity().nodeCount;
     }
@@ -159,6 +162,10 @@ public class LightbitsApiClient {
      * the project object, so it cannot be scoped to a single project. Callers advertising
      * this as a pool's capacity in a multi-tenant (project-per-tenant) setup should be aware
      * that every pool on the cluster will report the same underlying capacity.
+     *
+     * Only nodes in state {@code Active} are counted: Activating/Deactivating/Inactive nodes
+     * cannot serve I/O, so counting them would overstate both the replica upper bound and
+     * the advertised capacity.
      */
     public NodeCapacity nodeCapacity() {
         try {
@@ -169,6 +176,12 @@ public class LightbitsApiClient {
             int count = 0;
             if (nodes.isArray()) {
                 for (JsonNode n : nodes) {
+                    String state = n.path("state").asText("");
+                    if (!"Active".equalsIgnoreCase(state)) {
+                        LOG.warn("Lightbits: node {} in state '{}' excluded from capacity/replica accounting",
+                                n.path("UUID").asText("?"), state);
+                        continue;
+                    }
                     count++;
                     JsonNode st = n.path("statistics");
                     effective += parseLongField(st, "effectivePhysicalStorage");
@@ -190,6 +203,7 @@ public class LightbitsApiClient {
         try {
             return v.isTextual() ? Long.parseLong(v.asText()) : v.asLong();
         } catch (NumberFormatException e) {
+            LOG.warn("Lightbits: unparseable node statistic {}='{}'; treating as 0", field, v.asText());
             return 0L;
         }
     }
@@ -239,13 +253,14 @@ public class LightbitsApiClient {
      * Idempotent create: name collisions (409) resolve to the existing volume,
      * so a retried CloudStack job converges instead of failing.
      */
-    public Volume createVolume(String name, long sizeBytes, int replicaCount, List<String> aclNqns, int sectorSize, boolean compression, String qosPolicyName) {
+    public Volume createVolume(String name, long sizeBytes, int replicaCount, List<String> aclNqns, boolean compression, String qosPolicyName) {
         ObjectNode body = mapper.createObjectNode();
         body.put("name", name);
         body.put("size", String.valueOf(sizeBytes));
         body.put("replicaCount", replicaCount);
         body.put("projectName", project);
         body.put("compression", String.valueOf(compression)); // String "true"/"false"
+        // fixed at 512e by design: VM boot disks need 512-byte logical blocks (LightOS default is 4K)
         body.put("sectorSize", 512);
         if (qosPolicyName != null && !qosPolicyName.isBlank()) {
             // Attach QoS by policy NAME (matches lbcli --qos-policy-name and the CSI driver).
@@ -399,7 +414,7 @@ public class LightbitsApiClient {
     }
 
     /** Create a volume cloned from a snapshot (template-from-snapshot / volume-from-snapshot). */
-    public Volume createVolumeFromSnapshot(String name, String snapshotUuid, long sizeBytes, int replicaCount, List<String> aclNqns, int sectorSize, boolean compression, String qosPolicyName) {
+    public Volume createVolumeFromSnapshot(String name, String snapshotUuid, long sizeBytes, int replicaCount, List<String> aclNqns, boolean compression, String qosPolicyName) {
         ObjectNode body = mapper.createObjectNode();
         body.put("name", name);
         // LightOS requires an explicit size even when cloning; it must be >= the snapshot size.
@@ -408,6 +423,7 @@ public class LightbitsApiClient {
         body.put("replicaCount", replicaCount);
         body.put("sourceSnapshotUUID", snapshotUuid);
         body.put("compression", String.valueOf(compression)); // "true"/"false"
+        // fixed at 512e by design: VM boot disks need 512-byte logical blocks (LightOS default is 4K)
         body.put("sectorSize", 512);
         if (qosPolicyName != null && !qosPolicyName.isBlank()) {
             body.put("qosPolicyName", qosPolicyName);

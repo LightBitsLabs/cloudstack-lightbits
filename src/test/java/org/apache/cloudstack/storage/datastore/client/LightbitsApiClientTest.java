@@ -85,12 +85,28 @@ class LightbitsApiClientTest {
     }
 
     @Test
+    void nodeCapacitySkipsNonActiveNodes() {
+        // Activating/Inactive nodes cannot serve I/O: they must not inflate the replica
+        // upper bound or the advertised capacity.
+        wm.stubFor(get(urlEqualTo("/api/v2/nodes")).willReturn(aResponse().withStatus(200).withBody(
+            "{\"nodes\":["
+            + "{\"UUID\":\"n0\",\"state\":\"Active\",\"statistics\":{\"effectivePhysicalStorage\":\"1000\",\"freePhysicalStorage\":\"800\"}},"
+            + "{\"UUID\":\"n1\",\"state\":\"Activating\",\"statistics\":{\"effectivePhysicalStorage\":\"1000\",\"freePhysicalStorage\":\"1000\"}},"
+            + "{\"UUID\":\"n2\",\"state\":\"Inactive\",\"statistics\":{\"effectivePhysicalStorage\":\"1000\",\"freePhysicalStorage\":\"1000\"}}]}")));
+        LightbitsApiClient.NodeCapacity nc = client.nodeCapacity();
+        assertEquals(1, nc.nodeCount);
+        assertEquals(1000L, nc.effectivePhysicalBytes);
+        assertEquals(800L, nc.freePhysicalBytes);
+        assertEquals(1, client.countNodes());
+    }
+
+    @Test
     void createVolumeSendsMandatoryProjectName() {
         // trial finding F1: projectName is mandatory — assert we always send it
         wm.stubFor(post(urlEqualTo(VOLUMES))
                 .withRequestBody(matchingJsonPath("$.projectName", equalTo(PROJECT)))
                 .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
-        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, 512, false, null);
+        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, false, null);
         assertEquals(VOL_UUID, v.getUuid());
         wm.verify(postRequestedFor(urlEqualTo(VOLUMES))
                 .withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo("ALLOW_NONE"))));
@@ -140,7 +156,7 @@ class LightbitsApiClientTest {
                 .willReturn(aResponse().withStatus(409).withBody("{\"message\":\"already exists\"}")));
         wm.stubFor(get(urlPathEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Available") + "]}")));
-        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, 512, false, null);
+        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, false, null);
         assertEquals(VOL_UUID, v.getUuid());
     }
 
@@ -188,7 +204,7 @@ class LightbitsApiClientTest {
         wm.stubFor(post(urlEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(400).withBody("{\"code\":3,\"message\":\"ProjectName must be provided\"}")));
         LightbitsApiException e = assertThrows(LightbitsApiException.class,
-                () -> client.createVolume("cs-abc", 1L, 3, null, 512, false, null));
+                () -> client.createVolume("cs-abc", 1L, 3, null, false, null));
         assertEquals(Kind.INVALID, e.getKind());
     }
 
@@ -197,7 +213,7 @@ class LightbitsApiClientTest {
         wm.stubFor(post(urlEqualTo(VOLUMES))
                 .willReturn(aResponse().withStatus(507).withBody("{\"message\":\"quota exceeded\"}")));
         LightbitsApiException e = assertThrows(LightbitsApiException.class,
-                () -> client.createVolume("cs-abc", 1L, 3, null, 512, false, null));
+                () -> client.createVolume("cs-abc", 1L, 3, null, false, null));
         assertEquals(Kind.QUOTA, e.getKind());
     }
 
@@ -292,7 +308,7 @@ class LightbitsApiClientTest {
                 .withRequestBody(matchingJsonPath("$.sourceSnapshotUUID", equalTo("snap-1")))
                 .withRequestBody(matchingJsonPath("$.size", equalTo("1073741824")))
                 .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
-        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null, 512, false, null);
+        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null, false, null);
         assertEquals(VOL_UUID, v.getUuid());
     }
 
@@ -319,13 +335,12 @@ class LightbitsApiClientTest {
         client.listVolumes();
         wm.verify(com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlPathEqualTo(VOLUMES))
                 .withHeader("Authorization", equalTo("Bearer test-jwt")));
-        // error messages must not contain the token
-        wm.stubFor(get(urlEqualTo("/api/v2/nodes")).willReturn(aResponse().withStatus(401).withBody("denied")));
-        try {
-            client.getVolume("x");
-        } catch (LightbitsApiException e) {
-            assertFalse(String.valueOf(e.getMessage()).contains("test-jwt"));
-        }
+        // error messages must not contain the token — fail the exact route getVolume calls,
+        // so the assertion is guaranteed to run (assertThrows, not a maybe-entered catch)
+        wm.stubFor(get(urlPathEqualTo(VOLUMES + "/x"))
+                .willReturn(aResponse().withStatus(401).withBody("denied")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.getVolume("x"));
+        assertFalse(String.valueOf(e.getMessage()).contains("test-jwt"));
     }
 
     // ---- verifyProjectAccess: project-scoped reachability probe ----
@@ -369,7 +384,7 @@ class LightbitsApiClientTest {
         wm.stubFor(post(urlEqualTo(VOLUMES))
                 .withRequestBody(matchingJsonPath("$.qosPolicyName", equalTo("256rw")))
                 .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
-        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, 512, false, "256rw");
+        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, false, "256rw");
         assertEquals(VOL_UUID, v.getUuid());
         wm.verify(postRequestedFor(urlEqualTo(VOLUMES))
                 .withRequestBody(matchingJsonPath("$.qosPolicyName", equalTo("256rw"))));
@@ -381,7 +396,7 @@ class LightbitsApiClientTest {
                 .withRequestBody(matchingJsonPath("$.sourceSnapshotUUID", equalTo("snap-1")))
                 .withRequestBody(matchingJsonPath("$.qosPolicyName", equalTo("256rw")))
                 .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
-        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null, 512, false, "256rw");
+        Volume v = client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null, false, "256rw");
         assertEquals(VOL_UUID, v.getUuid());
     }
 

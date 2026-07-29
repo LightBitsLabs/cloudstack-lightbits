@@ -105,7 +105,18 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         // unknown name there surfaces as the cluster's error at volume create.
         String qosName = cfg.getQosPolicy();
         if (qosName != null && !qosName.isBlank()) {
-            if (!client.qosPolicyExists(qosName)) {
+            boolean qosExists;
+            try {
+                qosExists = client.qosPolicyExists(qosName);
+            } catch (RuntimeException e) {
+                // keep the registration error story consistent: an unreadable policies route
+                // surfaces as the same actionable IllegalArgumentException as the other checks
+                throw new IllegalArgumentException("cannot verify Lightbits QoS policy '" + qosName
+                        + "' for project '" + cfg.getProject() + "' at " + cfg.apiEndpoint() + ": "
+                        + e.getMessage() + " — check the token can read GET /api/v2/policies,"
+                        + " or remove ?qosPolicy= from the pool URL");
+            }
+            if (!qosExists) {
                 throw new IllegalArgumentException("Lightbits QoS policy '" + qosName + "' (from ?qosPolicy=) "
                         + "was not found or is not visible to project '" + cfg.getProject() + "'. "
                         + "Create the policy, or make it Global or scoped to include this project, "

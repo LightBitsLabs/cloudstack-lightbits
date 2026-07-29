@@ -181,6 +181,19 @@ class LightbitsLifeCyclePreflightTest {
     }
 
     @Test
+    void preflightRejectsWhenQosPolicyCheckFails() {
+        // an unreadable policies route must surface as the same actionable error as the
+        // other preflight checks, not as a raw API exception
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        wm.stubFor(get(urlPathEqualTo("/api/v2/policies"))
+                .willReturn(aResponse().withStatus(403).withBody("{\"message\":\"permission denied\"}")));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1&qosPolicy=256rw", "jwt")));
+        assertTrue(e.getMessage().contains("cannot verify Lightbits QoS policy"), e.getMessage());
+    }
+
+    @Test
     void preflightAcceptsKnownQosPolicy() {
         stubProjectAccess();
         stubNodes(3, 30_000_000_000L, 20_000_000_000L);
