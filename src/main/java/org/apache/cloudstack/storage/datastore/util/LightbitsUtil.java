@@ -14,14 +14,10 @@
  * limitations under the License.
  */
 package org.apache.cloudstack.storage.datastore.util;
-
 import com.cloud.storage.Storage.StoragePoolType;
-
 public final class LightbitsUtil {
     private LightbitsUtil() { }
-
     public static final String PROVIDER_NAME = "Lightbits";
-
     /**
      * v1 reuses an existing StoragePoolType because the enum is closed and cannot be
      * extended by an out-of-tree plugin on an unmodified CloudStack. IscsiLUN is chosen
@@ -34,16 +30,31 @@ public final class LightbitsUtil {
     public static final StoragePoolType POOL_TYPE = StoragePoolType.IscsiLUN;
 
     /**
-     * Name of the Lightbits volume backing a CloudStack volume.
+     * Per-pool name prefix: {@code cs-<environment>-p<poolId>-}.
      *
-     * Format: {@code cs-<environment>-<cloudStackVolumeUuid>}. The environment suffix
-     * identifies the owning CloudStack when multiple deployments share one Lightbits
-     * cluster — avoiding collisions and making ownership obvious in `lbcli`/the cluster UI.
+     * The numeric CloudStack pool id makes the prefix unique to ONE pool even when several
+     * pools share the same Lightbits project AND environment (e.g. a 2x-replica pool and a
+     * 3x-replica pool, or compression-on vs compression-off, all in one project). This is
+     * what lets the pool-delete cleanup sweep by prefix safely: the prefix can only ever
+     * match volumes this pool created, so removing one pool never touches a sibling pool's
+     * volumes.
+     *
+     * environment still identifies the owning CloudStack when multiple deployments share a
+     * cluster; the pool id disambiguates pools within one deployment.
      */
-    public static String volumeName(String environment, String cloudStackVolumeUuid) {
-        return "cs-" + environment + "-" + cloudStackVolumeUuid;
+    public static String poolPrefix(String environment, long poolId) {
+        return "cs-" + environment + "-p" + poolId + "-";
     }
 
+    /**
+     * Name of the Lightbits volume/snapshot backing a CloudStack object.
+     *
+     * Format: {@code cs-<environment>-p<poolId>-<cloudStackUuid>}. Unique per pool (see
+     * {@link #poolPrefix}); ownership is obvious in {@code lbcli}/the cluster UI.
+     */
+    public static String volumeName(String environment, long poolId, String cloudStackUuid) {
+        return poolPrefix(environment, poolId) + cloudStackUuid;
+    }
     /**
      * Parse the {@code lightbitsReplicas} offering detail: an integer 1..3. A malformed or
      * out-of-range value fails the volume creation with a pointed message rather than being

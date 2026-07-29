@@ -40,9 +40,9 @@ class LightbitsApiClientTlsTest {
     void setUp() {
         wm = new WireMockServer(WireMockConfiguration.options().dynamicPort().dynamicHttpsPort());
         wm.start();
-        wm.stubFor(WireMock.get(WireMock.urlEqualTo("/api/v2/cluster"))
+        wm.stubFor(WireMock.get(WireMock.urlPathEqualTo("/api/v2/projects/default/volumes"))
                 .willReturn(WireMock.aResponse().withStatus(200)
-                        .withBody("{\"UUID\":\"c-1\",\"health\":{\"state\":\"OK\"}}")));
+                        .withBody("{\"volumes\":[]}")));
     }
 
     @AfterEach
@@ -55,7 +55,7 @@ class LightbitsApiClientTlsTest {
         LightbitsApiClient client = new LightbitsApiClient(
                 "https://localhost:" + wm.httpsPort(), "jwt", "default",
                 java.net.http.HttpClient.newHttpClient(), 1);
-        LightbitsApiException e = assertThrows(LightbitsApiException.class, client::getClusterInfo);
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, client::listVolumes);
         assertEquals(Kind.TRANSIENT, e.getKind()); // SSL handshake surfaces as connection failure
     }
 
@@ -66,7 +66,7 @@ class LightbitsApiClientTlsTest {
         // localhost, so this must fail — proving the bypass is trust-only.
         LightbitsApiClient client = LightbitsApiClient.insecureForDevelopment(
                 "https://localhost:" + wm.httpsPort(), "jwt", "default");
-        LightbitsApiException e = assertThrows(LightbitsApiException.class, client::getClusterInfo);
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, client::listVolumes);
         assertEquals(Kind.TRANSIENT, e.getKind());
         assertTrue(String.valueOf(e.getMessage()).contains("No name matching"),
                 "expected hostname verification failure, got: " + e.getMessage());

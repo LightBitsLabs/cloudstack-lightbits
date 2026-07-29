@@ -24,11 +24,19 @@ import java.util.Map;
  * maps them to/from the CloudStack {@code storage_pool_details} row.
  *
  * A pool is registered with a URL of the form:
- *   {@code lightbits://<api-host>[:443]/<project>?replicas=3&compression=true}
+ *   {@code lightbits://<api-host>[:443]/<project>?replicas=3&compression=true&environment=<env>}
  * plus a JWT supplied separately (stored encrypted, never in the URL query log).
  *
+ * The JWT is PROJECT-SCOPED (project-admin on {@code <project>}): it can operate on
+ * {@code /api/v2/projects/<project>/...} and can read {@code /api/v2/nodes}, but is denied
+ * the cluster-wide {@code GET /api/v2/cluster} (HTTP 403). Pool capacity is therefore NOT
+ * declared here — it is computed at runtime by aggregating raw physical capacity across
+ * cluster nodes ({@code /api/v2/nodes}) and dividing by the pool's replica count. See
+ * LightbitsApiClient.nodeCapacity().
+ *
  * Detail keys (persisted in storage_pool_details):
- *   apiHost, apiPort, project, replicaCount, compression, qosPolicy, jwt(encrypted)
+ *   apiHost, apiPort, project, replicaCount, compression, qosPolicy, environment,
+ *   jwt(encrypted)
  */
 public class LightbitsPoolConfig {
     public static final String SCHEME = "lightbits";
@@ -50,8 +58,8 @@ public class LightbitsPoolConfig {
     private final String project;
     private final int replicaCount;
     private final boolean compression;
-    private final String qosPolicy; // nullable
-    private final String jwt;        // nullable in details map (encrypted); required to operate
+    private final String qosPolicy;  // nullable
+    private final String jwt;         // nullable in details map (encrypted); required to operate
     private final String environment; // identifies the owning CloudStack when clusters are shared
 
     public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
@@ -118,6 +126,10 @@ public class LightbitsPoolConfig {
         if (jwt == null || jwt.isBlank()) {
             throw new IllegalArgumentException("a JWT credential is required to register a Lightbits pool");
         }
+        // Capacity is NOT taken from the URL: it is computed at runtime by aggregating raw
+        // physical capacity across cluster nodes (GET /api/v2/nodes, readable by a
+        // project-scoped token) and dividing by the pool's replica count. See
+        // LightbitsApiClient.nodeCapacity() and the lifecycle/driver stats path.
         return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, jwt, environment);
     }
 

@@ -14,27 +14,35 @@
  * limitations under the License.
  */
 package org.apache.cloudstack.storage.datastore.util;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import org.junit.jupiter.api.Test;
-
 class LightbitsUtilTest {
-
     @Test
-    void volumeNameCarriesEnvironmentPrefix() {
-        assertEquals("cs-prod-cs1-abc-123", LightbitsUtil.volumeName("prod-cs1", "abc-123"));
+    void volumeNameCarriesEnvironmentAndPoolPrefix() {
+        assertEquals("cs-prod-cs1-p7-abc-123", LightbitsUtil.volumeName("prod-cs1", 7L, "abc-123"));
     }
-
+    @Test
+    void poolPrefixIsUniquePerPool() {
+        // same project + environment, different pool id -> different prefix, so a
+        // pool-delete sweep can never match a sibling pool's volumes.
+        assertEquals("cs-prod-cs1-p7-", LightbitsUtil.poolPrefix("prod-cs1", 7L));
+        assertEquals("cs-prod-cs1-p8-", LightbitsUtil.poolPrefix("prod-cs1", 8L));
+    }
+    @Test
+    void volumeNameStartsWithItsPoolPrefix() {
+        String env = "prod-cs1";
+        long poolId = 7L;
+        String name = LightbitsUtil.volumeName(env, poolId, "abc-123");
+        assertTrue(name.startsWith(LightbitsUtil.poolPrefix(env, poolId)), name);
+    }
     @Test
     void parseReplicasDetailAcceptsRange() {
         assertEquals(1, LightbitsUtil.parseReplicasDetail("1"));
         assertEquals(2, LightbitsUtil.parseReplicasDetail(" 2 "));
         assertEquals(3, LightbitsUtil.parseReplicasDetail("3"));
     }
-
     @Test
     void parseReplicasDetailRejectsOutOfRange() {
         for (String bad : new String[]{"0", "4", "-1"}) {
@@ -43,7 +51,6 @@ class LightbitsUtilTest {
             assertTrue(e.getMessage().contains("between 1 and 3"), e.getMessage());
         }
     }
-
     @Test
     void parseReplicasDetailRejectsGarbage() {
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,

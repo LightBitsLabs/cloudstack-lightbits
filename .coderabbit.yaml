@@ -1,0 +1,11 @@
+# CodeRabbit configuration.
+#
+# The blanket docstring-coverage pre-merge check is disabled: this is a Java
+# plugin where JUnit test methods and @Override interface implementations are
+# idiomatically undocumented, so a percentage threshold over all changed
+# functions is noise. Substantive public API methods carry javadoc; reviewers
+# should flag missing javadoc on those case by case.
+reviews:
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
