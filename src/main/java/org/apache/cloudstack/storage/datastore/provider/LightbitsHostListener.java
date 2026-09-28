@@ -85,10 +85,19 @@ public class LightbitsHostListener implements HypervisorHostListener {
         Answer answer = agentMgr.easySend(hostId, cmd);
         if (answer == null || !answer.getResult()) {
             String detail = answer == null ? "no answer" : answer.getDetails();
-            throw new CloudRuntimeException("Lightbits: failed to register pool " + poolId
-                    + " on host " + hostId + ": " + detail);
+            // Tolerate per-pool registration failure instead of aborting the whole host
+            // connect. Throwing here propagates through StoragePoolMonitor.processConnect
+            // and sends the ENTIRE host to Alert, taking down other pools that registered
+            // fine (e.g. one unreachable/misconfigured pool bricks the host for all pools).
+            // Mirror the tolerance LifeCycle.attachCluster and ensureHostNqnDetail already
+            // use: log and continue. Pool registration is retried on the next host connect,
+            // and volumes still attach per-volume via the driver + adaptor at VM start.
+            LOG.warn("Lightbits: failed to register pool {} on host {}: {} - continuing so the"
+                    + " host stays usable; pool registration will be retried on next connect",
+                    poolId, hostId, detail);
+        } else {
+            LOG.info("Lightbits pool {} registered on host {}", poolId, hostId);
         }
-        LOG.info("Lightbits pool {} registered on host {}", poolId, hostId);
 
         ensureHostNqnDetail(hostId);
         return true;
