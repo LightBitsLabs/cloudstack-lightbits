@@ -755,6 +755,15 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     }
 
     @Override
+    public boolean requiresAccessForMigration(DataObject dataObject) {
+        // Managed NVMe/TCP: the destination host's NQN must be in the Lightbits volume
+        // ACL before the VM can open the device there. Returning true makes CloudStack
+        // call grantAccess(volume, destHost, dataStore) during migration prepare, which
+        // adds the destination NQN. revokeAccess later prunes the source NQN.
+        return true;
+    }
+
+    @Override
     public boolean volumesRequireGrantAccessWhenUsed() {
         // NVMe/TCP volumes must be ACL'd to the host NQN before the agent can connect them.
         return true;
