@@ -1,7 +1,8 @@
 # Installing the Lightbits CloudStack plugin
 
-> **Status: pre-alpha.** These steps reflect the current standalone (out-of-tree) install
-> model, validated on CloudStack 4.22.1.0 (KVM) against LightOS 3.19.
+> **Status: alpha, for evaluation only.** Do not use this version in production environments.
+> These steps reflect the current standalone (out-of-tree) install model, validated on
+> CloudStack 4.22.1.0 (KVM) against LightOS 3.19 and 3.20.
 
 The plugin is a single jar dropped onto an existing CloudStack deployment — no CloudStack
 source changes. The **same jar** goes on the management server and every KVM host, because it
@@ -153,10 +154,15 @@ on those is logged as a warning, not an error. The compute-offering variant
 
 ## TLS note
 
-The management server validates the cluster's API certificate. If your LightOS cluster uses a
-self-signed certificate without a Subject Alternative Name for the API endpoint, the JDK HTTP
-client will reject it. Use a certificate that carries a SAN for the API address (recommended),
-per your LightOS TLS configuration.
+**This alpha version does not validate the cluster's API certificate.** The connection from the
+management server to the LightOS API is encrypted with TLS, but the plugin accepts any
+certificate the endpoint presents, so it does not protect against an impostor endpoint on the
+network path. Run the alpha only on an isolated lab or evaluation network.
+
+Certificate validation, enabled by default, is planned for a future version. When it lands, the
+management server will verify the cluster's API certificate, and a LightOS certificate without a
+Subject Alternative Name for the API address will be rejected by the JDK HTTP client, so plan to
+use a certificate that carries a SAN for the API address, per your LightOS TLS configuration.
 
 ## Upgrading / uninstalling
 
