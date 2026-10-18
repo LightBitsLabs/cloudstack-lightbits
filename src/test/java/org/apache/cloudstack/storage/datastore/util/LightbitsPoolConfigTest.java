@@ -30,15 +30,15 @@ class LightbitsPoolConfigTest {
     @Test
     void parsesFullUrl() {
         LightbitsPoolConfig c = LightbitsPoolConfig.fromUrl(
-                "lightbits://10.19.43.20:443/my-project?replicas=3&compression=true&qosPolicy=gold&environment=prod-cs1", "jwt-x");
-        assertEquals("10.19.43.20", c.getApiHost());
+                "lightbits://192.0.2.10:443/my-project?replicas=3&compression=true&qosPolicy=gold&environment=prod-cs1", "jwt-x");
+        assertEquals("192.0.2.10", c.getApiHost());
         assertEquals(443, c.getApiPort());
         assertEquals("my-project", c.getProject());
         assertEquals(3, c.getReplicaCount());
         assertTrue(c.isCompression());
         assertEquals("gold", c.getQosPolicy());
         assertEquals("prod-cs1", c.getEnvironment());
-        assertEquals("https://10.19.43.20:443", c.apiEndpoint());
+        assertEquals("https://192.0.2.10:443", c.apiEndpoint());
     }
 
     @Test
