@@ -5,13 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] - 2026-10-18
+
+First alpha, **for evaluation only. Not for production use.** Built against CloudStack 4.22.1.0
+(KVM); tested with LightOS 3.19 and 3.20.
+
 ### Added
-- Initial repository scaffolding: license and project hygiene files, Maven build skeleton.
-- Stub implementations of the CloudStack storage SPI (`DataStoreProvider`, `PrimaryDataStoreLifeCycle`, `PrimaryDataStoreDriver`) against CloudStack 4.22.0.0 — compile skeleton only, no behavior.
-- CI workflow that builds the plugin against a source-built CloudStack 4.22.0.0 (CloudStack does not publish Maven artifacts to Maven Central).
-- Quality gate: JaCoCo line-coverage check (>= 60%) bound to `mvn verify` and run in CI; dormant until the first tests land, then a hard gate.
+- Lightbits managed primary storage provider for KVM, cluster-wide and zone-wide pools, with
+  project-scoped JWTs (stored encrypted) and full cluster-side cleanup on pool delete.
+- Volume create, delete, attach and detach over NVMe/TCP with per-host NQN ACLs; host NQN
+  auto-registered on host connect.
+- VM root disks from templates via native Lightbits snapshot + clone (template cached once per pool).
+- Volume snapshots: take, revert, delete, create-volume-from-snapshot.
+- Offline volume resize (grow).
+- Per-volume replica factor (`lightbitsReplicas` offering detail), per-pool compression and QoS
+  policy, per-offering QoS override (`lightbitsQosPolicy`).
+- VM live migration between KVM hosts, including host maintenance evacuation.
+- `packaging/install.sh` and `uninstall.sh`.
 
 ### Known limitations
-- No functional code yet: every SPI method throws `UnsupportedOperationException`.
-- No KVM-agent `StorageAdaptor` (NVMe/TCP host-side attach) yet.
-- No Spring module wiring (`module.properties` / context XML) yet — the plugin is not loadable by a CloudStack management server.
+- TLS certificate of the LightOS API is not validated yet (planned for a future version).
+- Online resize of attached disks is not possible (CloudStack restricts it for out-of-tree
+  managed KVM storage); resize with the VM stopped. Shrink is not supported.
+- KVM only.

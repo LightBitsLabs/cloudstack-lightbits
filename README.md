@@ -2,7 +2,11 @@
 
 Apache CloudStack primary storage plugin for [Lightbits](https://www.lightbitslabs.com) NVMe/TCP block storage.
 
-> **Status: pre-alpha, under active development.** Nothing here is ready for production use. APIs, layout, and behavior will change without notice.
+> **Status: alpha (`0.1.0-alpha.1`).** This is an alpha version meant for evaluation only. It
+> must not be used in production environments or on clusters that hold production data. APIs,
+> configuration and behavior may change between alpha releases without a migration path.
+> Known alpha limitation: the plugin does not yet validate the Lightbits cluster's TLS
+> certificate (see [INSTALL.md](INSTALL.md#tls-note)); run it on an isolated lab network.
 
 ![Creating VMs on Lightbits block storage from CloudStack](docs/vm-on-lightbits.gif)
 
@@ -32,6 +36,9 @@ Working today (KVM):
   Lightbits project **operationally** (a per-pool volume-name prefix keeps names, stats, and
   cleanup collision-free) — but that is not a security boundary: a pool's JWT can read every
   volume in its project, so tenant-level isolation requires **one Lightbits project per pool**
+- VM live migration between KVM hosts (the destination host's NQN is added to each volume's
+  ACL during migration prepare and the source's is pruned after), including host maintenance
+  evacuation
 - Cluster-wide and zone-wide storage pools; full cluster-side cleanup on teardown
 
 See [docs/architecture.md](docs/architecture.md) for the design sketch.
