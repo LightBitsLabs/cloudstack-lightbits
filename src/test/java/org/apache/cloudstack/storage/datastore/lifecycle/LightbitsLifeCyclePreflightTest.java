@@ -98,7 +98,7 @@ class LightbitsLifeCyclePreflightTest {
     void preflightSucceedsWithProjectScopedToken() {
         stubProjectAccess();
         stubNodes(3, 30_000_000_000L, 20_000_000_000L);
-        PreflightResult r = lc.preflight(dsInfos("lightbits://10.19.43.20/default?replicas=3&environment=cs1", "jwt-x"));
+        PreflightResult r = lc.preflight(dsInfos("lightbits://192.0.2.10/default?replicas=3&environment=cs1", "jwt-x"));
         assertEquals("default", r.config.getProject());
         // capacity = sum of effectivePhysicalStorage across nodes / replicas
         assertEquals(3 * 30_000_000_000L / 3, r.capacityBytes);
