@@ -75,6 +75,9 @@ public class LightbitsApiClient {
     private final HttpClient http;
     private final ObjectMapper mapper = new ObjectMapper();
     private final long retryBackoffMillis;
+    /** How long to wait for an object to settle (Creating/Updating/Rollback -> Available). */
+    private long settleTimeoutMillis = 120_000;
+    private long settlePollMillis = 250;
 
     public LightbitsApiClient(String endpoint, String jwt, String project) {
         this(endpoint, jwt, project, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(), 1000);
@@ -111,6 +114,12 @@ public class LightbitsApiClient {
 
     public String getProject() {
         return project;
+    }
+
+    /** Tune the settle wait (tests use short values). */
+    public void setSettleWait(long timeoutMillis, long pollMillis) {
+        this.settleTimeoutMillis = timeoutMillis;
+        this.settlePollMillis = pollMillis;
     }
 
     // ---------------- nodes ----------------
@@ -269,14 +278,127 @@ public class LightbitsApiClient {
         ObjectNode acl = body.putObject("acl");
         ArrayNode values = acl.putArray("values");
         (aclNqns == null || aclNqns.isEmpty() ? List.of("ALLOW_NONE") : aclNqns).forEach(values::add);
+        Volume created;
         try {
             // Project-scoped route: a project-scoped token is denied the flat /api/v2/volumes.
-            return parse(execute("POST", projectColl("volumes"), body.toString()), Volume.class);
+            created = parse(execute("POST", projectColl("volumes"), body.toString()), Volume.class);
         } catch (LightbitsApiException e) {
             if (e.getKind() == Kind.CONFLICT) {
-                return getVolumeByName(name).orElseThrow(() -> e);
+                created = getVolumeByName(name).orElseThrow(() -> e);
+            } else {
+                throw e;
+            }
+        }
+        return settleNewVolume(created);
+    }
+
+    /**
+     * The create POST answers while the volume is still {@code Creating}. Report success only
+     * once it is {@code Available}; if it lands in {@code Failed} or never settles, remove the
+     * half-made volume so a failed create leaves nothing behind, and fail.
+     */
+    private Volume settleNewVolume(Volume created) {
+        try {
+            return waitForVolume(created.getUuid(), null);
+        } catch (RuntimeException e) {
+            try {
+                deleteVolume(created.getUuid());
+            } catch (RuntimeException cleanup) {
+                LOG.warn("Lightbits: could not remove volume {} ({}) after its create failed: {}",
+                        created.getName(), created.getUuid(), cleanup.getMessage());
             }
             throw e;
+        }
+    }
+
+    /**
+     * Poll a volume until it is {@code Available}. When {@code changedFromEtag} is given the
+     * volume must also carry a DIFFERENT ETag: an update or rollback PUT returns before the
+     * change is applied and the volume was already Available before the request, so
+     * "Available" alone proves nothing.
+     */
+    Volume waitForVolume(String uuid, String changedFromEtag) {
+        long deadline = System.nanoTime() + settleTimeoutMillis * 1_000_000L;
+        String lastState = "?";
+        while (true) {
+            Volume v;
+            try {
+                v = parse(execute("GET", projectPath("volumes", uuid), null), Volume.class);
+            } catch (LightbitsApiException e) {
+                if (e.getKind() == Kind.NOT_FOUND) {
+                    throw new LightbitsApiException(Kind.NOT_FOUND, 404,
+                            "volume " + uuid + " disappeared from the cluster while waiting for it to become Available");
+                }
+                throw e;
+            }
+            lastState = v.getState();
+            if (v.isFailed()) {
+                throw new LightbitsApiException(Kind.UNKNOWN, -1,
+                        "volume " + v.getName() + " (" + uuid + ") is in state Failed on the cluster");
+            }
+            if (v.isDeletedOrDeleting()) {
+                throw new LightbitsApiException(Kind.NOT_FOUND, 404,
+                        "volume " + v.getName() + " (" + uuid + ") is being deleted on the cluster");
+            }
+            boolean changed = changedFromEtag == null || !changedFromEtag.equals(v.getEtag());
+            if (v.isAvailable() && changed) {
+                return v;
+            }
+            if (System.nanoTime() >= deadline) {
+                throw new LightbitsApiException(Kind.TRANSIENT, -1, "volume " + v.getName() + " (" + uuid
+                        + ") did not become Available within " + (settleTimeoutMillis / 1000) + "s (last state "
+                        + lastState + (changedFromEtag == null ? "" : ", change not applied") + ")");
+            }
+            sleep(settlePollMillis);
+        }
+    }
+
+    /** Poll a snapshot until it is {@code Available}; a clone from a Creating snapshot is refused. */
+    Snapshot waitForSnapshot(String uuid) {
+        long deadline = System.nanoTime() + settleTimeoutMillis * 1_000_000L;
+        while (true) {
+            Snapshot sn = parse(execute("GET", projectPath("snapshots", uuid), null), Snapshot.class);
+            if (sn.isFailed()) {
+                throw new LightbitsApiException(Kind.UNKNOWN, -1,
+                        "snapshot " + sn.getName() + " (" + uuid + ") is in state Failed on the cluster");
+            }
+            if (sn.isDeletedOrDeleting()) {
+                throw new LightbitsApiException(Kind.NOT_FOUND, 404,
+                        "snapshot " + sn.getName() + " (" + uuid + ") is being deleted on the cluster");
+            }
+            if (sn.isAvailable()) {
+                return sn;
+            }
+            if (System.nanoTime() >= deadline) {
+                throw new LightbitsApiException(Kind.TRANSIENT, -1, "snapshot " + sn.getName() + " (" + uuid
+                        + ") did not become Available within " + (settleTimeoutMillis / 1000) + "s (last state "
+                        + sn.getState() + ")");
+            }
+            sleep(settlePollMillis);
+        }
+    }
+
+    /** Poll until a deleted volume is really gone (404 or Deleted), so dependants can be removed. */
+    public void waitForVolumeGone(String uuid) {
+        long deadline = System.nanoTime() + settleTimeoutMillis * 1_000_000L;
+        while (true) {
+            try {
+                Volume v = parse(execute("GET", projectPath("volumes", uuid), null), Volume.class);
+                if ("Deleted".equals(v.getState())) {
+                    return;
+                }
+                if (System.nanoTime() >= deadline) {
+                    throw new LightbitsApiException(Kind.TRANSIENT, -1, "volume " + v.getName() + " (" + uuid
+                            + ") was not removed within " + (settleTimeoutMillis / 1000) + "s (last state "
+                            + v.getState() + ")");
+                }
+            } catch (LightbitsApiException e) {
+                if (e.getKind() == Kind.NOT_FOUND) {
+                    return;
+                }
+                throw e;
+            }
+            sleep(settlePollMillis);
         }
     }
 
@@ -328,16 +450,33 @@ public class LightbitsApiClient {
 
     /** Mutations must use the project-scoped route (trial finding F2). */
     public void resizeVolume(String uuid, long newSizeBytes) {
+        Volume before = getVolume(uuid).orElseThrow(() -> new LightbitsApiException(Kind.NOT_FOUND, 404,
+                "volume " + uuid + " not found on the cluster"));
         ObjectNode body = mapper.createObjectNode();
         body.put("size", String.valueOf(newSizeBytes));
-        execute("PUT", projectPath("volumes", uuid), body.toString());
+        body.put("projectName", project);
+        execute("PUT", projectPath("volumes", uuid), body.toString(), before.getEtag());
+        Volume after = waitForVolume(uuid, before.getEtag());
+        if (after.getSizeBytes() != newSizeBytes) {
+            throw new LightbitsApiException(Kind.UNKNOWN, -1, "volume " + after.getName() + " (" + uuid
+                    + ") reports " + after.getSizeBytes() + " bytes after a resize to " + newSizeBytes);
+        }
     }
 
-    public void updateVolumeAcl(String uuid, List<String> nqns) {
+    /**
+     * Replace a volume's ACL. {@code ifMatchEtag} (the ETag of the volume the caller computed
+     * the new ACL from) makes the update conditional: if anything changed the volume in
+     * between, the cluster answers 412 ({@link Kind#PRECONDITION}) and the caller must re-read
+     * and retry. Without it two concurrent read-modify-write updates lose one host's access.
+     * Returns once the ACL change is applied (the volume is back to Available).
+     */
+    public void updateVolumeAcl(String uuid, List<String> nqns, String ifMatchEtag) {
         ObjectNode body = mapper.createObjectNode();
+        body.put("projectName", project);
         ArrayNode values = body.putObject("acl").putArray("values");
         (nqns == null || nqns.isEmpty() ? List.of("ALLOW_NONE") : nqns).forEach(values::add);
-        execute("PUT", projectPath("volumes", uuid), body.toString());
+        execute("PUT", projectPath("volumes", uuid), body.toString(), ifMatchEtag);
+        waitForVolume(uuid, ifMatchEtag);
     }
 
     /** Idempotent delete via the project-scoped route. Returns false if already gone. */
@@ -360,13 +499,40 @@ public class LightbitsApiClient {
         body.put("name", name);
         body.put("sourceVolumeUUID", sourceVolumeUuid);
         body.put("projectName", project);
+        Snapshot created;
         try {
             // Snapshots live under the project-scoped collection; the non-scoped
             // /api/v2/snapshots route does not exist on LightOS (404).
-            return parse(execute("POST", projectColl("snapshots"), body.toString()), Snapshot.class);
+            created = parse(execute("POST", projectColl("snapshots"), body.toString()), Snapshot.class);
         } catch (LightbitsApiException e) {
             if (e.getKind() == Kind.CONFLICT) {
-                return getSnapshotByName(name).orElseThrow(() -> e);
+                created = getSnapshotByName(name).orElseThrow(() -> e);
+            } else {
+                throw e;
+            }
+        }
+        // The POST answers while the snapshot is still Creating, and a clone or rollback from a
+        // Creating snapshot is refused: report success only once it is Available.
+        try {
+            return waitForSnapshot(created.getUuid());
+        } catch (RuntimeException e) {
+            try {
+                deleteSnapshot(created.getUuid());
+            } catch (RuntimeException cleanup) {
+                LOG.warn("Lightbits: could not remove snapshot {} ({}) after its create failed: {}",
+                        name, created.getUuid(), cleanup.getMessage());
+            }
+            throw e;
+        }
+    }
+
+    public Optional<Snapshot> getSnapshot(String uuid) {
+        try {
+            Snapshot sn = parse(execute("GET", projectPath("snapshots", uuid), null), Snapshot.class);
+            return sn.isDeletedOrDeleting() ? Optional.empty() : Optional.of(sn);
+        } catch (LightbitsApiException e) {
+            if (e.getKind() == Kind.NOT_FOUND) {
+                return Optional.empty();
             }
             throw e;
         }
@@ -430,15 +596,18 @@ public class LightbitsApiClient {
         }
         ArrayNode values = body.putObject("acl").putArray("values");
         (aclNqns == null || aclNqns.isEmpty() ? List.of("ALLOW_NONE") : aclNqns).forEach(values::add);
+        Volume created;
         try {
             // Project-scoped route (flat /api/v2/volumes is denied to a project-scoped token).
-            return parse(execute("POST", projectColl("volumes"), body.toString()), Volume.class);
+            created = parse(execute("POST", projectColl("volumes"), body.toString()), Volume.class);
         } catch (LightbitsApiException e) {
             if (e.getKind() == Kind.CONFLICT) {
-                return getVolumeByName(name).orElseThrow(() -> e);
+                created = getVolumeByName(name).orElseThrow(() -> e);
+            } else {
+                throw e;
             }
-            throw e;
         }
+        return settleNewVolume(created);
     }
 
     /**
@@ -446,12 +615,22 @@ public class LightbitsApiClient {
      * Destructive on the volume's current content; the caller ensures the volume is not in use.
      */
     public void rollbackVolume(String volumeUuid, String snapshotUuid) {
+        Volume before = getVolume(volumeUuid).orElseThrow(() -> new LightbitsApiException(Kind.NOT_FOUND, 404,
+                "volume " + volumeUuid + " not found on the cluster"));
         ObjectNode body = mapper.createObjectNode();
         body.put("srcSnapshotUUID", snapshotUuid);
         body.put("projectName", project);
         execute("PUT", projectPath("volumes", volumeUuid) + "/rollback", body.toString());
+        // The PUT answers {} immediately and the volume was Available before it: wait for the
+        // ETag to move, which is the only evidence that the rollback was applied.
+        waitForVolume(volumeUuid, before.getEtag());
     }
 
+    /**
+     * Idempotent snapshot delete. Whatever status a failed DELETE carries (404, 412, a
+     * transient error after the request was applied), the snapshot's STATE decides: if it is
+     * gone or on its way out the delete succeeded.
+     */
     public boolean deleteSnapshot(String uuid) {
         try {
             execute("DELETE", projectPath("snapshots", uuid), null);
@@ -460,8 +639,25 @@ public class LightbitsApiClient {
             if (e.getKind() == Kind.NOT_FOUND) {
                 return false;
             }
+            if (e.getKind() == Kind.AUTH) {
+                throw e;
+            }
+            if (getSnapshot(uuid).isEmpty()) {
+                return false;
+            }
             throw e;
         }
+    }
+
+    /** Live snapshots whose source is the given volume. */
+    public List<Snapshot> listSnapshotsOfVolume(String volumeUuid) {
+        List<Snapshot> out = new ArrayList<>();
+        for (Snapshot sn : listSnapshots()) {
+            if (volumeUuid.equals(sn.getSourceVolumeUUID())) {
+                out.add(sn);
+            }
+        }
+        return out;
     }
 
     // ---------------- internals ----------------
@@ -500,6 +696,10 @@ public class LightbitsApiClient {
     }
 
     private String execute(String method, String path, String jsonBody) {
+        return execute(method, path, jsonBody, null);
+    }
+
+    private String execute(String method, String path, String jsonBody, String ifMatchEtag) {
         LightbitsApiException last = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
@@ -507,6 +707,9 @@ public class LightbitsApiClient {
                         .timeout(REQUEST_TIMEOUT)
                         .header("Authorization", "Bearer " + jwt)
                         .header("Content-Type", "application/json");
+                if (ifMatchEtag != null && !ifMatchEtag.isEmpty()) {
+                    rb.header("If-Match", ifMatchEtag);
+                }
                 HttpRequest.BodyPublisher pub = jsonBody == null
                         ? HttpRequest.BodyPublishers.noBody()
                         : HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8);

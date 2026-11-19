@@ -22,6 +22,7 @@ public class LightbitsApiException extends RuntimeException {
         AUTH,        // 401/403 — bad or expired JWT
         NOT_FOUND,   // 404
         CONFLICT,    // 409 — e.g. volume name already exists
+        PRECONDITION, // 412 - If-Match ETag is stale: the resource changed since it was read
         QUOTA,       // project quota / capacity exhausted
         INVALID,     // 400 — bad request (e.g. missing projectName)
         TRANSIENT,   // 5xx, timeouts, connection failures — safe to retry
@@ -58,6 +59,7 @@ public class LightbitsApiException extends RuntimeException {
             case 403: return Kind.AUTH;
             case 404: return Kind.NOT_FOUND;
             case 409: return Kind.CONFLICT;
+            case 412: return Kind.PRECONDITION;
             default:
                 if (status == 507 || (body != null && body.toLowerCase().contains("quota"))) {
                     return Kind.QUOTA;
