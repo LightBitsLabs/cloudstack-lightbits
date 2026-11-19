@@ -15,7 +15,6 @@
  */
 package com.cloud.hypervisor.kvm.storage;
 
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -28,7 +27,6 @@ import org.apache.logging.log4j.Logger;
 import com.cloud.storage.Storage;
 import com.cloud.storage.Storage.StoragePoolType;
 import com.cloud.utils.exception.CloudRuntimeException;
-import com.cloud.utils.script.Script;
 
 /**
  * KVM-agent storage adaptor for Lightbits NVMe/TCP volumes.
@@ -36,17 +34,26 @@ import com.cloud.utils.script.Script;
  * Auto-discovered by KVMStoragePoolManager's Reflections scan of this package
  * (getStoragePoolType() -> IscsiLUN, which no built-in adaptor claims). Volumes are
  * connected over NVMe/TCP via the cluster discovery service; the device is resolved
- * by the Lightbits volume UUID at /dev/disk/by-id/nvme-uuid.<UUID>.
+ * by the Lightbits volume UUID at /dev/disk/by-id/nvme-uuid.<UUID> and verified against
+ * the namespace's own UUID before it is used (see {@link LightbitsNvmeHost}).
  */
 public class LightbitsStorageAdaptor implements StorageAdaptor {
     private static final Logger LOG = LogManager.getLogger(LightbitsStorageAdaptor.class);
 
     private static final Map<String, KVMStoragePool> POOLS = new ConcurrentHashMap<>();
-    private static final int DISCOVERY_PORT = 8009;
     private static final int DEFAULT_WAIT_SECS = 60;
-    private static final String BY_ID_PREFIX = "/dev/disk/by-id/nvme-uuid.";
+    private static final Object CONNECT_LOCK = new Object();
+    /** Pool detail carrying the cluster's discovery endpoints, comma-separated host[:port]. */
+    public static final String DETAIL_NVME_DISCOVERY = "nvmeDiscovery";
+
+    private final LightbitsNvmeHost nvme;
 
     public LightbitsStorageAdaptor() {
+        this(new LightbitsNvmeHost());
+    }
+
+    LightbitsStorageAdaptor(LightbitsNvmeHost nvme) {
+        this.nvme = nvme;
     }
 
     @Override
@@ -85,58 +92,45 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             throw new CloudRuntimeException("Lightbits connectPhysicalDisk: missing volume path ("
                     + volumePath + ") or pool (" + (pool == null ? "null" : pool.getUuid()) + ")");
         }
-        ensureNvmeTcpModule();
-        // Discovery-connect to the cluster; all volumes ACL'd to this host's NQN attach.
-        String discoveryHost = pool.getSourceHost();
-        String out = Script.runSimpleBashScript(
-                String.format("nvme connect-all -t tcp -a %s -s %d", discoveryHost, DISCOVERY_PORT));
-        LOG.info("nvme connect-all to {}:{} -> {}", discoveryHost, DISCOVERY_PORT, out);
-        return waitForDevice(volumePath, DEFAULT_WAIT_SECS);
+        String uuid = LightbitsNvmeHost.requireVolumeUuid(volumePath);
+        List<String> endpoints = discoveryEndpoints(pool);
+        // One connect at a time on this host: parallel VM starts would otherwise race each
+        // other's connect-all against the same subsystem.
+        synchronized (CONNECT_LOCK) {
+            nvme.connect(endpoints);
+        }
+        // Throws with a diagnosis (paths, ACL hint) rather than returning false: the caller
+        // would turn false into a generic "failed to connect disks".
+        String device = nvme.waitForDevice(uuid, DEFAULT_WAIT_SECS, nvme.hostNqn());
+        LOG.info("Lightbits volume {} verified at {}", uuid, device);
+        nvme.warnOnDegradedPaths(endpoints.size());
+        return true;
     }
 
-    private boolean waitForDevice(String volumeUuid, int waitSecs) {
-        String devPath = BY_ID_PREFIX + volumeUuid;
-        for (int i = 0; i < waitSecs; i++) {
-            if (new File(devPath).exists()) {
-                LOG.info("Lightbits volume {} present at {}", volumeUuid, devPath);
-                return true;
-            }
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-        }
-        boolean present = new File(devPath).exists();
-        if (!present) {
-            LOG.warn("Lightbits volume {} did not appear at {} within {}s", volumeUuid, devPath, waitSecs);
-        }
-        return present;
+    /**
+     * Discovery endpoints for a pool: the list the management server sent with the pool
+     * (every node of the cluster), or the pool's API host on the discovery port.
+     */
+    static List<String> discoveryEndpoints(KVMStoragePool pool) {
+        Map<String, String> details = pool.getDetails();
+        return LightbitsNvmeHost.discoveryEndpoints(details == null ? null : details.get(DETAIL_NVME_DISCOVERY),
+                pool.getSourceHost());
     }
 
     @Override
     public KVMPhysicalDisk getPhysicalDisk(String volumePath, KVMStoragePool pool) {
-        String devPath = BY_ID_PREFIX + volumePath;
-        File dev = new File(devPath);
-        if (!dev.exists()) {
-            LOG.debug("Lightbits device {} not present", devPath);
+        String uuid = LightbitsNvmeHost.requireVolumeUuid(volumePath);
+        if (!nvme.deviceLinkExists(uuid)) {
+            LOG.debug("Lightbits device for volume {} not present", uuid);
             return null;
         }
-        KVMPhysicalDisk disk = new KVMPhysicalDisk(devPath, volumePath, pool);
+        // never hand out a path whose namespace was not matched against the volume
+        String kernelName = nvme.verifyIdentity(uuid);
+        KVMPhysicalDisk disk = new KVMPhysicalDisk(LightbitsNvmeHost.BY_ID_PREFIX + uuid, volumePath, pool);
         disk.setFormat(PhysicalDiskFormat.RAW);
-        disk.setSize(blockDeviceSize(devPath));
+        disk.setSize(nvme.sizeBytes(kernelName));
         disk.setVirtualSize(disk.getSize());
         return disk;
-    }
-
-    private long blockDeviceSize(String devPath) {
-        try {
-            String out = Script.runSimpleBashScript("blockdev --getsize64 " + devPath);
-            return out == null ? 0L : Long.parseLong(out.trim());
-        } catch (Exception e) {
-            return 0L;
-        }
     }
 
     @Override
@@ -218,9 +212,8 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         if (dest == null) {
             throw new CloudRuntimeException("Lightbits: target volume " + name + " not connected before template copy");
         }
-        String cmd = String.format("qemu-img convert -O raw %s %s", template.getPath(), dest.getPath());
-        String out = timeout > 0 ? Script.runSimpleBashScript(cmd, timeout) : Script.runSimpleBashScript(cmd);
-        LOG.info("qemu-img convert template {} -> {} : {}", template.getPath(), dest.getPath(), out);
+        nvme.convertToRaw(template.getPath(), dest.getPath(), false, timeout);
+        LOG.info("qemu-img convert template {} -> {} done", template.getPath(), dest.getPath());
         dest.setFormat(PhysicalDiskFormat.RAW);
         return dest;
     }
@@ -247,9 +240,8 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         if (dest == null) {
             throw new CloudRuntimeException("Lightbits copyPhysicalDisk: dest volume " + name + " not connected");
         }
-        String cmd = String.format("qemu-img convert -n -O raw %s %s", disk.getPath(), dest.getPath());
-        String out = timeout > 0 ? Script.runSimpleBashScript(cmd, timeout) : Script.runSimpleBashScript(cmd);
-        LOG.info("Lightbits copyPhysicalDisk: qemu-img convert {} -> {} : {}", disk.getPath(), dest.getPath(), out);
+        nvme.convertToRaw(disk.getPath(), dest.getPath(), true, timeout);
+        LOG.info("Lightbits copyPhysicalDisk: qemu-img convert {} -> {} done", disk.getPath(), dest.getPath());
         dest.setFormat(PhysicalDiskFormat.RAW);
         dest.setVirtualSize(disk.getVirtualSize());
         return dest;
@@ -260,9 +252,5 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
                                             byte[] srcPassphrase, byte[] dstPassphrase, Storage.ProvisioningType provisioningType) {
         // v1: no volume encryption (open item); delegate to the plain copy.
         return copyPhysicalDisk(disk, name, destPool, timeout);
-    }
-
-    private void ensureNvmeTcpModule() {
-        Script.runSimpleBashScript("modprobe nvme-tcp");
     }
 }

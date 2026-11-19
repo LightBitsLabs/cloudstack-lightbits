@@ -180,4 +180,24 @@ class LightbitsPoolConfigTest {
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> LightbitsPoolConfig.fromUrl(
                 "lightbits://10.0.0.1/proj?environment=cs1&fingerprint=12:34", "jwt"));
     }
+
+    // ---- NVMe discovery endpoints for the KVM hosts ----
+
+    @Test
+    void discoveryEndpointsDefaultToEveryApiHostOnTheDiscoveryPort() {
+        LightbitsPoolConfig cfg = LightbitsPoolConfig.fromUrl(
+                "lightbits://10.0.0.1:8443/proj?environment=cs1&endpoints=10.0.0.2,10.0.0.3:9443", "jwt");
+        org.junit.jupiter.api.Assertions.assertEquals(
+                java.util.List.of("10.0.0.1:8009", "10.0.0.2:8009", "10.0.0.3:8009"), cfg.discoveryEndpoints());
+        org.junit.jupiter.api.Assertions.assertFalse(cfg.toDetailsWithoutSecret().containsKey(LightbitsPoolConfig.KEY_NVME_DISCOVERY));
+    }
+
+    @Test
+    void anExplicitDiscoveryListWinsAndSurvivesTheDetailsRoundTrip() {
+        LightbitsPoolConfig cfg = LightbitsPoolConfig.fromUrl(
+                "lightbits://10.0.0.1/proj?environment=cs1&discovery=192.168.5.1,192.168.5.2:8010", "jwt");
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("192.168.5.1:8009", "192.168.5.2:8010"), cfg.discoveryEndpoints());
+        LightbitsPoolConfig back = LightbitsPoolConfig.fromDetails(cfg.toDetailsWithoutSecret(), null);
+        org.junit.jupiter.api.Assertions.assertEquals(cfg.discoveryEndpoints(), back.discoveryEndpoints());
+    }
 }
