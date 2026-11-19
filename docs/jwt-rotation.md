@@ -39,24 +39,29 @@ unaffected (no JWT on the data path).
    changes (full flow: "Creating a project-scoped JWT" in [INSTALL.md](../INSTALL.md)).
    Keep the old token valid until step 3 succeeds.
 
-2. **Update the pool credential:**
+2. **Update the pool credential.** A CloudStack pool detail holds 255 characters and a token
+   is longer, so the token is passed in numbered pieces of up to 250 characters:
    ```bash
-   cmk update storagepool id=<poolId> details[0].secretkey="<NEW_JWT>"
+   T=$(cat /path/to/new.jwt)
+   cmk update storagepool id=<poolId> \
+       details[0].1secretkey="${T:0:250}" details[1].2secretkey="${T:250:250}" \
+       details[2].3secretkey="${T:500:250}"
    ```
-   CloudStack writes the value into `storage_pool_details` as given; the plugin picks it up
-   on the next use of the pool (at the latest the next capacity poll, about a minute),
-   encrypts and stores it and removes the clear-text row. No restart is needed. Use the name
-   `secretkey`: CloudStack keeps parameters of that name out of its logs, while a token passed
-   as `details[0].jwt` is written to `apilog.log` and `management-server.log` in clear text.
+   (add `details[3].4secretkey="${T:750:250}"` for a token longer than 750 characters; empty
+   pieces are harmless). CloudStack writes the pieces into `storage_pool_details` as given;
+   the plugin picks them up on the next use of the pool (at the latest the next capacity
+   poll, about a minute), joins, encrypts and stores the token and removes the clear-text
+   rows. No restart is needed. Use these exact names: CloudStack keeps parameters whose name
+   ends in `secretkey` out of its logs, while a token passed as `details[0].jwt` is written
+   to `apilog.log` and `management-server.log` in clear text (and cut at 255 characters).
 
-   The token on the `cmk` command line is exposed to shell history and process listings,
-   the same caveat (and mitigations) as pool registration; see the `details[0].secretkey` note
-   in [INSTALL.md](../INSTALL.md).
+   Reading the token from a file as above keeps it out of the shell history; it is still
+   visible in the process list while `cmk` runs.
 
-   A value that is not a JWT is rejected and removed, and the previous token stays in use. A
-   JWT the cluster does not accept makes operations on the pool fail with `The cluster
-   rejected the storage pool's API token ...` until a valid one is set; running VMs are not
-   affected.
+   A value that is not a JWT (for example a token cut short) is rejected and removed, and the
+   previous token stays in use. A JWT the cluster does not accept makes operations on the
+   pool fail with `The cluster rejected the storage pool's API token ...` until a valid one
+   is set; running VMs are not affected.
 
 3. **Verify** the new token works: trigger a control-plane op (e.g. list/refresh the pool, or
    create+delete a small test volume) and confirm success and that pool capacity still reports.

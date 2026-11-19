@@ -61,6 +61,14 @@ class LightbitsPoolSecretTest {
         LightbitsPoolConfig.putChunked(rows, "jwt", ENC.apply(OLD));
     }
 
+    /** What CloudStack's updateStoragePool leaves behind for a token supplied in pieces. */
+    private void supplyInPieces(String token) {
+        int n = 0;
+        for (int i = 0; i < token.length(); i += LightbitsPoolSecret.PIECE_LENGTH) {
+            rows.put((++n) + "secretkey", token.substring(i, Math.min(token.length(), i + LightbitsPoolSecret.PIECE_LENGTH)));
+        }
+    }
+
     private void assertNoClearTextToken() {
         for (Map.Entry<String, String> e : rows.entrySet()) {
             assertFalse(e.getValue().contains("sig-new") && !e.getValue().startsWith("enc(") && !e.getKey().startsWith("jwt."),
@@ -76,9 +84,10 @@ class LightbitsPoolSecretTest {
 
     @Test
     void aTokenSetWithUpdateStoragePoolIsEncryptedAndTheClearTextRowRemoved() {
-        rows.put("secretkey", NEW);   // what CloudStack's updateStoragePool leaves behind
+        supplyInPieces(NEW);
+        assertTrue(rows.containsKey("3secretkey"), "the test token must span several pieces");
         assertEquals(NEW, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
-        assertFalse(rows.containsKey("secretkey"));
+        assertFalse(rows.keySet().stream().anyMatch(k -> k.endsWith("secretkey")), rows.keySet().toString());
         assertNoClearTextToken();
         // and it stays readable on the next call
         assertEquals(NEW, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
@@ -95,10 +104,10 @@ class LightbitsPoolSecretTest {
 
     @Test
     void aShorterTokenLeavesNoChunkOfTheLongerOneBehind() {
-        rows.put("secretkey", NEW);
+        supplyInPieces(NEW);
         LightbitsPoolSecret.load(dao, POOL, ENC, DEC);
         int chunksOfNew = Integer.parseInt(rows.get("jwt"));
-        rows.put("secretkey", OLD);
+        supplyInPieces(OLD);
         assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
         int chunksOfOld = Integer.parseInt(rows.get("jwt"));
         assertTrue(chunksOfOld < chunksOfNew);
@@ -109,17 +118,33 @@ class LightbitsPoolSecretTest {
     void aValueThatIsNotATokenIsRejectedRemovedAndThePreviousTokenKept() {
         rows.put("secretkey", "not a token");
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.load(dao, POOL, ENC, DEC));
-        assertTrue(e.getMessage().contains("secretkey"), e.getMessage());
+        assertTrue(e.getMessage().contains("1secretkey"), e.getMessage());
         assertFalse(e.getMessage().contains("not a token"), "the rejected value must not be echoed");
         assertFalse(rows.containsKey("secretkey"));
         assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
     }
 
     @Test
+    void aTokenCutAtTheColumnWidthIsRejectedAndThePreviousTokenKept() {
+        // a whole token in one detail arrives truncated to 255 characters
+        rows.put("secretkey", NEW.substring(0, 255));
+        assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.load(dao, POOL, ENC, DEC));
+        assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
+    }
+
+    @Test
+    void piecesAreJoinedInNumericOrder() {
+        String token = "aaa." + "b".repeat(2600) + ".ccc";   // 11 pieces: 10secretkey must sort after 9secretkey
+        supplyInPieces(token);
+        assertTrue(rows.containsKey("11secretkey"));
+        assertEquals(token, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
+    }
+
+    @Test
     void aPoolWithoutATokenSaysHowToSetOne() {
         rows.keySet().removeIf(k -> k.startsWith("jwt"));
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.load(dao, POOL, ENC, DEC));
-        assertTrue(e.getMessage().contains("details[0].secretkey"), e.getMessage());
+        assertTrue(e.getMessage().contains("1secretkey"), e.getMessage());
     }
 
     @Test

@@ -709,7 +709,7 @@ class LightbitsApiClientTest {
         wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(401).withBody("{\"message\":\"token is expired\"}")));
         LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.listVolumes());
         assertEquals(Kind.AUTH, e.getKind());
-        assertTrue(e.getMessage().contains("details[0].secretkey"), e.getMessage());
+        assertTrue(e.getMessage().contains("1secretkey"), e.getMessage());
         assertFalse(e.getMessage().contains("test-jwt"), "the token must never appear in an error");
     }
 }
