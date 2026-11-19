@@ -130,6 +130,13 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
   exposes it to shell history and process listings on the machine you run `cmk` from. Prefer
   the UI form, or mitigate (e.g. `HISTCONTROL=ignorespace` with a leading space, and run it
   where untrusted users cannot read `/proc`).
+- **discovery** — optional, `&discovery=<host[:port]>,...`: the NVMe discovery endpoints the
+  KVM hosts connect through (port 8009 by default). By default the hosts use every API host of
+  the pool (the URL host and `endpoints`), which is right when the hosts reach the cluster's
+  nodes on the same addresses as the management server. Set it when the data network uses
+  other addresses. The hosts receive the list when they connect to the management server, so
+  after changing it (`details[0].nvmeDiscovery=...` on an existing pool) restart the agents or
+  reconnect the hosts.
 - **tags=lightbits** — reference this tag from disk/compute offerings to place volumes on Lightbits.
 
 The pool reports capacity/usage live from the cluster and should show **Up**.

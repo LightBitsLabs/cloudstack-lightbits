@@ -14,7 +14,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Both settings can be changed on an existing pool with `updateStoragePool`
   (`tlsFingerprint`, `apiEndpoints`).
 
+- KVM hosts connect through every discovery endpoint of the cluster instead of one address,
+  with a warning naming an endpoint that failed. `&discovery=<host[:port]>,...` overrides the
+  list for clusters whose data network differs from the API network.
+- An attach that cannot work fails at once with the reason (every discovery endpoint and its
+  error, the host's NVMe/TCP paths, a pointer to the volume ACL or the data network) instead of
+  "device did not appear" after 60 seconds.
+- A namespace that does not show up is looked for again after a udev settle and a controller
+  rescan. Paths that are not live are logged as a warning after every attach.
+
 ### Security
+- A volume's device is handed to a VM only after the NVMe namespace's own UUID and subsystem
+  were matched against the volume; a stale or foreign device link is refused.
+- Commands on the KVM hosts (`nvme`, `modprobe`, `qemu-img`) run as argument vectors with
+  validated values; no value from the management server reaches a shell.
 - The plugin no longer accepts any certificate from the Lightbits API. A pool is either pinned
   to a fingerprint or validated against the management server's trust store. **Pools created
   with 0.1.0-alpha.1 need their fingerprint set after the upgrade** (see INSTALL.md).
