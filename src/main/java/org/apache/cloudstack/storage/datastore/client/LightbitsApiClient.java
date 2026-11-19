@@ -76,6 +76,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 public class LightbitsApiClient {
     private static final Logger LOG = LogManager.getLogger(LightbitsApiClient.class);
     private static final int MAX_ATTEMPTS = 3;
+    static final String AUTH_HINT = ". The cluster rejected the storage pool's API token: it is expired, was revoked with"
+            + " its signing key, or is not a token of this project. Set a new one with updateStoragePool"
+            + " details[0].secretkey=<token>; no restart is needed.";
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
     /**
@@ -1026,8 +1029,10 @@ public class LightbitsApiClient {
             if (status >= 200 && status < 300) {
                 return resp.body();
             }
-            throw new LightbitsApiException(LightbitsApiException.kindOf(status, resp.body()), status,
-                    method + " " + path + " via " + base + " -> HTTP " + status + ": " + snippet(resp.body()));
+            Kind kind = LightbitsApiException.kindOf(status, resp.body());
+            throw new LightbitsApiException(kind, status,
+                    method + " " + path + " via " + base + " -> HTTP " + status + ": " + snippet(resp.body())
+                            + (kind == Kind.AUTH ? AUTH_HINT : ""));
         } catch (IOException | InterruptedException | UnresolvedAddressException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();

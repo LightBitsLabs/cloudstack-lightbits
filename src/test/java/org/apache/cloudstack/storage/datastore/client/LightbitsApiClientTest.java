@@ -703,4 +703,13 @@ class LightbitsApiClientTest {
         wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(
                 com.github.tomakehurst.wiremock.client.WireMock.anyUrl()));
     }
+
+    @Test
+    void aRejectedTokenSaysWhatToDo() {
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(401).withBody("{\"message\":\"token is expired\"}")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.listVolumes());
+        assertEquals(Kind.AUTH, e.getKind());
+        assertTrue(e.getMessage().contains("details[0].secretkey"), e.getMessage());
+        assertFalse(e.getMessage().contains("test-jwt"), "the token must never appear in an error");
+    }
 }

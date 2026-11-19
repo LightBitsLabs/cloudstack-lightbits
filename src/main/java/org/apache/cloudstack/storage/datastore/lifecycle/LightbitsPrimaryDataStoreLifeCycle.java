@@ -78,7 +78,7 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         String url = (String) dsInfos.get("url");
         @SuppressWarnings("unchecked")
         Map<String, String> details = (Map<String, String>) dsInfos.get("details");
-        String jwt = details == null ? null : details.get(LightbitsPoolConfig.KEY_JWT);
+        String jwt = org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.tokenFromInput(details);
 
         LightbitsPoolConfig cfg = LightbitsPoolConfig.fromUrl(url, jwt);
 
@@ -302,9 +302,8 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
      */
     private void cleanupClusterObjects(DataStore store) {
         try {
-            Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(store.getId());
-            String jwt = DBEncryptionUtil.decrypt(LightbitsPoolConfig.readChunked(details, LightbitsPoolConfig.KEY_JWT));
-            LightbitsPoolConfig cfg = LightbitsPoolConfig.fromDetails(details, jwt);
+            LightbitsPoolConfig cfg = org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(
+                    storagePoolDetailsDao, store.getId());
             LightbitsApiClient client = clientFactory.create(cfg);
 
             for (com.cloud.storage.VMTemplateStoragePoolVO ref : templatePoolDao.listByPoolId(store.getId())) {
