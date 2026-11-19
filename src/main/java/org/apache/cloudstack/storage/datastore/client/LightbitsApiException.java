@@ -31,6 +31,7 @@ public class LightbitsApiException extends RuntimeException {
 
     private final Kind kind;
     private final int httpStatus;
+    private boolean neverSent;
 
     public LightbitsApiException(Kind kind, int httpStatus, String message) {
         super(message);
@@ -50,6 +51,21 @@ public class LightbitsApiException extends RuntimeException {
 
     public int getHttpStatus() {
         return httpStatus;
+    }
+
+    /** Marks a failure where the request provably never reached the cluster (see {@link #isNeverSent()}). */
+    public LightbitsApiException neverSent() {
+        this.neverSent = true;
+        return this;
+    }
+
+    /**
+     * True when the request provably never reached the cluster: connection refused, connect
+     * timeout, unresolvable name, failed TLS handshake. Only such a failure of a mutating call
+     * may be sent again; after a 5xx, a read timeout or a reset the change may have been applied.
+     */
+    public boolean isNeverSent() {
+        return neverSent;
     }
 
     public static Kind kindOf(int status, String body) {

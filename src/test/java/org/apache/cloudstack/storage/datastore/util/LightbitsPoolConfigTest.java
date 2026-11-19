@@ -140,4 +140,44 @@ class LightbitsPoolConfigTest {
         assertThrows(IllegalArgumentException.class,
                 () -> LightbitsPoolConfig.fromDetails(incomplete, "jwt"));
     }
+
+    // ---- API failover endpoints and certificate pinning ----
+
+    private static final String FP = "CA:B9:B1:57:67:D8:52:B0:DF:32:7F:FB:58:70:37:02:68:B9:3F:7E:76:70:75:8B:23:45:B4:FF:E8:A8:21:67";
+
+    @Test
+    void endpointsAndFingerprintAreParsedAndSurviveTheDetailsRoundTrip() {
+        LightbitsPoolConfig cfg = LightbitsPoolConfig.fromUrl(
+                "lightbits://10.0.0.1/proj?environment=cs1&endpoints=10.0.0.2,10.0.0.3:8443&fingerprint=" + FP, "jwt");
+        org.junit.jupiter.api.Assertions.assertEquals(
+                java.util.List.of("https://10.0.0.1:443", "https://10.0.0.2:443", "https://10.0.0.3:8443"), cfg.apiEndpoints());
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(FP.replace(":", "")), cfg.getFingerprints());
+        LightbitsPoolConfig back = LightbitsPoolConfig.fromDetails(cfg.toDetailsWithoutSecret(), "jwt");
+        org.junit.jupiter.api.Assertions.assertEquals(cfg.apiEndpoints(), back.apiEndpoints());
+        org.junit.jupiter.api.Assertions.assertEquals(cfg.getFingerprints(), back.getFingerprints());
+    }
+
+    @Test
+    void aPoolWithoutEndpointsOrFingerprintKeepsOneEndpointAndNoPin() {
+        LightbitsPoolConfig cfg = LightbitsPoolConfig.fromUrl("lightbits://10.0.0.1/proj?environment=cs1", "jwt");
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("https://10.0.0.1:443"), cfg.apiEndpoints());
+        org.junit.jupiter.api.Assertions.assertTrue(cfg.getFingerprints().isEmpty());
+        org.junit.jupiter.api.Assertions.assertFalse(cfg.toDetailsWithoutSecret().containsKey(LightbitsPoolConfig.KEY_TLS_FINGERPRINT));
+    }
+
+    @Test
+    void theUrlHostIsNotListedTwiceAndTwoFingerprintsAreAcceptedForARotation() {
+        LightbitsPoolConfig cfg = LightbitsPoolConfig.fromUrl(
+                "lightbits://10.0.0.1/proj?environment=cs1&endpoints=10.0.0.1,10.0.0.2&fingerprint=" + FP + "," + "ab".repeat(32), "jwt");
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("https://10.0.0.1:443", "https://10.0.0.2:443"), cfg.apiEndpoints());
+        org.junit.jupiter.api.Assertions.assertEquals(2, cfg.getFingerprints().size());
+    }
+
+    @Test
+    void malformedEndpointOrFingerprintIsRejectedAtRegistration() {
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> LightbitsPoolConfig.fromUrl(
+                "lightbits://10.0.0.1/proj?environment=cs1&endpoints=http://10.0.0.2", "jwt"));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> LightbitsPoolConfig.fromUrl(
+                "lightbits://10.0.0.1/proj?environment=cs1&fingerprint=12:34", "jwt"));
+    }
 }

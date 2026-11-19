@@ -59,16 +59,57 @@ class LightbitsApiClientTlsTest {
         assertEquals(Kind.TRANSIENT, e.getKind()); // SSL handshake surfaces as connection failure
     }
 
+    /** SHA-256 fingerprint of the certificate the WireMock HTTPS listener presents. */
+    private String serverFingerprint() throws Exception {
+        javax.net.ssl.SSLContext ctx = javax.net.ssl.SSLContext.getInstance("TLS");
+        final java.security.cert.X509Certificate[][] seen = new java.security.cert.X509Certificate[1][];
+        ctx.init(null, new javax.net.ssl.TrustManager[] {new javax.net.ssl.X509TrustManager() {
+            @Override public void checkClientTrusted(java.security.cert.X509Certificate[] c, String a) { }
+            @Override public void checkServerTrusted(java.security.cert.X509Certificate[] c, String a) { seen[0] = c; }
+            @Override public java.security.cert.X509Certificate[] getAcceptedIssuers() { return new java.security.cert.X509Certificate[0]; }
+        }}, null);
+        try (javax.net.ssl.SSLSocket s = (javax.net.ssl.SSLSocket) ctx.getSocketFactory().createSocket("localhost", wm.httpsPort())) {
+            s.startHandshake();
+        }
+        StringBuilder sb = new StringBuilder();
+        for (byte b : java.security.MessageDigest.getInstance("SHA-256").digest(seen[0][0].getEncoded())) {
+            sb.append(sb.length() == 0 ? "" : ":").append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
+    private static final String OTHER_FINGERPRINT = "AA".repeat(32);
+
     @Test
-    void insecureDevClientStillEnforcesHostnameVerification() {
-        // Even the trust-all dev client cannot skip hostname verification: the JDK
-        // HttpClient enforces it per-VM. WireMock's cert doesn't carry a SAN for
-        // localhost, so this must fail — proving the bypass is trust-only.
-        LightbitsApiClient client = LightbitsApiClient.insecureForDevelopment(
-                "https://localhost:" + wm.httpsPort(), "jwt", "default");
+    void pinnedClientAcceptsTheCertificateWithThePinnedFingerprint() throws Exception {
+        // the listener's certificate is self-signed and carries no name for "localhost":
+        // a pin accepts it on the fingerprint alone, which is how a Lightbits cluster is verified
+        LightbitsApiClient client = LightbitsApiClient.pinned(java.util.List.of("https://localhost:" + wm.httpsPort()),
+                "jwt", "default", java.util.List.of(serverFingerprint()), 1);
+        assertEquals(0, client.listVolumes().size());
+    }
+
+    @Test
+    void pinnedClientRefusesAnyOtherCertificate() {
+        LightbitsApiClient client = LightbitsApiClient.pinned(java.util.List.of("https://localhost:" + wm.httpsPort()),
+                "jwt", "default", java.util.List.of(OTHER_FINGERPRINT), 1);
         LightbitsApiException e = assertThrows(LightbitsApiException.class, client::listVolumes);
-        assertEquals(Kind.TRANSIENT, e.getKind());
-        assertTrue(String.valueOf(e.getMessage()).contains("No name matching"),
-                "expected hostname verification failure, got: " + e.getMessage());
+        assertTrue(e.getMessage().contains("does not match the fingerprint pinned"), e.getMessage());
+        assertTrue(e.isNeverSent(), "a refused handshake means no request was sent");
+        wm.verify(0, WireMock.getRequestedFor(WireMock.urlPathEqualTo("/api/v2/projects/default/volumes")));
+    }
+
+    @Test
+    void pinnedClientAcceptsEitherFingerprintDuringARotation() throws Exception {
+        LightbitsApiClient client = LightbitsApiClient.pinned(java.util.List.of("https://localhost:" + wm.httpsPort()),
+                "jwt", "default", java.util.List.of(OTHER_FINGERPRINT, serverFingerprint().toUpperCase()), 1);
+        assertEquals(0, client.listVolumes().size());
+    }
+
+    @Test
+    void malformedFingerprintIsRejectedUpFront() {
+        assertThrows(IllegalArgumentException.class, () -> LightbitsApiClient.normalizeFingerprint("12:34"));
+        assertThrows(IllegalArgumentException.class, () -> LightbitsApiClient.normalizeFingerprint(null));
+        assertEquals("AB".repeat(32), LightbitsApiClient.normalizeFingerprint("ab:".repeat(31) + "ab"));
     }
 }

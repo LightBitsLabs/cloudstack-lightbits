@@ -16,8 +16,12 @@
 package org.apache.cloudstack.storage.datastore.util;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+
+import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
 
 /**
  * Parses and validates the parameters of a Lightbits primary storage pool, and
@@ -35,8 +39,8 @@ import java.util.Map;
  * LightbitsApiClient.nodeCapacity().
  *
  * Detail keys (persisted in storage_pool_details):
- *   apiHost, apiPort, project, replicaCount, compression, qosPolicy, environment,
- *   jwt(encrypted)
+ *   apiHost, apiPort, apiEndpoints, tlsFingerprint, project, replicaCount, compression,
+ *   qosPolicy, environment, jwt(encrypted)
  */
 public class LightbitsPoolConfig {
     public static final String SCHEME = "lightbits";
@@ -49,6 +53,11 @@ public class LightbitsPoolConfig {
     public static final String KEY_QOS = "qosPolicy";
     public static final String KEY_JWT = "jwt";
     public static final String KEY_ENVIRONMENT = "environment";
+    /** Further API endpoints of the same cluster, comma-separated host[:port], tried on failover. */
+    public static final String KEY_API_ENDPOINTS = "apiEndpoints";
+    /** SHA-256 fingerprint(s) of the cluster's API certificate, comma-separated (two during a rotation). */
+    public static final String KEY_TLS_FINGERPRINT = "tlsFingerprint";
+    private static final int MAX_FINGERPRINTS = 3;
 
     private static final int DEFAULT_PORT = 443;
     private static final int DEFAULT_REPLICAS = 3;
@@ -61,9 +70,17 @@ public class LightbitsPoolConfig {
     private final String qosPolicy;  // nullable
     private final String jwt;         // nullable in details map (encrypted); required to operate
     private final String environment; // identifies the owning CloudStack when clusters are shared
+    private final List<String> extraEndpoints; // host:port, never null
+    private final List<String> fingerprints;   // normalized SHA-256, never null; empty = CA validation
 
     public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
                                boolean compression, String qosPolicy, String jwt, String environment) {
+        this(apiHost, apiPort, project, replicaCount, compression, qosPolicy, jwt, environment, null, null);
+    }
+
+    public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
+                               boolean compression, String qosPolicy, String jwt, String environment,
+                               List<String> extraEndpoints, List<String> fingerprints) {
         this.apiHost = apiHost;
         this.apiPort = apiPort;
         this.project = project;
@@ -72,6 +89,8 @@ public class LightbitsPoolConfig {
         this.qosPolicy = qosPolicy;
         this.jwt = jwt;
         this.environment = environment;
+        this.extraEndpoints = extraEndpoints == null ? List.of() : List.copyOf(extraEndpoints);
+        this.fingerprints = fingerprints == null ? List.of() : List.copyOf(fingerprints);
     }
 
     /**
@@ -130,7 +149,60 @@ public class LightbitsPoolConfig {
         // physical capacity across cluster nodes (GET /api/v2/nodes, readable by a
         // project-scoped token) and dividing by the pool's replica count. See
         // LightbitsApiClient.nodeCapacity() and the lifecycle/driver stats path.
-        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, jwt, environment);
+        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, jwt, environment,
+                parseEndpoints(decode(q.get("endpoints")), port), parseFingerprints(decode(q.get("fingerprint"))));
+    }
+
+    /**
+     * Further API endpoints of the same cluster: comma-separated {@code host[:port]}; an entry
+     * without a port uses the pool's API port. Returned as {@code host:port}.
+     */
+    public static List<String> parseEndpoints(String raw, int defaultPort) {
+        List<String> out = new ArrayList<>();
+        if (raw == null || raw.isBlank()) {
+            return out;
+        }
+        for (String e : raw.split(",")) {
+            String entry = e.trim();
+            if (entry.isEmpty()) {
+                continue;
+            }
+            if (!entry.matches("[A-Za-z0-9]([A-Za-z0-9.-]{0,252})(:[0-9]{1,5})?")) {
+                throw new IllegalArgumentException("endpoints must be a comma-separated list of host or host:port (got '"
+                        + entry + "')");
+            }
+            String withPort = entry.contains(":") ? entry : entry + ":" + defaultPort;
+            if (!out.contains(withPort)) {
+                out.add(withPort);
+            }
+        }
+        return out;
+    }
+
+    /** SHA-256 certificate fingerprints, comma-separated, colons optional. Returned normalized. */
+    public static List<String> parseFingerprints(String raw) {
+        List<String> out = new ArrayList<>();
+        if (raw == null || raw.isBlank()) {
+            return out;
+        }
+        for (String f : raw.split(",")) {
+            if (f.isBlank()) {
+                continue;
+            }
+            String n = LightbitsApiClient.normalizeFingerprint(f);
+            if (!out.contains(n)) {
+                out.add(n);
+            }
+        }
+        if (out.size() > MAX_FINGERPRINTS) {
+            throw new IllegalArgumentException("at most " + MAX_FINGERPRINTS + " certificate fingerprints can be pinned"
+                    + " (the current one and the next one are enough for a rotation)");
+        }
+        return out;
+    }
+
+    private static String decode(String v) {
+        return v == null ? null : java.net.URLDecoder.decode(v, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /** Rebuild config from a persisted details map (JWT already decrypted by the caller). */
@@ -145,7 +217,8 @@ public class LightbitsPoolConfig {
         boolean compression = Boolean.parseBoolean(details.getOrDefault(KEY_COMPRESSION, "false"));
         String qos = details.get(KEY_QOS);
         String environment = require(details, KEY_ENVIRONMENT);
-        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, decryptedJwt, environment);
+        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, decryptedJwt, environment,
+                parseEndpoints(details.get(KEY_API_ENDPOINTS), port), parseFingerprints(details.get(KEY_TLS_FINGERPRINT)));
     }
 
     /** Details map WITHOUT the JWT — caller encrypts and stores the JWT separately. */
@@ -160,11 +233,37 @@ public class LightbitsPoolConfig {
             d.put(KEY_QOS, qosPolicy);
         }
         d.put(KEY_ENVIRONMENT, environment);
+        if (!extraEndpoints.isEmpty()) {
+            d.put(KEY_API_ENDPOINTS, String.join(",", extraEndpoints));
+        }
+        if (!fingerprints.isEmpty()) {
+            d.put(KEY_TLS_FINGERPRINT, String.join(",", fingerprints));
+        }
         return d;
     }
 
     public String apiEndpoint() {
         return "https://" + apiHost + ":" + apiPort;
+    }
+
+    /** Every API endpoint of the cluster, the pool URL's host first. */
+    public List<String> apiEndpoints() {
+        List<String> out = new ArrayList<>();
+        out.add(apiEndpoint());
+        for (String e : extraEndpoints) {
+            String url = "https://" + e;
+            if (!out.contains(url)) {
+                out.add(url);
+            }
+        }
+        return out;
+    }
+
+    /** The API client for this pool: pinned to the pool's fingerprint(s), or CA-validated when none is set. */
+    public LightbitsApiClient newClient() {
+        return fingerprints.isEmpty()
+                ? new LightbitsApiClient(apiEndpoints(), jwt, project)
+                : LightbitsApiClient.pinned(apiEndpoints(), jwt, project, fingerprints);
     }
 
     /**
@@ -233,4 +332,6 @@ public class LightbitsPoolConfig {
     public String getQosPolicy() { return qosPolicy; }
     public String getJwt() { return jwt; }
     public String getEnvironment() { return environment; }
+    public List<String> getExtraEndpoints() { return extraEndpoints; }
+    public List<String> getFingerprints() { return fingerprints; }
 }
