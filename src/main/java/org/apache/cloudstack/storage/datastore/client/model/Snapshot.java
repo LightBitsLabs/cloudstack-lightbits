@@ -28,6 +28,9 @@ public class Snapshot {
     private String sourceVolumeName;
     private String size;
     private int replicaCount;
+    /** Set by the client on a snapshot the current call created (not one it found through a 409). */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private boolean createdByThisCall;
 
     public boolean isDeletedOrDeleting() {
         return "Deleted".equals(state) || "Deleting".equals(state);
@@ -46,6 +49,8 @@ public class Snapshot {
         return size == null || size.isEmpty() ? 0L : Long.parseLong(size);
     }
 
+    public boolean isCreatedByThisCall() { return createdByThisCall; }
+    public void setCreatedByThisCall(boolean createdByThisCall) { this.createdByThisCall = createdByThisCall; }
     public String getUuid() { return uuid; }
     public void setUuid(String uuid) { this.uuid = uuid; }
     public String getName() { return name; }

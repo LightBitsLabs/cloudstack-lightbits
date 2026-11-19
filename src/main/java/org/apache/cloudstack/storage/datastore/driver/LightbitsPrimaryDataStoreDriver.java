@@ -466,7 +466,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         } catch (RuntimeException e) {
             // Do not leave the clone-source snapshot we just took behind a failed clone. A clone
             // this call created has been removed, and that removal waited for, by the client.
-            if (srcData.getType() != DataObjectType.SNAPSHOT) {
+            // Only a snapshot THIS call created: a user's snapshot is never ours, and a
+            // clone-source snapshot found through a 409 belongs to an earlier attempt that
+            // may still need it.
+            if (srcData.getType() != DataObjectType.SNAPSHOT && snap.isCreatedByThisCall()) {
                 try {
                     client.deleteSnapshot(snap.getUuid());
                 } catch (RuntimeException cleanup) {
@@ -758,7 +761,12 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             // A rollback restores the snapshot's SIZE as well as its content: reverting a
             // volume that was grown since would shrink it under CloudStack, which keeps the
             // larger size on record. Refuse instead of silently truncating.
-            if (s.getSizeBytes() > 0 && s.getSizeBytes() < lbVol.getSizeBytes()) {
+            if (s.getSizeBytes() <= 0) {
+                throw new CloudRuntimeException("cannot revert volume " + vol.getUuid() + " to snapshot "
+                        + snapshot.getUuid() + ": the cluster does not report the snapshot's size, so a"
+                        + " shrink of the volume cannot be ruled out.");
+            }
+            if (s.getSizeBytes() < lbVol.getSizeBytes()) {
                 throw new CloudRuntimeException("cannot revert volume " + vol.getUuid() + " to snapshot "
                         + snapshot.getUuid() + ": the volume was grown after the snapshot was taken ("
                         + s.getSizeBytes() + " -> " + lbVol.getSizeBytes() + " bytes) and a revert would"
@@ -774,6 +782,11 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                         + ". Stop the VM or detach the volume first.");
             }
             // native in-place rollback (PUT .../volumes/{uuid}/rollback)
+            if (lbVol.getEtag() == null || lbVol.getEtag().isEmpty()) {
+                throw new CloudRuntimeException("cannot revert volume " + vol.getUuid() + " to snapshot "
+                        + snapshot.getUuid() + ": the cluster does not report the volume's revision (ETag),"
+                        + " so the revert cannot be bound to the state that was checked.");
+            }
             // Conditional on the revision the two guards above looked at: a resize or a host
             // attach landing in between gets a 412 from the cluster and nothing is rolled back.
             client.rollbackVolume(lbVol.getUuid(), s.getUuid(), lbVol.getEtag());

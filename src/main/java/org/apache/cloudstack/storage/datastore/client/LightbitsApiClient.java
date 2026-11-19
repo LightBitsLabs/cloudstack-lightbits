@@ -578,7 +578,9 @@ public class LightbitsApiClient {
         // The POST answers while the snapshot is still Creating, and a clone or rollback from a
         // Creating snapshot is refused: report success only once it is Available.
         try {
-            return waitForSnapshot(created.getUuid());
+            Snapshot settled = waitForSnapshot(created.getUuid());
+            settled.setCreatedByThisCall(createdHere);
+            return settled;
         } catch (RuntimeException e) {
             // only a snapshot this call created: one found through a 409 is an existing restore point
             if (createdHere) {
