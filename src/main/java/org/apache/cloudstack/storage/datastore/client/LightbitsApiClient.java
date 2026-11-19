@@ -988,18 +988,30 @@ public class LightbitsApiClient {
         return false;
     }
 
-    /** The innermost message: a pinning refusal is buried under two SSL wrappers. */
-    private static String describe(Throwable e) {
-        String msg = e.getMessage();
+    /**
+     * A message an operator can act on. A pinning refusal is buried under two SSL wrappers, and
+     * a failed CA validation surfaces as "PKIX path building failed", which says nothing about
+     * what to do.
+     */
+    static String describe(Throwable e) {
+        boolean handshake = false;
         for (Throwable t = e; t != null; t = t.getCause()) {
-            if (t instanceof CertificateException && t.getMessage() != null) {
+            if (t instanceof CertificateException && t.getMessage() != null && t.getMessage().contains("pinned")) {
                 return t.getMessage();
             }
+            handshake |= t instanceof SSLHandshakeException;
             if (t.getCause() == t) {
                 break;
             }
         }
-        return msg == null ? e.getClass().getSimpleName() : msg;
+        String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        if (handshake) {
+            return "the certificate of the Lightbits API is not trusted (" + msg + "). A Lightbits cluster is verified by"
+                    + " its certificate fingerprint: read it with 'openssl s_client -connect <api-host>:443 </dev/null"
+                    + " | openssl x509 -fingerprint -sha256 -noout' and set it as the " + "tlsFingerprint"
+                    + " detail of the storage pool";
+        }
+        return msg;
     }
 
     private static void sleep(long ms) {

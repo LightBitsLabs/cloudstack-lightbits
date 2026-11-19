@@ -57,6 +57,7 @@ class LightbitsApiClientTlsTest {
                 java.net.http.HttpClient.newHttpClient(), 1);
         LightbitsApiException e = assertThrows(LightbitsApiException.class, client::listVolumes);
         assertEquals(Kind.TRANSIENT, e.getKind()); // SSL handshake surfaces as connection failure
+        assertTrue(e.getMessage().contains("tlsFingerprint"), "the error must say what to do: " + e.getMessage());
     }
 
     /** SHA-256 fingerprint of the certificate the WireMock HTTPS listener presents. */
