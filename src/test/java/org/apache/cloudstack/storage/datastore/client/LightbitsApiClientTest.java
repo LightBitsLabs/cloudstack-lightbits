@@ -703,4 +703,15 @@ class LightbitsApiClientTest {
         wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(
                 com.github.tomakehurst.wiremock.client.WireMock.anyUrl()));
     }
+
+    @Test
+    void aPollWithoutARevisionIsNotTakenForAChange() {
+        // the rollback is accepted, but the volume then reports no ETag at all: not proof it was applied
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")).willReturn(aResponse().withStatus(200).withBody("{}")));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"UUID\":\"" + VOL_UUID + "\",\"name\":\"cs-abc\",\"state\":\"Available\",\"size\":\"4294967296\"}")));
+        client.setSettleWait(50, 1);
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", "1"));
+        assertTrue(e.getMessage().contains("change not applied"), e.getMessage());
+    }
 }
