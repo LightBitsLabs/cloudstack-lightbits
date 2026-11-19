@@ -460,7 +460,9 @@ public class LightbitsApiClient {
                 throw new LightbitsApiException(Kind.NOT_FOUND, 404,
                         "volume " + v.getName() + " (" + uuid + ") is being deleted on the cluster");
             }
-            boolean changed = changedFromEtag == null || !changedFromEtag.equals(v.getEtag());
+            // a poll that carries no revision is not evidence of a change
+            boolean changed = changedFromEtag == null
+                    || (v.getEtag() != null && !v.getEtag().isEmpty() && !changedFromEtag.equals(v.getEtag()));
             if (v.isAvailable() && changed) {
                 return v;
             }
