@@ -43,6 +43,10 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     private static final Map<String, KVMStoragePool> POOLS = new ConcurrentHashMap<>();
     private static final int DEFAULT_WAIT_SECS = 60;
     private static final Object CONNECT_LOCK = new Object();
+    /** A lookup that finds no device triggers a connect at most this often. */
+    private static final long LOOKUP_CONNECT_INTERVAL_MILLIS = 10_000;
+    private static final long LOOKUP_WAIT_MILLIS = 2_000;
+    private long lastLookupConnect;
     /** Pool detail carrying the cluster's discovery endpoints, comma-separated host[:port]. */
     public static final String DETAIL_NVME_DISCOVERY = "nvmeDiscovery";
 
@@ -108,6 +112,25 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     }
 
     /**
+     * Connect this host to the pool's cluster on behalf of a lookup, rate-limited: lookups are
+     * polled every few seconds and one connect serves them all. A failure to connect is
+     * reported to the caller (it carries the diagnosis); the next poll tries again.
+     */
+    private void connectIfDue(KVMStoragePool pool) {
+        if (pool == null) {
+            return;
+        }
+        synchronized (CONNECT_LOCK) {
+            long now = System.currentTimeMillis();
+            if (now - lastLookupConnect < LOOKUP_CONNECT_INTERVAL_MILLIS) {
+                return;
+            }
+            lastLookupConnect = now;
+            nvme.connect(discoveryEndpoints(pool));
+        }
+    }
+
+    /**
      * Discovery endpoints for a pool: the list the management server sent with the pool
      * (every node of the cluster), or the pool's API host on the discovery port.
      */
@@ -121,8 +144,15 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     public KVMPhysicalDisk getPhysicalDisk(String volumePath, KVMStoragePool pool) {
         String uuid = LightbitsNvmeHost.requireVolumeUuid(volumePath);
         if (!nvme.deviceLinkExists(uuid)) {
-            LOG.debug("Lightbits device for volume {} not present", uuid);
-            return null;
+            // The agent looks a VM's disks up before it asks for them to be connected (StartCommand
+            // builds the disk definitions first). On a host with no connection to the cluster yet,
+            // after a reboot or on first use, the device can only appear once the host connects,
+            // so a failed lookup makes sure it is connected. The caller polls this method.
+            connectIfDue(pool);
+            if (!nvme.waitForDeviceLink(uuid, LOOKUP_WAIT_MILLIS)) {
+                LOG.debug("Lightbits device for volume {} not present", uuid);
+                return null;
+            }
         }
         // never hand out a path whose namespace was not matched against the volume
         String kernelName = nvme.verifyIdentity(uuid);

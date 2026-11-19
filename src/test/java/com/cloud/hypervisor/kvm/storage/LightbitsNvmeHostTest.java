@@ -47,6 +47,7 @@ class LightbitsNvmeHostTest {
         final List<String> commands = new ArrayList<>();
         final Map<String, LightbitsNvmeHost.Result> results = new HashMap<>();
         Runnable onRescan = () -> { };
+        Runnable onConnect = () -> { };
         int slept;
 
         @Override
@@ -55,6 +56,9 @@ class LightbitsNvmeHostTest {
             commands.add(cmd);
             if (cmd.startsWith("nvme ns-rescan")) {
                 onRescan.run();
+            }
+            if (cmd.startsWith("nvme connect-all")) {
+                onConnect.run();
             }
             for (Map.Entry<String, LightbitsNvmeHost.Result> e : results.entrySet()) {
                 if (cmd.contains(e.getKey())) {
@@ -250,5 +254,49 @@ class LightbitsNvmeHostTest {
         assertEquals(2, host.paths().size());
         assertEquals(1, host.livePaths().size());
         host.warnOnDegradedPaths(3);   // logs; must not throw
+    }
+
+    // ---- lookup before connect (the agent builds a VM's disk definitions before it connects them) ----
+
+    /** A cold host: connect-all brings the controller up, and with it the volume's namespace. */
+    private void namespaceAppearsOnConnect() {
+        sys.results.clear();
+        sys.onConnect = () -> attached();
+    }
+
+    private static KVMStoragePool pool() {
+        return new LightbitsStoragePool("pool-uuid", "10.0.0.1", 443, com.cloud.storage.Storage.StoragePoolType.IscsiLUN, null,
+                java.util.Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.0.1:8009,10.0.0.2:8009"));
+    }
+
+    @Test
+    void aLookupOnAHostWithNoConnectionConnectsItFirst() {
+        namespaceAppearsOnConnect();
+        LightbitsStorageAdaptor adaptor = new LightbitsStorageAdaptor(host);
+        KVMPhysicalDisk disk = adaptor.getPhysicalDisk(VOL, pool());
+        assertTrue(disk != null, "the disk must be found by the lookup alone");
+        assertEquals(LINK, disk.getPath());
+        assertEquals(1, sys.commands.stream().filter(c -> c.startsWith("nvme connect-all")).count());
+    }
+
+    @Test
+    void lookupsDoNotConnectWhenTheDeviceIsThereAndConnectAtMostOncePerInterval() {
+        attached();
+        LightbitsStorageAdaptor adaptor = new LightbitsStorageAdaptor(host);
+        adaptor.getPhysicalDisk(VOL, pool());
+        assertEquals(0, sys.commands.stream().filter(c -> c.startsWith("nvme connect-all")).count());
+        // a volume that is not there (not in the ACL yet): polled repeatedly, connected once
+        for (int i = 0; i < 5; i++) {
+            assertEquals(null, adaptor.getPhysicalDisk(OTHER, pool()));
+        }
+        assertEquals(1, sys.commands.stream().filter(c -> c.startsWith("nvme connect-all")).count());
+    }
+
+    @Test
+    void aLookupOnAHostThatCannotConnectReportsWhy() {
+        sys.results.put("connect-all", new LightbitsNvmeHost.Result(1, "failed to add controller"));
+        LightbitsStorageAdaptor adaptor = new LightbitsStorageAdaptor(host);
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> adaptor.getPhysicalDisk(VOL, pool()));
+        assertTrue(e.getMessage().contains("could not connect this host"), e.getMessage());
     }
 }
