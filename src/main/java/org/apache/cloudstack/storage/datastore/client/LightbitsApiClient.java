@@ -78,6 +78,19 @@ public class LightbitsApiClient {
     private static final int MAX_ATTEMPTS = 3;
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
+    /**
+     * Endpoints that recently refused or timed out a connection, with the time until which they
+     * are tried last. Shared by all clients: the plugin builds a client per operation, and
+     * without this every operation would pay the connect timeout of a dead node again.
+     */
+    private static final Map<String, Long> DOWN_UNTIL = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long DOWN_MILLIS = 60_000;
+
+    static boolean isMarkedDown(String base) {
+        Long until = DOWN_UNTIL.get(base);
+        return until != null && until > System.currentTimeMillis();
+    }
+
     /** API endpoints of ONE cluster, e.g. https://10.0.0.1:443. Every node serves the same state. */
     private final List<String> bases;
     /** Index of the endpoint that answered last; calls start there instead of re-probing a dead node. */
@@ -913,24 +926,38 @@ public class LightbitsApiClient {
         LightbitsApiException last = null;
         for (int round = 1; round <= rounds; round++) {
             int start = preferred;
+            // endpoints known to be down go last: still tried, but not before the live ones
+            List<Integer> order = new ArrayList<>();
+            List<Integer> down = new ArrayList<>();
             for (int i = 0; i < bases.size(); i++) {
                 int idx = (start + i) % bases.size();
+                (isMarkedDown(bases.get(idx)) ? down : order).add(idx);
+            }
+            order.addAll(down);
+            String failedVia = null;
+            for (int idx : order) {
+                String base = bases.get(idx);
                 try {
-                    String body = send(bases.get(idx), method, path, jsonBody, ifMatchEtag, timeout);
-                    if (idx != start) {
+                    String body = send(base, method, path, jsonBody, ifMatchEtag, timeout);
+                    DOWN_UNTIL.remove(base);
+                    if (failedVia != null) {
                         preferred = idx;
                         LOG.warn("Lightbits API {} {} succeeded via {} after failing via {} ({}); check that endpoint",
-                                method, path, bases.get(idx), bases.get(start), last == null ? "?" : last.getMessage());
+                                method, path, base, failedVia, last == null ? "?" : last.getMessage());
                     }
                     return body;
                 } catch (LightbitsApiException e) {
                     if (e.getKind() != Kind.TRANSIENT) {
                         throw e;
                     }
+                    if (e.isNeverSent()) {
+                        DOWN_UNTIL.put(base, System.currentTimeMillis() + DOWN_MILLIS);
+                    }
                     if (!read && !e.isNeverSent()) {
                         throw e;
                     }
                     last = e;
+                    failedVia = base;
                 }
             }
             if (round < rounds) {

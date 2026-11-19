@@ -179,4 +179,24 @@ class LightbitsApiClientFailoverTest {
         assertEquals(Kind.TRANSIENT, e.getKind());
         assertTrue(e.isNeverSent());
     }
+
+    @Test
+    void aDeadEndpointIsRememberedAcrossClients() {
+        // the plugin builds a client per operation: the next one must not wait on the dead node again
+        client(deadEndpoint, url(b)).listVolumes();
+        assertTrue(LightbitsApiClient.isMarkedDown(deadEndpoint));
+        assertFalse(LightbitsApiClient.isMarkedDown(url(b)));
+        long t0 = System.nanoTime();
+        assertEquals(1, client(deadEndpoint, url(b)).listVolumes().size());
+        assertTrue((System.nanoTime() - t0) / 1_000_000L < 2000);
+    }
+
+    @Test
+    void anEndpointMarkedDownIsStillTriedWhenItIsTheOnlyOneLeft() {
+        String live = url(b);
+        client(deadEndpoint, live).listVolumes();
+        b.stop();
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client(deadEndpoint, live).listVolumes());
+        assertTrue(e.isNeverSent());
+    }
 }
