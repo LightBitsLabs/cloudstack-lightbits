@@ -559,7 +559,21 @@ class LightbitsApiClientTest {
         wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(500).withBody("boom")));
         client.setSettleWait(50, 1);
         assertThrows(LightbitsApiException.class, () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.moreThanOrExactly(1),
+                com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
         wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void aSnapshotKnowsWhetherThisCallCreatedIt() {
+        String snaps = "/api/v2/projects/default/snapshots";
+        wm.stubFor(post(urlEqualTo(snaps)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Creating\"}")));
+        assertTrue(client.createSnapshot("cs-snap", VOL_UUID).isCreatedByThisCall());
+        wm.stubFor(post(urlEqualTo(snaps)).willReturn(aResponse().withStatus(409).withBody("{\"message\":\"exists\"}")));
+        wm.stubFor(get(urlPathEqualTo(snaps)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"snapshots\":[{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\"}]}")));
+        assertFalse(client.createSnapshot("cs-snap", VOL_UUID).isCreatedByThisCall());
     }
 
     @Test
@@ -567,10 +581,13 @@ class LightbitsApiClientTest {
         String snaps = "/api/v2/projects/default/snapshots";
         wm.stubFor(post(urlEqualTo(snaps)).willReturn(aResponse().withStatus(409).withBody("{\"message\":\"exists\"}")));
         wm.stubFor(get(urlPathEqualTo(snaps)).willReturn(aResponse().withStatus(200).withBody(
-                "{snapshots\":[{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\"}]}")));
+                "{\"snapshots\":[{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\"}]}")));
         wm.stubFor(get(urlEqualTo(snaps + "/snap-1")).willReturn(aResponse().withStatus(500).withBody("boom")));
         client.setSettleWait(50, 1);
         assertThrows(LightbitsApiException.class, () -> client.createSnapshot("cs-snap", VOL_UUID));
+        // the settle poll of the existing snapshot was reached (and failed): not an earlier error
+        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.moreThanOrExactly(1),
+                com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo(snaps + "/snap-1")));
         wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(snaps + "/snap-1")));
     }
 
