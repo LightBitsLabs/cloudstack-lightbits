@@ -514,10 +514,24 @@ public class LightbitsApiClient {
     public void resizeVolume(String uuid, long newSizeBytes) {
         Volume before = getVolume(uuid).orElseThrow(() -> new LightbitsApiException(Kind.NOT_FOUND, 404,
                 "volume " + uuid + " not found on the cluster"));
+        requireRevision(before.getEtag(), "resize of volume " + uuid);
         ObjectNode body = mapper.createObjectNode();
         body.put("size", String.valueOf(newSizeBytes));
         body.put("projectName", project);
-        execute("PUT", projectPath("volumes", uuid), body.toString(), before.getEtag());
+        try {
+            executeConditional("PUT", projectPath("volumes", uuid), body.toString(), before.getEtag());
+        } catch (LightbitsApiException e) {
+            if (e.getKind() != Kind.TRANSIENT) {
+                throw e;
+            }
+            // Sent, not confirmed. Not sent again: if it was applied the revision has moved and
+            // a replay would be refused with 412 and reported as a failure. The volume decides.
+            Volume now = getVolume(uuid).orElseThrow(() -> e);
+            if (before.getEtag().equals(now.getEtag()) || now.getSizeBytes() != newSizeBytes) {
+                throw e;
+            }
+            LOG.warn("Lightbits: resize of {} was not confirmed ({}) but the volume shows it applied", uuid, e.getMessage());
+        }
         Volume after = waitForVolume(uuid, before.getEtag());
         if (after.getSizeBytes() != newSizeBytes) {
             throw new LightbitsApiException(Kind.UNKNOWN, -1, "volume " + after.getName() + " (" + uuid
@@ -537,8 +551,30 @@ public class LightbitsApiClient {
         body.put("projectName", project);
         ArrayNode values = body.putObject("acl").putArray("values");
         (nqns == null || nqns.isEmpty() ? List.of("ALLOW_NONE") : nqns).forEach(values::add);
-        execute("PUT", projectPath("volumes", uuid), body.toString(), ifMatchEtag);
+        requireRevision(ifMatchEtag, "ACL update of volume " + uuid);
+        executeConditional("PUT", projectPath("volumes", uuid), body.toString(), ifMatchEtag);
         waitForVolume(uuid, ifMatchEtag);
+    }
+
+    /**
+     * A read-modify-write without the revision it was computed from would be sent
+     * unconditionally and could overwrite a concurrent change: refuse it instead.
+     */
+    private static void requireRevision(String etag, String what) {
+        if (etag == null || etag.isEmpty()) {
+            throw new LightbitsApiException(Kind.INVALID, -1, what
+                    + ": the cluster does not report the volume's revision (ETag), so the update cannot be made conditional");
+        }
+    }
+
+    /**
+     * A conditional (If-Match) update is sent exactly once. If it fails after it was sent the
+     * outcome is unknown, and sending it again is wrong either way: if the first one was
+     * applied the revision has moved and the replay is refused with 412, which would report a
+     * change that happened as a failure. The caller decides from the volume's state.
+     */
+    private String executeConditional(String method, String path, String jsonBody, String ifMatchEtag) {
+        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, 1);
     }
 
     /** Idempotent delete via the project-scoped route. Returns false if already gone. */
@@ -700,7 +736,19 @@ public class LightbitsApiClient {
         ObjectNode body = mapper.createObjectNode();
         body.put("srcSnapshotUUID", snapshotUuid);
         body.put("projectName", project);
-        execute("PUT", projectPath("volumes", volumeUuid) + "/rollback", body.toString(), ifMatchEtag);
+        requireRevision(ifMatchEtag, "rollback of volume " + volumeUuid);
+        try {
+            executeConditional("PUT", projectPath("volumes", volumeUuid) + "/rollback", body.toString(), ifMatchEtag);
+        } catch (LightbitsApiException e) {
+            if (e.getKind() != Kind.TRANSIENT) {
+                throw e;
+            }
+            // No way to tell from the volume whether a rollback was applied (another change
+            // moves the revision just the same), so this is never reported as a success.
+            // Running the revert again is safe: it reads the volume afresh and rolls back again.
+            throw new LightbitsApiException(Kind.TRANSIENT, e.getHttpStatus(), "the rollback of volume " + volumeUuid
+                    + " was sent but not confirmed (" + e.getMessage() + "); its outcome is unknown, run the revert again");
+        }
         // The PUT answers {} immediately and the volume was Available before it: wait for the
         // ETag to move, which is the only evidence that the rollback was applied.
         waitForVolume(volumeUuid, ifMatchEtag);
