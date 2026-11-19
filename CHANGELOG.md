@@ -5,6 +5,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- Snapshot revert never reached the plugin: the driver did not advertise the
+  `CAN_REVERT_VOLUME_TO_SNAPSHOT` capability, so CloudStack rejected every revert.
+- A failed cluster-side delete was reported to CloudStack as success, orphaning the volume.
+- Create, clone and snapshot returned before the object was `Available`; a create that ends in
+  `Failed` or never settles is now removed from the cluster and reported as a failure.
+- Resize, ACL update and rollback returned before the change was applied; they now wait for it.
+- Concurrent ACL updates of one volume could drop a host; updates are now conditional on the
+  volume ETag and retried.
+- A failed clone left its clone-source snapshot behind.
+
+### Changed
+- Revert is refused when the volume was grown after the snapshot was taken (a rollback would
+  shrink it) and when the volume is still exposed to a host.
+- Builds and passes unit tests against CloudStack 4.23.0.0 (`-Dcloudstack.version=4.23.0.0`) as
+  well as 4.22.1.0.
+
 ## [0.1.0-alpha.1] - 2026-10-18
 
 First alpha, **for evaluation only. Not for production use.** Built against CloudStack 4.22.1.0

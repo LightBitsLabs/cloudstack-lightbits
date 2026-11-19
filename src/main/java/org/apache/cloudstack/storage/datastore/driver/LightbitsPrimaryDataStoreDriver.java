@@ -182,6 +182,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         caps.put("CAN_CREATE_VOLUME_FROM_SNAPSHOT", "true");
         caps.put("CAN_CREATE_VOLUME_FROM_VOLUME", "true");
         caps.put("CAN_CREATE_TEMPLATE_FROM_SNAPSHOT", "true");
+        // Without this StorageSystemSnapshotStrategy cannot handle REVERT for a backend
+        // snapshot and revertSnapshot fails in the core before the driver is ever called.
+        caps.put("CAN_REVERT_VOLUME_TO_SNAPSHOT", "true");
         // Materialize root volumes from a cached template with a native Lightbits
         // snapshot+clone (instant, no agent qemu-img). Drives root-disk-from-template boot
         // via StorageSystemDataMotionStrategy.handleCreateVolumeFromTemplateBothOnStorageSystem.
