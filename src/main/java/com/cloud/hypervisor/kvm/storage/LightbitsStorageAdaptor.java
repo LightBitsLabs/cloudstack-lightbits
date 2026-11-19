@@ -45,6 +45,8 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     private static final Object CONNECT_LOCK = new Object();
     /** Pool detail carrying the cluster's discovery endpoints, comma-separated host[:port]. */
     public static final String DETAIL_NVME_DISCOVERY = "nvmeDiscovery";
+    /** Pool detail carrying the plugin version of the management server, for the mismatch warning. */
+    public static final String DETAIL_PLUGIN_VERSION = "pluginVersion";
 
     private final LightbitsNvmeHost nvme;
 
@@ -54,6 +56,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
 
     LightbitsStorageAdaptor(LightbitsNvmeHost nvme) {
         this.nvme = nvme;
+        LOG.info("{} loaded on this KVM agent", org.apache.cloudstack.storage.datastore.util.LightbitsVersion.describe());
     }
 
     @Override
@@ -66,9 +69,22 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
                                             StoragePoolType type, Map<String, String> details, boolean isPrimaryStorage) {
         LightbitsStoragePool pool = new LightbitsStoragePool(uuid, host, port, getStoragePoolType(), this, details);
         POOLS.put(uuid, pool);
+        warnOnVersionMismatch(details == null ? null : details.get(DETAIL_PLUGIN_VERSION),
+                org.apache.cloudstack.storage.datastore.util.LightbitsVersion.version());
         LOG.info("Lightbits createStoragePool: registered pool {} host {} port {} (POOLS now has {})",
                 uuid, host, port, POOLS.keySet());
         return pool;
+    }
+
+    /** Returns true (and warns) when the management server runs another build of the plugin than this agent. */
+    static boolean warnOnVersionMismatch(String managementVersion, String agentVersion) {
+        if (managementVersion == null || managementVersion.isBlank() || managementVersion.equals(agentVersion)) {
+            return false;
+        }
+        LOG.warn("Lightbits: this KVM agent runs plugin build {} but the management server runs {}. Install the same"
+                + " plugin jar on the management server and on every host and restart cloudstack-agent; until then this"
+                + " host may behave differently from what the management server expects.", agentVersion, managementVersion);
+        return true;
     }
 
     @Override
