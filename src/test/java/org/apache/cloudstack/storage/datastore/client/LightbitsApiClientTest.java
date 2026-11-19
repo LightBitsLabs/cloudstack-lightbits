@@ -548,4 +548,92 @@ class LightbitsApiClientTest {
                 .willReturn(aResponse().withStatus(200).withBody("{\"policies\":[]}")));
         assertFalse(client.qosPolicyExists("256rw"));
     }
+
+    // ---- failure paths raised in review ----
+
+    @Test
+    void aVolumeFoundThroughAConflictIsNeverDeletedWhenItsLookupFails() {
+        // 409: the volume existed before this call. Its settle poll fails; it must be left alone.
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(409).withBody("{\"message\":\"exists\"}")));
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Available") + "]}")));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(500).withBody("boom")));
+        client.setSettleWait(50, 1);
+        assertThrows(LightbitsApiException.class, () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void aSnapshotFoundThroughAConflictIsNeverDeletedWhenItsLookupFails() {
+        String snaps = "/api/v2/projects/default/snapshots";
+        wm.stubFor(post(urlEqualTo(snaps)).willReturn(aResponse().withStatus(409).withBody("{\"message\":\"exists\"}")));
+        wm.stubFor(get(urlPathEqualTo(snaps)).willReturn(aResponse().withStatus(200).withBody(
+                "{snapshots\":[{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\"}]}")));
+        wm.stubFor(get(urlEqualTo(snaps + "/snap-1")).willReturn(aResponse().withStatus(500).withBody("boom")));
+        client.setSettleWait(50, 1);
+        assertThrows(LightbitsApiException.class, () -> client.createSnapshot("cs-snap", VOL_UUID));
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(snaps + "/snap-1")));
+    }
+
+    @Test
+    void aFailedCreateWaitsForTheRemovalOfTheVolumeItMade() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("gone")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Failed"))));
+        wm.stubFor(delete(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("gone")
+                .willReturn(aResponse().withStatus(200).withBody("{}")).willSetStateTo("deleting"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("gone").whenScenarioStateIs("deleting")
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Deleting"))).willSetStateTo("removed"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("gone").whenScenarioStateIs("removed")
+                .willReturn(aResponse().withStatus(404).withBody("{}")));
+        assertThrows(LightbitsApiException.class, () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        // polled past Deleting until the 404: the caller may now delete the clone's source snapshot
+        wm.verify(3, com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void aTransientPollFailureIsRiddenOutUntilTheVolumeSettles() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("blip")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(503).withBody("no leader")).willSetStateTo("back"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("blip").whenScenarioStateIs("back")
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available"))));
+        assertTrue(client.createVolume("cs-abc", 4294967296L, 3, null, false, null).isAvailable());
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void theSettleWaitEndsAtItsDeadlineWhenThePollsKeepFailing() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(503).withBody("no leader")));
+        wm.stubFor(delete(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(200).withBody("{}")));
+        client.setSettleWait(200, 5);
+        long t0 = System.nanoTime();
+        assertThrows(LightbitsApiException.class, () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        // two bounded waits (settle, then removal), not attempts x request timeout
+        assertTrue((System.nanoTime() - t0) / 1_000_000L < 5000, "the wait overran its deadline");
+    }
+
+    @Test
+    void lookupForDeleteStillSeesAVolumeThatIsDeleting() {
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Deleting") + "]}")));
+        assertTrue(client.getVolumeByName("cs-abc").isEmpty());
+        Volume v = client.getVolumeByNameIncludingDeleting("cs-abc").orElseThrow();
+        assertTrue(v.isDeletedOrDeleting());
+    }
+
+    @Test
+    void lookupForDeleteIgnoresADeletedVolume() {
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Deleted") + "]}")));
+        assertTrue(client.getVolumeByNameIncludingDeleting("cs-abc").isEmpty());
+    }
+
+    @Test
+    void rollbackIsConditionalOnTheRevisionTheCallerChecked() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")).withHeader("If-Match", equalTo("7"))
+                .willReturn(aResponse().withStatus(412).withBody("{\"message\":\"provided etag 7 does not match current etag 8\"}")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", "7"));
+        assertEquals(Kind.PRECONDITION, e.getKind());
+    }
 }

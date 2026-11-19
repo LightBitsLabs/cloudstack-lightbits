@@ -287,10 +287,14 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 LightbitsPoolConfig cfg = configForPool(store.getId());
                 LightbitsApiClient client = clientFor(cfg);
                 String name = LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), data.getUuid());
+                // includes a volume an earlier, interrupted delete left in Deleting: that removal
+                // is waited for (without a second DELETE) rather than taken for done
                 java.util.Optional<org.apache.cloudstack.storage.datastore.client.model.Volume> lbVol =
-                        client.getVolumeByName(name);
+                        client.getVolumeByNameIncludingDeleting(name);
                 if (lbVol.isPresent()) {
-                    client.deleteVolume(lbVol.get().getUuid());
+                    if (!lbVol.get().isDeletedOrDeleting()) {
+                        client.deleteVolume(lbVol.get().getUuid());
+                    }
                     // the clone-source snapshot can only go once its clone is really gone
                     client.waitForVolumeGone(lbVol.get().getUuid());
                 }
@@ -440,25 +444,28 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             srcSize = src.getSizeBytes();
             srcReplicas = src.getReplicaCount();
         }
-        // Clone at the larger of the requested volume size and the source image size; LightOS
-        // requires an explicit size and rejects a clone smaller than its source.
-        long size = Math.max(destVol.getSize() != null ? destVol.getSize() : 0L, srcSize);
-        // LightOS requires a clone's replicaCount to EQUAL its source's (and replicaCount is
-        // immutable after create), so clones always inherit the source's replica factor. If
-        // the offering asks for a different lightbitsReplicas, warn — don't fail the deploy.
-        int replicas = srcReplicas > 0 ? srcReplicas : cfg.getReplicaCount();
-        int requested = replicasFor(destVol, cfg);
-        if (requested != replicas) {
-            LOG.warn("Lightbits: volume {} requested {} replicas via its offering, but clones inherit their "
-                    + "source's replica factor ({}) — LightOS requires clone == source and the count is "
-                    + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
-        }
+        // From here on the clone-source snapshot taken above is ours to remove if anything fails,
+        // including the lookups before the clone request is sent.
         org.apache.cloudstack.storage.datastore.client.model.Volume created;
         try {
+            // Clone at the larger of the requested volume size and the source image size; LightOS
+            // requires an explicit size and rejects a clone smaller than its source.
+            long size = Math.max(destVol.getSize() != null ? destVol.getSize() : 0L, srcSize);
+            // LightOS requires a clone's replicaCount to EQUAL its source's (and replicaCount is
+            // immutable after create), so clones always inherit the source's replica factor. If
+            // the offering asks for a different lightbitsReplicas, warn — don't fail the deploy.
+            int replicas = srcReplicas > 0 ? srcReplicas : cfg.getReplicaCount();
+            int requested = replicasFor(destVol, cfg);
+            if (requested != replicas) {
+                LOG.warn("Lightbits: volume {} requested {} replicas via its offering, but clones inherit their "
+                        + "source's replica factor ({}) — LightOS requires clone == source and the count is "
+                        + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
+            }
             created = client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null,
                     cfg.isCompression(), qosPolicyNameFor(destVol, cfg));
         } catch (RuntimeException e) {
-            // do not leave the clone-source snapshot we just took behind a failed clone
+            // Do not leave the clone-source snapshot we just took behind a failed clone. A clone
+            // this call created has been removed, and that removal waited for, by the client.
             if (srcData.getType() != DataObjectType.SNAPSHOT) {
                 try {
                     client.deleteSnapshot(snap.getUuid());
@@ -767,7 +774,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                         + ". Stop the VM or detach the volume first.");
             }
             // native in-place rollback (PUT .../volumes/{uuid}/rollback)
-            client.rollbackVolume(lbVol.getUuid(), s.getUuid());
+            // Conditional on the revision the two guards above looked at: a resize or a host
+            // attach landing in between gets a 412 from the cluster and nothing is rolled back.
+            client.rollbackVolume(lbVol.getUuid(), s.getUuid(), lbVol.getEtag());
             LOG.info("Lightbits: rolled back volume {} to snapshot {}", volName, snapName);
         } catch (Exception e) {
             LOG.warn("Lightbits: revertSnapshot failed for snapshot {}", snapshot.getUuid(), e);
