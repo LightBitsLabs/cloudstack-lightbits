@@ -9,7 +9,7 @@ never written in cleartext or logged. Tokens expire, so you will need to roll th
 ## How the plugin uses the JWT
 
 - Supplied at pool registration (`details[0].secretkey=...`), encrypted at rest, and replaced
-  in place with `updateStoragePool` (below).
+  in place from a file on the management server (below).
 - Read (decrypted) by the management-side driver for every control-plane call to the cluster
   (volume create/delete/resize, snapshots, ACL updates, capacity via `GET /api/v2/nodes`).
 - **Not** used on the KVM hosts — the data path is NVMe/TCP and needs no JWT. So rotation is a
@@ -39,29 +39,32 @@ unaffected (no JWT on the data path).
    changes (full flow: "Creating a project-scoped JWT" in [INSTALL.md](../INSTALL.md)).
    Keep the old token valid until step 3 succeeds.
 
-2. **Update the pool credential.** A CloudStack pool detail holds 255 characters and a token
-   is longer, so the token is passed in numbered pieces of up to 250 characters:
+2. **Update the pool credential from a file.** The new token is not passed through the
+   CloudStack API: a pool detail holds 255 characters (less than a token), and CloudStack
+   writes API parameters and responses to its logs. Instead, on the management server:
    ```bash
-   T=$(cat /path/to/new.jwt)
-   cmk update storagepool id=<poolId> \
-       details[0].1secretkey="${T:0:250}" details[1].2secretkey="${T:250:250}" \
-       details[2].3secretkey="${T:500:250}"
+   install -o cloud -g cloud -m 600 /dev/null /etc/cloudstack/management/lightbits-pool.jwt
+   cat > /etc/cloudstack/management/lightbits-pool.jwt     # paste the token, then Ctrl-D
+   cmk update storagepool id=<poolId> details[0].tokenFile=/etc/cloudstack/management/lightbits-pool.jwt
    ```
-   (add `details[3].4secretkey="${T:750:250}"` for a token longer than 750 characters; empty
-   pieces are harmless). CloudStack writes the pieces into `storage_pool_details` as given;
-   the plugin picks them up on the next use of the pool (at the latest the next capacity
-   poll, about a minute), joins, encrypts and stores the token and removes the clear-text
-   rows. No restart is needed. Use these exact names: CloudStack keeps parameters whose name
-   ends in `secretkey` out of its logs, while a token passed as `details[0].jwt` is written
-   to `apilog.log` and `management-server.log` in clear text (and cut at 255 characters).
+   The plugin reads the file on the next use of the pool (at the latest the next capacity
+   poll, about a minute), stores the token encrypted and removes the `tokenFile` detail. No
+   restart is needed. Then delete the file:
+   ```bash
+   shred -u /etc/cloudstack/management/lightbits-pool.jwt
+   ```
+   With several management servers, put the file on each of them before the update, since
+   any of them may handle the next operation.
 
-   Reading the token from a file as above keeps it out of the shell history; it is still
-   visible in the process list while `cmk` runs.
+   The file must be a regular file below `/etc/cloudstack/management`, readable by the
+   `cloud` user. If it is missing, unreadable or does not hold a JWT, one operation fails
+   with the reason, the `tokenFile` detail is removed and the previous token stays in use. A
+   JWT the cluster does not accept makes operations on the pool fail with `The cluster
+   rejected the storage pool's API token ...` until a valid one is set; running VMs are not
+   affected.
 
-   A value that is not a JWT (for example a token cut short) is rejected and removed, and the
-   previous token stays in use. A JWT the cluster does not accept makes operations on the
-   pool fail with `The cluster rejected the storage pool's API token ...` until a valid one
-   is set; running VMs are not affected.
+   Do not pass a token as `details[0].jwt` or `details[0].secretkey` to `updateStoragePool`:
+   it is cut at 255 characters and rejected, and by then it is in CloudStack's logs.
 
 3. **Verify** the new token works: trigger a control-plane op (e.g. list/refresh the pool, or
    create+delete a small test volume) and confirm success and that pool capacity still reports.

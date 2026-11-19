@@ -33,38 +33,39 @@ import com.cloud.utils.crypt.DBEncryptionUtil;
 /**
  * The pool's API token: how it is supplied, stored and replaced.
  *
- * Supplied as the {@code secretkey} detail ({@code details[0].secretkey=<JWT>}), at
- * registration and again whenever it is replaced with {@code updateStoragePool}. The name is
- * not cosmetic: CloudStack removes parameters named password, secretkey or accesskey from its
- * API and management logs, and writes any other parameter, such as the {@code jwt} name earlier
- * versions used, to those logs in clear text. {@code jwt} is still accepted.
+ * Supplied at registration as the {@code secretkey} detail ({@code details[0].secretkey=<JWT>}).
+ * The name is not cosmetic: CloudStack removes parameters named password, secretkey or
+ * accesskey from its API and management logs, and writes any other parameter, such as the
+ * {@code jwt} name earlier versions used, to those logs in clear text. {@code jwt} is still
+ * accepted, with a warning.
  *
  * Stored encrypted, chunked across {@code jwt}, {@code jwt.0}, {@code jwt.1} ... because the
  * value does not fit one detail row.
  *
- * Replaced by {@code updateStoragePool}: CloudStack writes the supplied details straight into
- * {@code storage_pool_details} without calling the plugin, so a new token arrives there in
- * clear text, and a detail value holds 255 characters at most, less than a token. The new
- * token is therefore supplied in numbered pieces of up to 250 characters:
- * {@code details[0].1secretkey=<first piece>}, {@code details[1].2secretkey=<second>} and so
- * on (names ending in "secretkey" are masked in CloudStack's logs). {@link #load} notices the
- * pieces on the next use of the pool (at the latest the next capacity poll), joins, encrypts
- * and stores the token, and removes the clear-text rows.
+ * Replaced from a file. {@code updateStoragePool} cannot carry a token: CloudStack writes the
+ * supplied details straight into {@code storage_pool_details} (255 characters per value, less
+ * than a token, and in clear text) without calling the plugin, and it logs the response, which
+ * echoes those details. So the operator writes the new token to a file on the management
+ * server and sets {@code details[0].tokenFile=<path>}. {@link #load} notices the pointer on the
+ * next use of the pool (at the latest the next capacity poll), reads the file, stores the token
+ * encrypted and removes the pointer. The secret never passes through the API.
  */
 public final class LightbitsPoolSecret {
     private static final Logger LOG = LogManager.getLogger(LightbitsPoolSecret.class);
 
-    /** Detail name for supplying the token; masked by CloudStack in its logs. */
+    /** Detail name for supplying the token at registration; masked by CloudStack in its logs. */
     public static final String KEY_TOKEN_INPUT = "secretkey";
+    /** Detail naming a file on the management server that holds a replacement token. */
+    public static final String KEY_TOKEN_FILE = "tokenFile";
+    /** Token files are only read from here: the management server's own configuration directory. */
+    public static final String TOKEN_FILE_ROOT = "/etc/cloudstack/management";
+    private static final long MAX_TOKEN_FILE_BYTES = 16 * 1024;
     private static final String KEY_STORED = LightbitsPoolConfig.KEY_JWT;
     private static final Pattern JWT = Pattern.compile("[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+");
     private static final Pattern CHUNK_COUNT = Pattern.compile("[0-9]{1,3}");
-    /** A piece of a replacement token: 1secretkey, 2secretkey, ... */
-    private static final Pattern PIECE = Pattern.compile("([0-9]{1,2})" + KEY_TOKEN_INPUT);
-    public static final int PIECE_LENGTH = 250;
-    static final String HOW_TO_SET = "updateStoragePool with the token split into pieces of up to " + PIECE_LENGTH
-            + " characters: details[0].1" + KEY_TOKEN_INPUT + "=<first piece> details[1].2" + KEY_TOKEN_INPUT
-            + "=<second piece> ... (see docs/jwt-rotation.md)";
+    static final String HOW_TO_SET = "write the token to a file under " + TOKEN_FILE_ROOT + " on the management server,"
+            + " readable only by the cloud user, and run updateStoragePool details[0]." + KEY_TOKEN_FILE
+            + "=<path> (see docs/jwt-rotation.md)";
     private static final Object LOCK = new Object();
 
     private LightbitsPoolSecret() {
@@ -87,81 +88,87 @@ public final class LightbitsPoolSecret {
         return token == null || token.isBlank() ? null : token.trim();
     }
 
-    /** The validated configuration of a pool, with its token; absorbs a replaced token first. */
+    /** The validated configuration of a pool, with its token; takes in a replacement token first. */
     public static LightbitsPoolConfig load(StoragePoolDetailsDao dao, long poolId) {
-        return load(dao, poolId, DBEncryptionUtil::encrypt, DBEncryptionUtil::decrypt);
+        return load(dao, poolId, DBEncryptionUtil::encrypt, DBEncryptionUtil::decrypt,
+                path -> readTokenFile(path, TOKEN_FILE_ROOT));
     }
 
     static LightbitsPoolConfig load(StoragePoolDetailsDao dao, long poolId, UnaryOperator<String> encrypt,
-                                    UnaryOperator<String> decrypt) {
+                                    UnaryOperator<String> decrypt, UnaryOperator<String> readFile) {
         Map<String, String> details = dao.listDetailsKeyPairs(poolId);
-        if (replacement(details) != null) {
+        if (hasReplacement(details)) {
             synchronized (LOCK) {
                 details = dao.listDetailsKeyPairs(poolId);
-                String fresh = replacement(details);
-                if (fresh != null) {
-                    absorb(dao, poolId, details, fresh, encrypt);
+                if (hasReplacement(details)) {
+                    replace(dao, poolId, details, encrypt, readFile);
                     details = dao.listDetailsKeyPairs(poolId);
                 }
             }
         }
         String stored = LightbitsPoolConfig.readChunked(details, KEY_STORED);
         if (stored == null) {
-            throw new IllegalArgumentException("Lightbits pool " + poolId + " has no API token stored; set one with "
+            throw new IllegalArgumentException("Lightbits pool " + poolId + " has no API token stored. To set one, "
                     + HOW_TO_SET);
         }
         return LightbitsPoolConfig.fromDetails(details, decrypt.apply(stored));
     }
 
-    /** A token that updateStoragePool left in the details in clear text, or null. */
-    private static String replacement(Map<String, String> details) {
-        java.util.TreeMap<Integer, String> pieces = new java.util.TreeMap<>();
-        for (Map.Entry<String, String> e : details.entrySet()) {
-            java.util.regex.Matcher m = PIECE.matcher(e.getKey());
-            if (m.matches() && e.getValue() != null) {
-                pieces.put(Integer.parseInt(m.group(1)), e.getValue().trim());
-            }
-        }
-        if (!pieces.isEmpty()) {
-            return String.join("", pieces.values());
-        }
-        // a whole token in one detail: only a token short enough for the column arrives intact
-        String fresh = details.get(KEY_TOKEN_INPUT);
-        if (fresh != null && !fresh.isBlank()) {
-            return fresh.trim();
-        }
+    private static boolean notBlank(String v) {
+        return v != null && !v.isBlank();
+    }
+
+    /** True when the chunk counter was overwritten by a value passed as details[0].jwt. */
+    private static boolean counterOverwritten(Map<String, String> details) {
         String counter = details.get(KEY_STORED);
-        if (counter != null && !counter.isBlank() && !CHUNK_COUNT.matcher(counter.trim()).matches()) {
-            return counter.trim();
-        }
-        return null;
+        return notBlank(counter) && !CHUNK_COUNT.matcher(counter.trim()).matches();
     }
 
-    private static boolean isInputKey(String key) {
-        return key.equals(KEY_TOKEN_INPUT) || PIECE.matcher(key).matches();
+    private static boolean hasReplacement(Map<String, String> details) {
+        return notBlank(details.get(KEY_TOKEN_FILE)) || notBlank(details.get(KEY_TOKEN_INPUT)) || counterOverwritten(details);
     }
 
-    private static void absorb(StoragePoolDetailsDao dao, long poolId, Map<String, String> details, String token,
-                               UnaryOperator<String> encrypt) {
-        boolean viaInputKeys = false;
-        List<String> inputKeys = new ArrayList<>();
-        for (String key : details.keySet()) {
-            if (isInputKey(key)) {
-                inputKeys.add(key);
-                viaInputKeys = true;
-            }
+    /**
+     * Take in what updateStoragePool left in the details. Whatever happens, no clear-text
+     * token row and no pointer survives this call, so one bad update fails one operation with
+     * its reason instead of every operation from then on.
+     */
+    private static void replace(StoragePoolDetailsDao dao, long poolId, Map<String, String> details,
+                                UnaryOperator<String> encrypt, UnaryOperator<String> readFile) {
+        String file = details.get(KEY_TOKEN_FILE);
+        String inline = details.get(KEY_TOKEN_INPUT);
+        boolean overwritten = counterOverwritten(details);
+        dao.removeDetail(poolId, KEY_TOKEN_FILE);
+        dao.removeDetail(poolId, KEY_TOKEN_INPUT);
+
+        String token;
+        if (notBlank(file)) {
+            token = readFile.apply(file.trim());   // throws with the reason; the stored token is untouched
+        } else {
+            // A token passed through the API: it is in CloudStack's logs and, beyond 255
+            // characters, it was cut. Usable only if it survived whole.
+            token = notBlank(inline) ? inline.trim() : details.get(KEY_STORED).trim();
+            LOG.warn("Lightbits: a token for pool {} was passed through updateStoragePool; CloudStack logs such a value"
+                    + " and cuts it at 255 characters. Treat it as exposed and replace it from a file: {}", poolId, HOW_TO_SET);
         }
-        if (!JWT.matcher(token).matches()) {
-            // Do not keep an unusable clear-text value around. The stored token is untouched
-            // when the value came in under the input names, so the pool keeps working.
-            for (String key : inputKeys) {
-                dao.removeDetail(poolId, key);
+        if (token == null || !JWT.matcher(token).matches()) {
+            if (overwritten && !notBlank(file) && !notBlank(inline)) {
+                // the chunk counter itself was overwritten: restore it from the chunks still there
+                int n = 0;
+                while (details.containsKey(KEY_STORED + "." + n)) {
+                    n++;
+                }
+                dao.removeDetail(poolId, KEY_STORED);
+                if (n > 0) {
+                    dao.addDetail(poolId, KEY_STORED, String.valueOf(n), false);
+                }
             }
-            throw new IllegalArgumentException("the value set as the token of Lightbits pool " + poolId + " is not a JWT"
-                    + " (three dot-separated parts); a token passed as one detail is cut at 255 characters. Set it with "
+            throw new IllegalArgumentException("the value supplied as the new token of Lightbits pool " + poolId
+                    + " is not a JWT (three dot-separated parts)" + (notBlank(file) ? "" : "; a token passed through"
+                    + " updateStoragePool is cut at 255 characters") + ". The previous token stays in use. To replace it, "
                     + HOW_TO_SET);
         }
-        List<String> old = new ArrayList<>(inputKeys);
+        List<String> old = new ArrayList<>();
         for (String key : details.keySet()) {
             if (key.equals(KEY_STORED) || key.startsWith(KEY_STORED + ".")) {
                 old.add(key);
@@ -175,10 +182,30 @@ public final class LightbitsPoolSecret {
         for (Map.Entry<String, String> e : chunks.entrySet()) {
             dao.addDetail(poolId, e.getKey(), e.getValue(), false);
         }
-        LOG.info("Lightbits: the API token of pool {} was replaced and stored encrypted", poolId);
-        if (!viaInputKeys) {
-            LOG.warn("Lightbits: the new token of pool {} was supplied as the 'jwt' detail, which CloudStack writes to its"
-                    + " logs in clear text; treat this token as exposed", poolId);
+        LOG.info("Lightbits: the API token of pool {} was replaced and stored encrypted{}", poolId,
+                notBlank(file) ? "; delete the token file " + file.trim() : "");
+    }
+
+    /**
+     * Read a replacement token from a file on the management server. Only a small regular file
+     * below {@code root} (after resolving links) is read, and its content is never part of an
+     * error message, so the setting cannot be used to read other files through the API.
+     */
+    static String readTokenFile(String path, String root) {
+        try {
+            java.nio.file.Path real = java.nio.file.Paths.get(path).toRealPath();
+            java.nio.file.Path allowed = java.nio.file.Paths.get(root).toRealPath();
+            if (!real.startsWith(allowed) || real.equals(allowed)) {
+                throw new IllegalArgumentException("the token file must be below " + root + " on the management server");
+            }
+            if (!java.nio.file.Files.isRegularFile(real) || java.nio.file.Files.size(real) > MAX_TOKEN_FILE_BYTES) {
+                throw new IllegalArgumentException("the token file " + path + " is not a regular file of at most "
+                        + MAX_TOKEN_FILE_BYTES + " bytes");
+            }
+            return new String(java.nio.file.Files.readAllBytes(real), java.nio.charset.StandardCharsets.UTF_8).trim();
+        } catch (java.io.IOException e) {
+            throw new IllegalArgumentException("the token file " + path + " cannot be read by the management server ("
+                    + e.getClass().getSimpleName() + "). The previous token stays in use. To replace it, " + HOW_TO_SET);
         }
     }
 }

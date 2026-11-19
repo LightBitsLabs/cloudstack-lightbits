@@ -27,11 +27,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.lang.reflect.Proxy;
 import java.util.HashMap;
 import java.util.Map;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.function.UnaryOperator;
 
 import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class LightbitsPoolSecretTest {
     private static final long POOL = 2L;
@@ -61,90 +64,106 @@ class LightbitsPoolSecretTest {
         LightbitsPoolConfig.putChunked(rows, "jwt", ENC.apply(OLD));
     }
 
-    /** What CloudStack's updateStoragePool leaves behind for a token supplied in pieces. */
-    private void supplyInPieces(String token) {
-        int n = 0;
-        for (int i = 0; i < token.length(); i += LightbitsPoolSecret.PIECE_LENGTH) {
-            rows.put((++n) + "secretkey", token.substring(i, Math.min(token.length(), i + LightbitsPoolSecret.PIECE_LENGTH)));
+    /** Files on the management server, by path. */
+    private final Map<String, String> files = new HashMap<>();
+    private final UnaryOperator<String> readFile = path -> {
+        if (!files.containsKey(path)) {
+            throw new IllegalArgumentException("the token file " + path + " cannot be read");
         }
+        return files.get(path);
+    };
+
+    private LightbitsPoolConfig load() {
+        return LightbitsPoolSecret.load(dao, POOL, ENC, DEC, readFile);
     }
 
-    private void assertNoClearTextToken() {
+    private void assertNoClearTextOrPointer() {
+        assertFalse(rows.containsKey("tokenFile"), "pointer left behind");
+        assertFalse(rows.containsKey("secretkey"), "clear-text token left behind");
         for (Map.Entry<String, String> e : rows.entrySet()) {
-            assertFalse(e.getValue().contains("sig-new") && !e.getValue().startsWith("enc(") && !e.getKey().startsWith("jwt."),
-                    "clear-text token left in detail " + e.getKey());
             assertFalse(e.getValue().startsWith("eyJ"), "clear-text token left in detail " + e.getKey());
         }
+        assertTrue(rows.get("jwt").matches("[0-9]+"), "chunk counter: " + rows.get("jwt"));
     }
 
     @Test
     void aStoredTokenIsReadBack() {
-        assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
+        assertEquals(OLD, load().getJwt());
     }
 
     @Test
-    void aTokenSetWithUpdateStoragePoolIsEncryptedAndTheClearTextRowRemoved() {
-        supplyInPieces(NEW);
-        assertTrue(rows.containsKey("3secretkey"), "the test token must span several pieces");
-        assertEquals(NEW, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
-        assertFalse(rows.keySet().stream().anyMatch(k -> k.endsWith("secretkey")), rows.keySet().toString());
-        assertNoClearTextToken();
-        // and it stays readable on the next call
-        assertEquals(NEW, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
-    }
-
-    @Test
-    void aTokenSetUnderTheOldJwtNameIsAbsorbedToo() {
-        // details[0].jwt=<token> overwrites the chunk counter with the clear-text token
-        rows.put("jwt", NEW);
-        assertEquals(NEW, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
-        assertTrue(rows.get("jwt").matches("[0-9]+"));
-        assertNoClearTextToken();
+    void aTokenIsReplacedFromAFileAndThePointerRemoved() {
+        files.put("/etc/cloudstack/management/new.jwt", NEW);
+        rows.put("tokenFile", "/etc/cloudstack/management/new.jwt");   // what updateStoragePool leaves behind
+        assertEquals(NEW, load().getJwt());
+        assertNoClearTextOrPointer();
+        files.clear();   // the operator deleted the file: the stored token is all that is needed
+        assertEquals(NEW, load().getJwt());
     }
 
     @Test
     void aShorterTokenLeavesNoChunkOfTheLongerOneBehind() {
-        supplyInPieces(NEW);
-        LightbitsPoolSecret.load(dao, POOL, ENC, DEC);
+        files.put("/t", NEW);
+        rows.put("tokenFile", "/t");
+        load();
         int chunksOfNew = Integer.parseInt(rows.get("jwt"));
-        supplyInPieces(OLD);
-        assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
+        files.put("/t", OLD);
+        rows.put("tokenFile", "/t");
+        assertEquals(OLD, load().getJwt());
         int chunksOfOld = Integer.parseInt(rows.get("jwt"));
         assertTrue(chunksOfOld < chunksOfNew);
         assertFalse(rows.containsKey("jwt." + chunksOfOld), "stale chunk of the previous token");
     }
 
     @Test
-    void aValueThatIsNotATokenIsRejectedRemovedAndThePreviousTokenKept() {
-        rows.put("secretkey", "not a token");
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.load(dao, POOL, ENC, DEC));
-        assertTrue(e.getMessage().contains("1secretkey"), e.getMessage());
-        assertFalse(e.getMessage().contains("not a token"), "the rejected value must not be echoed");
-        assertFalse(rows.containsKey("secretkey"));
-        assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
+    void aMissingTokenFileFailsOnceAndThePreviousTokenStays() {
+        rows.put("tokenFile", "/etc/cloudstack/management/missing.jwt");
+        assertThrows(IllegalArgumentException.class, this::load);
+        assertNoClearTextOrPointer();
+        assertEquals(OLD, load().getJwt());
     }
 
     @Test
-    void aTokenCutAtTheColumnWidthIsRejectedAndThePreviousTokenKept() {
-        // a whole token in one detail arrives truncated to 255 characters
+    void aFileThatDoesNotHoldATokenIsRejectedWithoutEchoingItsContent() {
+        files.put("/t", "root:x:0:0:root:/root:/bin/bash");
+        rows.put("tokenFile", "/t");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, this::load);
+        assertFalse(e.getMessage().contains("root:x"), "file content must never be echoed: " + e.getMessage());
+        assertTrue(e.getMessage().contains("tokenFile"), e.getMessage());
+        assertEquals(OLD, load().getJwt());
+    }
+
+    @Test
+    void aTokenPassedThroughTheApiAndCutAtTheColumnWidthIsRejectedAndRemoved() {
         rows.put("secretkey", NEW.substring(0, 255));
-        assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.load(dao, POOL, ENC, DEC));
-        assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, this::load);
+        assertTrue(e.getMessage().contains("255"), e.getMessage());
+        assertNoClearTextOrPointer();
+        assertEquals(OLD, load().getJwt());
     }
 
     @Test
-    void piecesAreJoinedInNumericOrder() {
-        String token = "aaa." + "b".repeat(2600) + ".ccc";   // 11 pieces: 10secretkey must sort after 9secretkey
-        supplyInPieces(token);
-        assertTrue(rows.containsKey("11secretkey"));
-        assertEquals(token, LightbitsPoolSecret.load(dao, POOL, ENC, DEC).getJwt());
+    void theOldRotationCommandNoLongerBreaksThePool() {
+        // details[0].jwt=<token> overwrites the chunk counter with the first 255 characters
+        rows.put("jwt", NEW.substring(0, 255));
+        assertThrows(IllegalArgumentException.class, this::load);
+        assertNoClearTextOrPointer();
+        assertEquals(OLD, load().getJwt());
+    }
+
+    @Test
+    void aShortTokenPassedThroughTheApiIsStillTakenIn() {
+        String small = "aaa.bbb.ccc";
+        rows.put("secretkey", small);
+        assertEquals(small, load().getJwt());
+        assertNoClearTextOrPointer();
     }
 
     @Test
     void aPoolWithoutATokenSaysHowToSetOne() {
         rows.keySet().removeIf(k -> k.startsWith("jwt"));
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.load(dao, POOL, ENC, DEC));
-        assertTrue(e.getMessage().contains("1secretkey"), e.getMessage());
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, this::load);
+        assertTrue(e.getMessage().contains("tokenFile"), e.getMessage());
     }
 
     @Test
@@ -154,5 +173,25 @@ class LightbitsPoolSecretTest {
         assertEquals(NEW, LightbitsPoolSecret.tokenFromInput(Map.of("secretkey", NEW, "jwt", OLD)));
         assertNull(LightbitsPoolSecret.tokenFromInput(Map.of("other", "x")));
         assertNull(LightbitsPoolSecret.tokenFromInput(null));
+    }
+
+    // ---- the real file reader ----
+
+    @Test
+    void tokenFilesAreReadOnlyBelowTheAllowedDirectory(@TempDir Path root, @TempDir Path elsewhere) throws Exception {
+        Path ok = Files.writeString(root.resolve("pool.jwt"), NEW + "\n");
+        assertEquals(NEW, LightbitsPoolSecret.readTokenFile(ok.toString(), root.toString()));
+
+        Path outside = Files.writeString(elsewhere.resolve("secret"), "something else");
+        assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.readTokenFile(outside.toString(), root.toString()));
+        // a link inside the allowed directory that points outside is resolved first
+        Path link = Files.createSymbolicLink(root.resolve("link.jwt"), outside);
+        assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.readTokenFile(link.toString(), root.toString()));
+        assertThrows(IllegalArgumentException.class,
+                () -> LightbitsPoolSecret.readTokenFile(root.resolve("..").resolve(elsewhere.getFileName()).resolve("secret").toString(), root.toString()));
+        assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.readTokenFile(root.resolve("missing").toString(), root.toString()));
+        assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.readTokenFile(root.toString(), root.toString()));
+        Path big = Files.writeString(root.resolve("big"), "x".repeat(20000));
+        assertThrows(IllegalArgumentException.class, () -> LightbitsPoolSecret.readTokenFile(big.toString(), root.toString()));
     }
 }

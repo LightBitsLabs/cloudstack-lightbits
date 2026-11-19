@@ -77,9 +77,9 @@ public class LightbitsApiClient {
     private static final Logger LOG = LogManager.getLogger(LightbitsApiClient.class);
     private static final int MAX_ATTEMPTS = 3;
     static final String AUTH_HINT = ". The cluster rejected the storage pool's API token: it is expired, was revoked with"
-            + " its signing key, or is not a token of this project. Set a new one with updateStoragePool"
-            + " (details[0].1secretkey=<first 250 characters> details[1].2secretkey=<next 250> ..., see"
-            + " docs/jwt-rotation.md); no restart is needed.";
+            + " its signing key, or is not a token of this project. To set a new one, write it to a file"
+            + " under /etc/cloudstack/management on the management server and run updateStoragePool"
+            + " details[0].tokenFile=<path> (see docs/jwt-rotation.md); no restart is needed.";
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
     /**
