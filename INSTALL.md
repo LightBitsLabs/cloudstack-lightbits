@@ -99,11 +99,22 @@ API/cmk:
 ```bash
 cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
     zoneid=<zone> podid=<pod> clusterid=<cluster> tags=lightbits \
-    url="lightbits://<api-host>/<project>?replicas=3&compression=true&environment=<name>" \
+    url="lightbits://<api-host>/<project>?replicas=3&compression=true&environment=<name>&endpoints=<api-host-2>,<api-host-3>&fingerprint=<SHA-256 fingerprint>" \
     details[0].jwt="<JWT>"
 ```
-- **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required) and
-  optional `&replicas=1..3&compression=true&qosPolicy=<name>`
+- **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required),
+  `&fingerprint=<SHA-256 fingerprint>` (needed for a Lightbits cluster, see
+  [TLS](#tls-verifying-the-cluster-certificate)) and optional
+  `&replicas=1..3&compression=true&qosPolicy=<name>&endpoints=<host[:port]>,...`
+- **endpoints** — further API endpoints of the same cluster, comma-separated `host[:port]`
+  (the port defaults to the pool's API port). List the other nodes so the storage keeps working
+  when the node named in the URL is down. Read calls move to the next endpoint on a connection
+  failure, a timeout or a 5xx. Calls that change something move on only when the request
+  provably never reached the endpoint (connection refused, connect timeout, failed TLS
+  handshake); after a 5xx or a read timeout the plugin does not send the change again and
+  decides by the state of the object instead. A call that only succeeded through another
+  endpoint logs a warning naming the endpoint that failed
+  (`Lightbits API ... succeeded via ... after failing via ...`).
 - **replicas** — replica factor per volume, `1..3` (default `3`). The replica count must not
   exceed the number of nodes in the Lightbits cluster, so on a **single-node cluster set
   `replicas=1`** (2 nodes → `1..2`, 3+ nodes → `1..3`). Any cluster size is supported; the
@@ -152,17 +163,47 @@ create-volume-from-snapshot inherits the snapshot's base volume. A differing off
 on those is logged as a warning, not an error. The compute-offering variant
 (`serviceofferingdetails[0].lightbitsReplicas`) is honored only for ISO-based root disks.
 
-## TLS note
+## TLS: verifying the cluster certificate
 
-**This alpha version does not validate the cluster's API certificate.** The connection from the
-management server to the LightOS API is encrypted with TLS, but the plugin accepts any
-certificate the endpoint presents, so it does not protect against an impostor endpoint on the
-network path. Run the alpha only on an isolated lab or evaluation network.
+The management server always verifies the certificate of the Lightbits API. There is no
+"accept any certificate" mode.
 
-Certificate validation, enabled by default, is planned for a future version. When it lands, the
-management server will verify the cluster's API certificate, and a LightOS certificate without a
-Subject Alternative Name for the API address will be rejected by the JDK HTTP client, so plan to
-use a certificate that carries a SAN for the API address, per your LightOS TLS configuration.
+**Pin the certificate fingerprint.** A Lightbits cluster's API certificate is issued to the name
+`api.service` by a certificate authority internal to the cluster, so validation by CA and host
+name of an endpoint addressed by IP cannot pass. Every node of a cluster presents the same
+certificate, so one fingerprint covers all endpoints. Read it from any node:
+
+```bash
+openssl s_client -connect <api-host>:443 </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout
+# sha256 Fingerprint=CA:B9:B1:57:...:21:67
+```
+
+and pass it as `&fingerprint=<value>` in the pool URL (with or without the colons). With a
+fingerprint set the plugin accepts exactly that certificate and nothing else.
+
+**A pool without a fingerprint** is validated against the management server's Java trust store
+(CA and host name). Use this only if you replaced the cluster certificate with one issued by a
+CA the management server trusts, for the name you use in the pool URL.
+
+**An existing pool** (created with an earlier alpha, or one whose endpoints changed) is updated
+in place, with no restart:
+
+```bash
+cmk update storagepool id=<pool-id> details[0].tlsFingerprint="<fingerprint>" \
+    details[1].apiEndpoints="<api-host-2>,<api-host-3>"
+```
+
+After upgrading from `0.1.0-alpha.1`, every pool needs its fingerprint set this way: until
+then operations on the pool fail with an error that names `tlsFingerprint`.
+
+**Certificate rotation.** A pin identifies one exact certificate, so when the cluster
+certificate is replaced the pin has to follow. Two fingerprints are accepted for this: before
+the rotation set `"<current>,<new>"`, after it set `"<new>"`.
+
+**If the fingerprint does not match**, operations on the pool fail with `the Lightbits API
+certificate (SHA-256 fingerprint ...) does not match the fingerprint pinned on this storage
+pool`. Running VMs are not affected (the NVMe/TCP data path carries no TLS); creating,
+attaching, snapshotting and deleting volumes is blocked until the pool is updated.
 
 ## Upgrading / uninstalling
 

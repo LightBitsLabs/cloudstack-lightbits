@@ -5,8 +5,8 @@ Apache CloudStack primary storage plugin for [Lightbits](https://www.lightbitsla
 > **Status: alpha (`0.1.0-alpha.1`).** This is an alpha version meant for evaluation only. It
 > must not be used in production environments or on clusters that hold production data. APIs,
 > configuration and behavior may change between alpha releases without a migration path.
-> Known alpha limitation: the plugin does not yet validate the Lightbits cluster's TLS
-> certificate (see [INSTALL.md](INSTALL.md#tls-note)); run it on an isolated lab network.
+> The Lightbits cluster's TLS certificate is verified by fingerprint pinning (see
+> [INSTALL.md](INSTALL.md#tls-verifying-the-cluster-certificate)).
 
 ![Creating VMs on Lightbits block storage from CloudStack](docs/vm-on-lightbits.gif)
 
