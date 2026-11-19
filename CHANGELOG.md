@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - An attach that cannot work fails at once with the reason (every discovery endpoint and its
   error, the host's NVMe/TCP paths, a pointer to the volume ACL or the data network) instead of
   "device did not appear" after 60 seconds.
+- A VM can start on a host that has no NVMe connection to the cluster yet (first use, or
+  after a host reboot). CloudStack looks a VM's disks up before it asks for them to be
+  connected, and that lookup only checked for the device: such a start waited five minutes
+  and failed. A lookup that finds no device now connects the host first.
 - A namespace that does not show up is looked for again after a udev settle and a controller
   rescan. Paths that are not live are logged as a warning after every attach.
 - The plugin logs its version and build time when it loads on the management server and on
