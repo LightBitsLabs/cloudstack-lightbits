@@ -653,4 +653,54 @@ class LightbitsApiClientTest {
         LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", "7"));
         assertEquals(Kind.PRECONDITION, e.getKind());
     }
+
+    // ---- conditional updates are sent once ----
+
+    @Test
+    void aResizeThatWasAppliedButNotConfirmedIsNotSentAgainAndSucceeds() {
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("r")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available", "1", "4294967296"))));
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("r")
+                .willReturn(aResponse().withStatus(500).withBody("gateway hiccup")).willSetStateTo("applied"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("r").whenScenarioStateIs("applied")
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available", "2", "8589934592"))));
+        client.resizeVolume(VOL_UUID, 8589934592L);
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void aResizeThatFailedAndWasNotAppliedIsReportedAfterOneAttempt() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(500).withBody("boom")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.resizeVolume(VOL_UUID, 8589934592L));
+        assertEquals(Kind.TRANSIENT, e.getKind());
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void anUnconfirmedRollbackIsSentOnceAndNeverReportedAsDone() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")).willReturn(aResponse().withStatus(503).withBody("busy")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", "1"));
+        assertTrue(e.getMessage().contains("outcome is unknown"), e.getMessage());
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")));
+    }
+
+    @Test
+    void anAclUpdateIsSentOnce() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(500).withBody("boom")));
+        assertThrows(LightbitsApiException.class, () -> client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), "1"));
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void updatesWithoutAVolumeRevisionAreRefusedBeforeAnythingIsSent() {
+        for (String etag : new String[] {null, ""}) {
+            LightbitsApiException e = assertThrows(LightbitsApiException.class,
+                    () -> client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), etag));
+            assertEquals(Kind.INVALID, e.getKind());
+            assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", etag));
+        }
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(
+                com.github.tomakehurst.wiremock.client.WireMock.anyUrl()));
+    }
 }

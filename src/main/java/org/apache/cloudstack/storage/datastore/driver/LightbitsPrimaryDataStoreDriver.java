@@ -612,11 +612,15 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 client.updateVolumeAcl(v.getUuid(), acl, v.getEtag());
                 return;
             } catch (org.apache.cloudstack.storage.datastore.client.LightbitsApiException e) {
-                if (e.getKind() != org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind.PRECONDITION
-                        || attempt >= ACL_UPDATE_ATTEMPTS) {
+                // 412: the volume changed since it was read. Transient: the update was sent once
+                // and not confirmed. Either way start over from a fresh read; if the change is
+                // already there the predicate finds nothing to do.
+                boolean again = e.getKind() == org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind.PRECONDITION
+                        || e.getKind() == org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind.TRANSIENT;
+                if (!again || attempt >= ACL_UPDATE_ATTEMPTS) {
                     throw e;
                 }
-                LOG.debug("Lightbits: ACL of {} changed underneath us, retrying (attempt {})", name, attempt);
+                LOG.debug("Lightbits: ACL update of {} not applied ({}), re-reading (attempt {})", name, e.getKind(), attempt);
             }
         }
     }
