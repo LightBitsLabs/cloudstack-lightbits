@@ -336,6 +336,20 @@ class LightbitsNvmeHost {
         return sys.exists(BY_ID_PREFIX + requireVolumeUuid(volumeUuid));
     }
 
+    /** True once the volume's device link exists, waiting up to {@code millis} for it. */
+    boolean waitForDeviceLink(String volumeUuid, long millis) {
+        String link = BY_ID_PREFIX + requireVolumeUuid(volumeUuid);
+        for (long waited = 0; ; waited += 250) {
+            if (sys.exists(link)) {
+                return true;
+            }
+            if (waited >= millis) {
+                return false;
+            }
+            sys.sleep(250);
+        }
+    }
+
     /** This host's NQN, for error messages only. */
     String hostNqn() {
         return sys.read("/etc/nvme/hostnqn");
