@@ -25,6 +25,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.channels.UnresolvedAddressException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -37,6 +38,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
@@ -83,7 +88,7 @@ public class LightbitsApiClient {
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
     /**
-     * Endpoints that recently refused or timed out a connection, with the time until which they
+     * Endpoints that recently refused a connection or did not answer in time, with the time until which they
      * are tried last. Shared by all clients: the plugin builds a client per operation, and
      * without this every operation would pay the connect timeout of a dead node again.
      */
@@ -1014,7 +1019,10 @@ public class LightbitsApiClient {
                     if (e.getKind() != Kind.TRANSIENT) {
                         throw e;
                     }
-                    if (e.isNeverSent()) {
+                    // Tried last for a while: an endpoint that could not be reached, and one that
+                    // took a request and did not answer in time. This is only the order of the
+                    // next attempts; whether a mutation may be sent again is decided below.
+                    if (e.isNeverSent() || timedOut(e)) {
                         DOWN_UNTIL.put(base, System.currentTimeMillis() + DOWN_MILLIS);
                     }
                     if (!read && !e.isNeverSent()) {
@@ -1043,7 +1051,7 @@ public class LightbitsApiClient {
             HttpRequest.BodyPublisher pub = jsonBody == null
                     ? HttpRequest.BodyPublishers.noBody()
                     : HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8);
-            HttpResponse<String> resp = http.send(rb.method(method, pub).build(), HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = exchange(rb.method(method, pub).build(), timeout);
             int status = resp.statusCode();
             if (status >= 200 && status < 300) {
                 return resp.body();
@@ -1060,6 +1068,47 @@ public class LightbitsApiClient {
                     method + " " + path + " via " + base + " failed: " + describe(e), e);
             return rethrow(neverReachedTheEndpoint(e) ? failure.neverSent() : failure);
         }
+    }
+
+    /**
+     * The whole exchange within {@code timeout}, body included. The request timeout of the JDK
+     * client ends when the response headers arrive; an endpoint that sends headers and then
+     * stalls would hold a blocking send for as long as it likes, past the failover and past a
+     * settle deadline. The exchange is abandoned at the limit instead and reported as a timeout.
+     */
+    private HttpResponse<String> exchange(HttpRequest request, Duration timeout) throws IOException, InterruptedException {
+        CompletableFuture<HttpResponse<String>> pending = http.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        try {
+            return pending.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            pending.cancel(true);
+            throw new HttpTimeoutException("no complete response within " + timeout.toMillis() + " ms");
+        } catch (InterruptedException e) {
+            pending.cancel(true);
+            throw e;
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof IOException) {
+                throw (IOException) cause;
+            }
+            if (cause instanceof UnresolvedAddressException) {
+                throw (UnresolvedAddressException) cause;
+            }
+            throw new IOException(cause == null ? e.toString() : cause.toString(), cause);
+        }
+    }
+
+    /** True when the endpoint accepted the request (or the connection) and did not answer in time. */
+    static boolean timedOut(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof HttpTimeoutException) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return false;
     }
 
     private static String rethrow(LightbitsApiException e) {
