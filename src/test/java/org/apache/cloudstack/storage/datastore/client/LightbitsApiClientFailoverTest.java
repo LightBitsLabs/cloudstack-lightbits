@@ -199,4 +199,25 @@ class LightbitsApiClientFailoverTest {
         LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client(deadEndpoint, live).listVolumes());
         assertTrue(e.isNeverSent());
     }
+
+    @Test
+    void a5xxThatMentionsQuotaStillFailsOver() {
+        a.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(503).withBody("quota service unavailable")));
+        assertEquals(1, client(url(a), url(b)).listVolumes().size());
+        assertEquals(Kind.TRANSIENT, LightbitsApiException.kindOf(503, "quota service unavailable"));
+        assertEquals(Kind.QUOTA, LightbitsApiException.kindOf(507, null));
+        assertEquals(Kind.QUOTA, LightbitsApiException.kindOf(429, "project quota exceeded"));
+    }
+
+    @Test
+    void aSettlePollDoesNotStartOnAnotherEndpointAfterItsDeadline() {
+        a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(200).withBody(VOLUME).withFixedDelay(4000)));
+        LightbitsApiClient c = client(url(a), url(b));
+        c.setSettleWait(1100, 1);
+        long t0 = System.nanoTime();
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> c.waitForVolume(UUID, null));
+        assertEquals(Kind.TRANSIENT, e.getKind());
+        assertTrue((System.nanoTime() - t0) / 1_000_000L < 2000, "the wait must end at its deadline");
+        b.verify(0, getRequestedFor(urlEqualTo(VOLUMES + "/" + UUID)));
+    }
 }
