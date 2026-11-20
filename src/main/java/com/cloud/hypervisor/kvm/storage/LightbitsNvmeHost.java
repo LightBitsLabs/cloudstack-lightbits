@@ -162,6 +162,15 @@ class LightbitsNvmeHost {
      * endpoint and its error, instead of waiting for a device that cannot appear.
      */
     void connect(List<String> endpoints) {
+        connect(endpoints, CONNECT_TIMEOUT_MS);
+    }
+
+    /**
+     * {@link #connect(List)} with the time one endpoint gets to answer. A caller that is polled
+     * (the disk lookup) passes a short one, so that a cluster that does not answer costs each
+     * poll seconds, not minutes.
+     */
+    void connect(List<String> endpoints, long endpointTimeoutMillis) {
         if (endpoints.isEmpty()) {
             throw new CloudRuntimeException("Lightbits: the storage pool has no NVMe discovery endpoint");
         }
@@ -175,7 +184,7 @@ class LightbitsNvmeHost {
         for (int i = 0; i < endpoints.size(); i++) {
             String endpoint = endpoints.get((start + i) % endpoints.size());
             int colon = endpoint.lastIndexOf(':');
-            Result r = sys.run(CONNECT_TIMEOUT_MS, "nvme", "connect-all", "-t", "tcp",
+            Result r = sys.run(endpointTimeoutMillis, "nvme", "connect-all", "-t", "tcp",
                     "-a", endpoint.substring(0, colon), "-s", endpoint.substring(colon + 1));
             if (r.ok()) {
                 if (!failures.isEmpty()) {
@@ -285,7 +294,11 @@ class LightbitsNvmeHost {
         return n;
     }
 
-    private void rescan() {
+    /**
+     * Settle udev and rescan the namespaces of every live Lightbits controller: recovers a
+     * namespace whose arrival the kernel or udev missed while the controller stayed connected.
+     */
+    void rescan() {
         sys.run(15_000, "udevadm", "settle", "--timeout=10");
         for (Path p : paths()) {
             if (p.live() && p.controller.matches("nvme[0-9]+")) {
