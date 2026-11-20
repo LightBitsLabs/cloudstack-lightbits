@@ -50,6 +50,8 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
     @Inject
     PrimaryDataStoreHelper dataStoreHelper;
     @Inject
+    com.cloud.storage.StoragePoolAutomation storagePoolAutomation;
+    @Inject
     com.cloud.agent.AgentManager agentMgr;
     @Inject
     com.cloud.storage.dao.StoragePoolHostDao storagePoolHostDao;
@@ -338,13 +340,25 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         return true;
     }
 
+    // Maintenance follows CloudStack's standard flow (StoragePoolAutomation), as the in-tree
+    // plugins do: the hosts are told to drop the pool (ModifyStoragePoolCommand add=false, which
+    // is what lets a host disconnect from the cluster when its last Lightbits pool leaves), the
+    // VMs with volumes on the pool are stopped, and cancelling maintenance registers the pool
+    // on the hosts again and restarts those VMs.
+
     @Override
     public boolean maintain(DataStore store) {
+        if (storagePoolAutomation != null) {
+            storagePoolAutomation.maintain(store);
+        }
         return dataStoreHelper.maintain(store);
     }
 
     @Override
     public boolean cancelMaintain(DataStore store) {
+        if (storagePoolAutomation != null) {
+            storagePoolAutomation.cancelMaintain(store);
+        }
         return dataStoreHelper.cancelMaintain(store);
     }
 
