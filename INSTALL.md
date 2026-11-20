@@ -122,7 +122,10 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
 - **environment** — a short identifier for this CloudStack deployment (e.g. `prod-cs1`).
   **Required.** It is embedded in every Lightbits volume name (`cs-<environment>-p<poolId>-<uuid>`) so that
   multiple CloudStacks sharing one cluster never collide and each deployment's volumes are
-  easily identifiable in `lbcli`/the cluster UI.
+  easily identifiable in `lbcli`/the cluster UI. **It must be unique per CloudStack deployment
+  within a Lightbits project.** Registration is refused when the project already holds
+  `cs-<environment>-p<N>-...` objects of a pool this CloudStack does not have, because deleting
+  a pool removes every object with its prefix.
 - **details[0].secretkey** — the **project-scoped** JWT for `<project>` (see
   [Creating a project-scoped JWT](#creating-a-project-scoped-jwt)). It is stored **encrypted**
   in `storage_pool_details` (chunked, since it exceeds the 255-char column) and is never

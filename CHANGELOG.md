@@ -26,6 +26,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   and failed. A lookup that finds no device now connects the host first.
 - A namespace that does not show up is looked for again after a udev settle and a controller
   rescan. Paths that are not live are logged as a warning after every attach.
+- The plugin logs its version and build time when it loads on the management server and on
+  every KVM agent, and an agent warns when it runs another build than the management server
+  (the jar was not replaced there, or the agent was not restarted).
+- Pool registration is refused when the cluster already holds objects named for this
+  environment name and a pool id this CloudStack does not have: another CloudStack uses the
+  same name, or a removed pool left objects behind. Deleting a pool removes every object with
+  its prefix, so a shared environment name could destroy the other deployment's volumes.
 
 ### Security
 - **The pool token was written to CloudStack's logs.** The token was supplied as

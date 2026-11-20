@@ -55,6 +55,68 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
     StoragePoolDetailsDao storagePoolDetailsDao;
     @Inject
     com.cloud.storage.dao.VMTemplatePoolDao templatePoolDao;
+    @Inject
+    org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao primaryDataStoreDao;
+
+    /** Ids of the Lightbits pools this CloudStack knows; a seam for unit tests. */
+    private java.util.function.Supplier<java.util.Set<Long>> knownPoolIds = () -> {
+        java.util.Set<Long> ids = new java.util.HashSet<>();
+        if (primaryDataStoreDao != null) {
+            for (org.apache.cloudstack.storage.datastore.db.StoragePoolVO p
+                    : primaryDataStoreDao.findPoolsByProvider(LightbitsUtil.PROVIDER_NAME)) {
+                ids.add(p.getId());
+            }
+        }
+        return ids;
+    };
+
+    public void setKnownPoolIds(java.util.function.Supplier<java.util.Set<Long>> supplier) {
+        this.knownPoolIds = supplier;
+    }
+
+    /**
+     * Refuse an environment name that is already in use in this project by someone else.
+     *
+     * Every object the plugin creates is named {@code cs-<environment>-p<poolId>-...}, and
+     * deleting a pool removes every object with that pool's prefix. Pool ids are small numbers
+     * that every CloudStack hands out from 1, so two deployments registering the same project
+     * with the same environment name will sooner or later own the same prefix, and one's pool
+     * delete destroys the other's volumes. Objects of a pool id this CloudStack does not have
+     * are the evidence that the name is taken (or that a removed pool left objects behind,
+     * which a new pool reaching that id would then adopt and delete).
+     */
+    void refuseEnvironmentInUseElsewhere(LightbitsPoolConfig cfg, LightbitsApiClient client) {
+        java.util.regex.Pattern owned = java.util.regex.Pattern.compile(
+                "^" + java.util.regex.Pattern.quote("cs-" + cfg.getEnvironment() + "-p") + "([0-9]+)-.*");
+        java.util.List<String> names = new java.util.ArrayList<>();
+        try {
+            client.listVolumes().forEach(v -> names.add(v.getName()));
+            client.listSnapshots().forEach(s -> names.add(s.getName()));
+        } catch (RuntimeException e) {
+            throw new IllegalArgumentException("cannot list the objects of Lightbits project '" + cfg.getProject()
+                    + "' to check that the environment name '" + cfg.getEnvironment() + "' is free: " + e.getMessage());
+        }
+        java.util.Set<Long> known = knownPoolIds.get();
+        java.util.Map<Long, String> foreign = new java.util.TreeMap<>();
+        for (String name : names) {
+            java.util.regex.Matcher m = name == null ? null : owned.matcher(name);
+            if (m != null && m.matches()) {
+                long id = Long.parseLong(m.group(1));
+                if (!known.contains(id)) {
+                    foreign.putIfAbsent(id, name);
+                }
+            }
+        }
+        if (!foreign.isEmpty()) {
+            throw new IllegalArgumentException("the environment name '" + cfg.getEnvironment() + "' is already in use in"
+                    + " Lightbits project '" + cfg.getProject() + "': the cluster holds objects of pool id(s) "
+                    + foreign.keySet() + " (for example " + foreign.values().iterator().next() + ") that are not pools of"
+                    + " this CloudStack. Either another CloudStack deployment uses the same environment name, or a pool"
+                    + " removed from this one left objects behind. Deleting a pool removes every object with its"
+                    + " prefix, so a shared name can destroy the other deployment's volumes. Use another"
+                    + " ?environment= name, or remove those objects from the cluster first.");
+        }
+    }
 
     /**
      * Parse + validate pool params and preflight the cluster (auth, project access,
@@ -98,6 +160,8 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
                     + "' at " + cfg.apiEndpoint() + " with the supplied credentials: " + e.getMessage()
                     + " — check the JWT is a project-admin token for this project and that the project exists");
         }
+
+        refuseEnvironmentInUseElsewhere(cfg, client);
 
         // If a pool-default QoS policy is configured (?qosPolicy=<name>), verify it exists for
         // this project now, so a typo fails registration instead of every volume create.
