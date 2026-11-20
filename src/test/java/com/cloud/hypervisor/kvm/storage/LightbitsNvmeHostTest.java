@@ -316,4 +316,58 @@ class LightbitsNvmeHostTest {
         CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> adaptor.getPhysicalDisk(VOL, pool()));
         assertTrue(e.getMessage().contains("could not connect this host"), e.getMessage());
     }
+
+    // ---- disconnect when the last pool is removed ----
+
+    private static final String SUBSYS = "/sys/class/nvme-subsystem/";
+
+    private void subsystem(String name, String nqn, String... entries) {
+        sys.files.put(SUBSYS + name + "/subsysnqn", nqn);
+        for (String e : entries) {
+            sys.files.put(SUBSYS + name + "/" + e + "/uevent", "");
+        }
+    }
+
+    @Test
+    void anIdleLightbitsSubsystemIsDisconnected() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme4", "nvme5");
+        assertEquals(List.of(NQN), host.disconnectIdleSubsystems());
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
+    }
+
+    @Test
+    void aSubsystemWithANamespaceIsNeverDisconnected() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme3n2", "ng3n2");
+        subsystem("nvme-subsys4", NQN + "-b", "nvme6", "nvme6c6n1");
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+    }
+
+    @Test
+    void subsystemsOfOtherVendorsAndOddNqnsAreLeftAlone() {
+        subsystem("nvme-subsys0", "nqn.2014-08.org.nvmexpress:uuid:local-disk", "nvme0");
+        subsystem("nvme-subsys1", "nqn.2016-01.com.lightbitslabs:uuid:x; rm -rf /", "nvme1");
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+        assertTrue(sys.commands.isEmpty(), sys.commands.toString());
+    }
+
+    @Test
+    void aFailedDisconnectIsNotReportedAsDone() {
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        sys.results.put("nvme disconnect", new LightbitsNvmeHost.Result(1, "busy"));
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+    }
+
+    @Test
+    void removingTheLastPoolDisconnectsAndRemovingOneOfTwoDoesNot() {
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        LightbitsStorageAdaptor adaptor = new LightbitsStorageAdaptor(host);
+        adaptor.createStoragePool("pool-a", "10.0.0.1", 443, null, null, com.cloud.storage.Storage.StoragePoolType.IscsiLUN, null, true);
+        adaptor.createStoragePool("pool-b", "10.0.0.1", 443, null, null, com.cloud.storage.Storage.StoragePoolType.IscsiLUN, null, true);
+        assertTrue(adaptor.deleteStoragePool("pool-a"));
+        assertTrue(adaptor.deleteStoragePool("never-registered"));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+        assertTrue(adaptor.deleteStoragePool("pool-b"));
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
+    }
 }
