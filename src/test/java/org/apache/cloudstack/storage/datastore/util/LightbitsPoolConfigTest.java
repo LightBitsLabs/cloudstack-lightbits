@@ -180,4 +180,23 @@ class LightbitsPoolConfigTest {
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> LightbitsPoolConfig.fromUrl(
                 "lightbits://10.0.0.1/proj?environment=cs1&fingerprint=12:34", "jwt"));
     }
+
+    @Test
+    void anEndpointTheHttpClientCannotUseIsRejectedAtRegistration() {
+        for (String bad : new String[] {"bad..host:443", "host:0", "host:70000", "a-.b"}) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> LightbitsPoolConfig.parseEndpoints(bad, 443), bad);
+        }
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("10.0.0.2:443", "lb-2.example.com:8443"),
+                LightbitsPoolConfig.parseEndpoints("10.0.0.2, lb-2.example.com:8443", 443));
+    }
+
+    @Test
+    void anEndpointListTooLongToStoreIsRejectedAtRegistration() {
+        String name = "n".repeat(61) + "." + "d".repeat(59) + ".io";   // 124 characters
+        IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> LightbitsPoolConfig.parseEndpoints("a" + name.substring(1) + "," + "b" + name.substring(1), 443));
+        org.junit.jupiter.api.Assertions.assertTrue(e.getMessage().contains("255"), e.getMessage());
+        org.junit.jupiter.api.Assertions.assertEquals(1, LightbitsPoolConfig.parseEndpoints(name, 443).size());
+    }
 }
