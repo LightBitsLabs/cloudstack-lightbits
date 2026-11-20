@@ -63,6 +63,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
     private HostDetailsDao hostDetailsDao;
     @Inject
     private StoragePoolHostDao storagePoolHostDao;
+    @Inject
+    private org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao storagePoolDetailsDao;
 
     @Override
     public boolean hostAdded(long hostId) {
@@ -81,7 +83,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
 
         // Register the pool on the KVM agent's LightbitsStorageAdaptor so per-volume
         // connectPhysicalDisk can resolve it. Managed, per-volume NVMe/TCP: no pool mount.
-        ModifyStoragePoolCommand cmd = new ModifyStoragePoolCommand(true, pool);
+        // The agent gets the cluster's NVMe discovery endpoints with the pool, and nothing
+        // else: no credentials ever travel to a hypervisor.
+        ModifyStoragePoolCommand cmd = new ModifyStoragePoolCommand(true, pool, discoveryDetails(poolId));
         Answer answer = agentMgr.easySend(hostId, cmd);
         if (answer == null || !answer.getResult()) {
             String detail = answer == null ? "no answer" : answer.getDetails();
@@ -101,6 +105,22 @@ public class LightbitsHostListener implements HypervisorHostListener {
 
         ensureHostNqnDetail(hostId);
         return true;
+    }
+
+    private java.util.Map<String, String> discoveryDetails(long poolId) {
+        java.util.Map<String, String> out = new java.util.HashMap<>();
+        try {
+            org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
+                    org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig.fromDetails(
+                            storagePoolDetailsDao.listDetailsKeyPairs(poolId), null);
+            out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY,
+                    String.join(",", cfg.discoveryEndpoints()));
+        } catch (RuntimeException e) {
+            // the agent falls back to the pool's host address on the discovery port
+            LOG.warn("Lightbits: could not derive the NVMe discovery endpoints of pool {} ({}); the host will use"
+                    + " the pool's API host only", poolId, e.getMessage());
+        }
+        return out;
     }
 
     /**

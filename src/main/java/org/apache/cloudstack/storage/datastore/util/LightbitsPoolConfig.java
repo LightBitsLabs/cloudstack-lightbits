@@ -58,6 +58,13 @@ public class LightbitsPoolConfig {
     /** SHA-256 fingerprint(s) of the cluster's API certificate, comma-separated (two during a rotation). */
     public static final String KEY_TLS_FINGERPRINT = "tlsFingerprint";
     private static final int MAX_FINGERPRINTS = 3;
+    /**
+     * NVMe discovery endpoints the KVM hosts connect through, comma-separated host[:port]
+     * (port 8009 by default). Only needed when the hosts reach the cluster's data network on
+     * other addresses than the management server reaches its API; by default the API hosts.
+     */
+    public static final String KEY_NVME_DISCOVERY = "nvmeDiscovery";
+    public static final int DISCOVERY_PORT = 8009;
     private static final int MAX_DETAIL_LENGTH = 255;
 
     private static final int DEFAULT_PORT = 443;
@@ -73,6 +80,7 @@ public class LightbitsPoolConfig {
     private final String environment; // identifies the owning CloudStack when clusters are shared
     private final List<String> extraEndpoints; // host:port, never null
     private final List<String> fingerprints;   // normalized SHA-256, never null; empty = CA validation
+    private List<String> nvmeDiscovery = List.of(); // host:port, empty = the API hosts
 
     public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
                                boolean compression, String qosPolicy, String jwt, String environment) {
@@ -150,8 +158,10 @@ public class LightbitsPoolConfig {
         // physical capacity across cluster nodes (GET /api/v2/nodes, readable by a
         // project-scoped token) and dividing by the pool's replica count. See
         // LightbitsApiClient.nodeCapacity() and the lifecycle/driver stats path.
-        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, jwt, environment,
+        LightbitsPoolConfig cfg = new LightbitsPoolConfig(host, port, project, replicas, compression, qos, jwt, environment,
                 parseEndpoints(decode(q.get("endpoints")), port), parseFingerprints(decode(q.get("fingerprint"))));
+        cfg.nvmeDiscovery = List.copyOf(parseEndpoints(decode(q.get("discovery")), DISCOVERY_PORT));
+        return cfg;
     }
 
     /**
@@ -238,8 +248,11 @@ public class LightbitsPoolConfig {
         boolean compression = Boolean.parseBoolean(details.getOrDefault(KEY_COMPRESSION, "false"));
         String qos = details.get(KEY_QOS);
         String environment = require(details, KEY_ENVIRONMENT);
-        return new LightbitsPoolConfig(host, port, project, replicas, compression, qos, decryptedJwt, environment,
-                parseEndpoints(details.get(KEY_API_ENDPOINTS), port), parseFingerprints(details.get(KEY_TLS_FINGERPRINT)));
+        LightbitsPoolConfig cfg = new LightbitsPoolConfig(host, port, project, replicas, compression, qos, decryptedJwt,
+                environment, parseEndpoints(details.get(KEY_API_ENDPOINTS), port),
+                parseFingerprints(details.get(KEY_TLS_FINGERPRINT)));
+        cfg.nvmeDiscovery = List.copyOf(parseEndpoints(details.get(KEY_NVME_DISCOVERY), DISCOVERY_PORT));
+        return cfg;
     }
 
     /** Details map WITHOUT the JWT — caller encrypts and stores the JWT separately. */
@@ -260,7 +273,30 @@ public class LightbitsPoolConfig {
         if (!fingerprints.isEmpty()) {
             d.put(KEY_TLS_FINGERPRINT, String.join(",", fingerprints));
         }
+        if (!nvmeDiscovery.isEmpty()) {
+            d.put(KEY_NVME_DISCOVERY, String.join(",", nvmeDiscovery));
+        }
         return d;
+    }
+
+    /**
+     * NVMe discovery endpoints for the KVM hosts, as host:port: the explicit list if one was
+     * given, otherwise every API host of the pool on the discovery port (on a Lightbits node the
+     * API and the discovery service listen on the same address).
+     */
+    public List<String> discoveryEndpoints() {
+        if (!nvmeDiscovery.isEmpty()) {
+            return nvmeDiscovery;
+        }
+        List<String> out = new ArrayList<>();
+        out.add(apiHost + ":" + DISCOVERY_PORT);
+        for (String e : extraEndpoints) {
+            String hostPort = e.substring(0, e.lastIndexOf(':')) + ":" + DISCOVERY_PORT;
+            if (!out.contains(hostPort)) {
+                out.add(hostPort);
+            }
+        }
+        return out;
     }
 
     public String apiEndpoint() {
