@@ -57,6 +57,25 @@ class LightbitsApiClientTest {
         wm = new WireMockServer(WireMockConfiguration.options().dynamicPort());
         wm.start();
         client = new LightbitsApiClient("http://localhost:" + wm.port(), "test-jwt", PROJECT, java.net.http.HttpClient.newHttpClient(), 1);
+        client.setSettleWait(2000, 1);
+        // Defaults (lowest priority) for the settle polls every create/update now performs:
+        // the volume and the snapshot are Available. Tests about settling override these.
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).atPriority(10)
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available"))));
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/snapshots/snap-1")).atPriority(10)
+                .willReturn(aResponse().withStatus(200).withBody(
+                    "{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\",\"size\":\"4294967296\"}")));
+    }
+
+    /** GET of the volume answers ETag 1 until the given PUT is sent, then ETag 2 (the update applied). */
+    private void stubEtagMovesAfterPut(String putUrl, String sizeAfter) {
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("update")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available", "1", "4294967296"))));
+        wm.stubFor(put(urlEqualTo(putUrl)).inScenario("update")
+                .willReturn(aResponse().withStatus(200).withBody("{}")).willSetStateTo("applied"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("update").whenScenarioStateIs("applied")
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available", "2", sizeAfter))));
     }
 
     @AfterEach
@@ -65,9 +84,13 @@ class LightbitsApiClientTest {
     }
 
     private static String volumeJson(String state) {
+        return volumeJson(state, "1", "4294967296");
+    }
+
+    private static String volumeJson(String state, String etag, String size) {
         return "{\"UUID\":\"" + VOL_UUID + "\",\"name\":\"cs-abc\",\"state\":\"" + state
-                + "\",\"size\":\"4294967296\",\"replicaCount\":3,\"projectName\":\"default\","
-                + "\"acl\":{\"values\":[\"ALLOW_NONE\"]}}";
+                + "\",\"size\":\"" + size + "\",\"replicaCount\":3,\"projectName\":\"default\","
+                + "\"ETag\":\"" + etag + "\",\"acl\":{\"values\":[\"ALLOW_NONE\"]}}";
     }
 
     // ---- sunny day ----
@@ -122,10 +145,19 @@ class LightbitsApiClientTest {
 
     @Test
     void resizeUsesProjectScopedRoute() {
-        wm.stubFor(put(urlEqualTo("/api/v2/projects/default/volumes/" + VOL_UUID))
-                .withRequestBody(matchingJsonPath("$.size", equalTo("8589934592")))
-                .willReturn(aResponse().withStatus(200).withBody("{}")));
+        stubEtagMovesAfterPut(VOLUMES + "/" + VOL_UUID, "8589934592");
         client.resizeVolume(VOL_UUID, 8589934592L);
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID))
+                .withRequestBody(matchingJsonPath("$.size", equalTo("8589934592")))
+                .withRequestBody(matchingJsonPath("$.projectName", equalTo(PROJECT)))
+                .withHeader("If-Match", equalTo("1")));
+    }
+
+    @Test
+    void resizeFailsWhenTheClusterDoesNotApplyTheNewSize() {
+        // the PUT is accepted and the ETag moves, but the size did not change: never report success
+        stubEtagMovesAfterPut(VOLUMES + "/" + VOL_UUID, "4294967296");
+        assertThrows(LightbitsApiException.class, () -> client.resizeVolume(VOL_UUID, 8589934592L));
     }
 
     @Test
@@ -287,12 +319,100 @@ class LightbitsApiClientTest {
 
     @Test
     void rollbackVolumeUsesProjectScopedPut() {
-        wm.stubFor(put(urlEqualTo("/api/v2/projects/default/volumes/" + VOL_UUID + "/rollback"))
-                .withRequestBody(matchingJsonPath("$.srcSnapshotUUID", equalTo("snap-1")))
-                .willReturn(aResponse().withStatus(200).withBody("{}")));
+        stubEtagMovesAfterPut(VOLUMES + "/" + VOL_UUID + "/rollback", "4294967296");
         client.rollbackVolume(VOL_UUID, "snap-1");
         wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(
-                urlEqualTo("/api/v2/projects/default/volumes/" + VOL_UUID + "/rollback")));
+                urlEqualTo("/api/v2/projects/default/volumes/" + VOL_UUID + "/rollback"))
+                .withRequestBody(matchingJsonPath("$.srcSnapshotUUID", equalTo("snap-1")))
+                .withRequestBody(matchingJsonPath("$.projectName", equalTo(PROJECT))));
+    }
+
+    @Test
+    void rollbackDoesNotReturnBeforeTheVolumeChanged() {
+        // The rollback PUT answers {} at once and the volume is Available both before and
+        // after: if its ETag never moves the rollback was not applied and must not be reported.
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback"))
+                .willReturn(aResponse().withStatus(200).withBody("{}")));
+        client.setSettleWait(50, 1);
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1"));
+        assertTrue(e.getMessage().contains("change not applied"), e.getMessage());
+    }
+
+    // ---- settling: create/clone/snapshot report success only for an Available object ----
+
+    @Test
+    void createVolumeWaitsUntilAvailable() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating", "", "4294967296"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("create")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating", "", "4294967296"))).willSetStateTo("ready"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("create").whenScenarioStateIs("ready")
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available"))));
+        Volume v = client.createVolume("cs-abc", 4294967296L, 3, null, false, null);
+        assertTrue(v.isAvailable());
+    }
+
+    @Test
+    void createVolumeThatLandsInFailedIsRemovedAndReported() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Failed"))));
+        wm.stubFor(delete(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(200).withBody("{}")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class,
+                () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        assertTrue(e.getMessage().contains("Failed"), e.getMessage());
+        assertTrue(e.getMessage().contains("cs-abc"), e.getMessage());
+        // no orphan: the half-made volume was deleted
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void createVolumeThatNeverSettlesIsRemovedAndReported() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(delete(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(200).withBody("{}")));
+        client.setSettleWait(50, 1);
+        assertThrows(LightbitsApiException.class, () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void createSnapshotWaitsUntilAvailable() {
+        // a clone from a snapshot that is still Creating is refused by the cluster (HTTP 503)
+        wm.stubFor(post(urlEqualTo("/api/v2/projects/default/snapshots")).willReturn(aResponse().withStatus(200).withBody(
+                "{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Creating\"}")));
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/snapshots/snap-1")).inScenario("snap")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody("{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Creating\"}"))
+                .willSetStateTo("ready"));
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/snapshots/snap-1")).inScenario("snap").whenScenarioStateIs("ready")
+                .willReturn(aResponse().withStatus(200).withBody("{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\"}")));
+        assertTrue(client.createSnapshot("cs-snap", VOL_UUID).isAvailable());
+    }
+
+    @Test
+    void deleteSnapshotTreatsAnErrorOnAnAlreadyGoneSnapshotAsSuccess() {
+        // any error status (here 412) on a snapshot that is in fact gone or Deleting is a completed delete
+        wm.stubFor(delete(urlEqualTo("/api/v2/projects/default/snapshots/snap-1"))
+                .willReturn(aResponse().withStatus(412).withBody("{\"message\":\"precondition\"}")));
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/snapshots/snap-1"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Deleting\"}")));
+        assertFalse(client.deleteSnapshot("snap-1"));
+    }
+
+    @Test
+    void deleteSnapshotFailsWhenTheSnapshotIsStillThere() {
+        wm.stubFor(delete(urlEqualTo("/api/v2/projects/default/snapshots/snap-1"))
+                .willReturn(aResponse().withStatus(412).withBody("{\"message\":\"has clones\"}")));
+        assertThrows(LightbitsApiException.class, () -> client.deleteSnapshot("snap-1"));
+    }
+
+    @Test
+    void updateAclIsConditionalOnTheEtagAndStaleEtagIsPrecondition() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID)).withHeader("If-Match", equalTo("7"))
+                .willReturn(aResponse().withStatus(412).withBody("{\"message\":\"provided etag 7 don't match current etag 8\"}")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class,
+                () -> client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), "7"));
+        assertEquals(Kind.PRECONDITION, e.getKind());
     }
 
     @Test
@@ -314,10 +434,12 @@ class LightbitsApiClientTest {
 
     @Test
     void updateAclSendsValues() {
-        wm.stubFor(put(urlEqualTo("/api/v2/projects/default/volumes/" + VOL_UUID))
+        stubEtagMovesAfterPut(VOLUMES + "/" + VOL_UUID, "4294967296");
+        client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), "1");
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID))
                 .withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo("nqn.host.a")))
-                .willReturn(aResponse().withStatus(200).withBody("{}")));
-        client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"));
+                .withRequestBody(matchingJsonPath("$.projectName", equalTo(PROJECT)))
+                .withHeader("If-Match", equalTo("1")));
     }
 
     @Test
@@ -425,5 +547,171 @@ class LightbitsApiClientTest {
         wm.stubFor(get(urlPathEqualTo("/api/v2/policies"))
                 .willReturn(aResponse().withStatus(200).withBody("{\"policies\":[]}")));
         assertFalse(client.qosPolicyExists("256rw"));
+    }
+
+    // ---- failure paths raised in review ----
+
+    @Test
+    void aVolumeFoundThroughAConflictIsNeverDeletedWhenItsLookupFails() {
+        // 409: the volume existed before this call. Its settle poll fails; it must be left alone.
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(409).withBody("{\"message\":\"exists\"}")));
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Available") + "]}")));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(500).withBody("boom")));
+        client.setSettleWait(50, 1);
+        assertThrows(LightbitsApiException.class, () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.moreThanOrExactly(1),
+                com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void aSnapshotKnowsWhetherThisCallCreatedIt() {
+        String snaps = "/api/v2/projects/default/snapshots";
+        wm.stubFor(post(urlEqualTo(snaps)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Creating\"}")));
+        assertTrue(client.createSnapshot("cs-snap", VOL_UUID).isCreatedByThisCall());
+        wm.stubFor(post(urlEqualTo(snaps)).willReturn(aResponse().withStatus(409).withBody("{\"message\":\"exists\"}")));
+        wm.stubFor(get(urlPathEqualTo(snaps)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"snapshots\":[{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\"}]}")));
+        assertFalse(client.createSnapshot("cs-snap", VOL_UUID).isCreatedByThisCall());
+    }
+
+    @Test
+    void aSnapshotFoundThroughAConflictIsNeverDeletedWhenItsLookupFails() {
+        String snaps = "/api/v2/projects/default/snapshots";
+        wm.stubFor(post(urlEqualTo(snaps)).willReturn(aResponse().withStatus(409).withBody("{\"message\":\"exists\"}")));
+        wm.stubFor(get(urlPathEqualTo(snaps)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"snapshots\":[{\"UUID\":\"snap-1\",\"name\":\"cs-snap\",\"state\":\"Available\"}]}")));
+        wm.stubFor(get(urlEqualTo(snaps + "/snap-1")).willReturn(aResponse().withStatus(500).withBody("boom")));
+        client.setSettleWait(50, 1);
+        assertThrows(LightbitsApiException.class, () -> client.createSnapshot("cs-snap", VOL_UUID));
+        // the settle poll of the existing snapshot was reached (and failed): not an earlier error
+        wm.verify(com.github.tomakehurst.wiremock.client.WireMock.moreThanOrExactly(1),
+                com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo(snaps + "/snap-1")));
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(snaps + "/snap-1")));
+    }
+
+    @Test
+    void aFailedCreateWaitsForTheRemovalOfTheVolumeItMade() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("gone")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Failed"))));
+        wm.stubFor(delete(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("gone")
+                .willReturn(aResponse().withStatus(200).withBody("{}")).willSetStateTo("deleting"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("gone").whenScenarioStateIs("deleting")
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Deleting"))).willSetStateTo("removed"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("gone").whenScenarioStateIs("removed")
+                .willReturn(aResponse().withStatus(404).withBody("{}")));
+        assertThrows(LightbitsApiException.class, () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        // polled past Deleting until the 404: the caller may now delete the clone's source snapshot
+        wm.verify(3, com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void aTransientPollFailureIsRiddenOutUntilTheVolumeSettles() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("blip")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(503).withBody("no leader")).willSetStateTo("back"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("blip").whenScenarioStateIs("back")
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available"))));
+        assertTrue(client.createVolume("cs-abc", 4294967296L, 3, null, false, null).isAvailable());
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void theSettleWaitEndsAtItsDeadlineWhenThePollsKeepFailing() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(503).withBody("no leader")));
+        wm.stubFor(delete(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(200).withBody("{}")));
+        client.setSettleWait(200, 5);
+        long t0 = System.nanoTime();
+        assertThrows(LightbitsApiException.class, () -> client.createVolume("cs-abc", 4294967296L, 3, null, false, null));
+        // two bounded waits (settle, then removal), not attempts x request timeout
+        assertTrue((System.nanoTime() - t0) / 1_000_000L < 5000, "the wait overran its deadline");
+    }
+
+    @Test
+    void lookupForDeleteStillSeesAVolumeThatIsDeleting() {
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Deleting") + "]}")));
+        assertTrue(client.getVolumeByName("cs-abc").isEmpty());
+        Volume v = client.getVolumeByNameIncludingDeleting("cs-abc").orElseThrow();
+        assertTrue(v.isDeletedOrDeleting());
+    }
+
+    @Test
+    void lookupForDeleteIgnoresADeletedVolume() {
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volumeJson("Deleted") + "]}")));
+        assertTrue(client.getVolumeByNameIncludingDeleting("cs-abc").isEmpty());
+    }
+
+    @Test
+    void rollbackIsConditionalOnTheRevisionTheCallerChecked() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")).withHeader("If-Match", equalTo("7"))
+                .willReturn(aResponse().withStatus(412).withBody("{\"message\":\"provided etag 7 does not match current etag 8\"}")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", "7"));
+        assertEquals(Kind.PRECONDITION, e.getKind());
+    }
+
+    // ---- conditional updates are sent once ----
+
+    @Test
+    void aResizeThatWasAppliedButNotConfirmedIsNotSentAgainAndSucceeds() {
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("r")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available", "1", "4294967296"))));
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("r")
+                .willReturn(aResponse().withStatus(500).withBody("gateway hiccup")).willSetStateTo("applied"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("r").whenScenarioStateIs("applied")
+                .willReturn(aResponse().withStatus(200).withBody(volumeJson("Available", "2", "8589934592"))));
+        client.resizeVolume(VOL_UUID, 8589934592L);
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void aResizeThatFailedAndWasNotAppliedIsReportedAfterOneAttempt() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(500).withBody("boom")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.resizeVolume(VOL_UUID, 8589934592L));
+        assertEquals(Kind.TRANSIENT, e.getKind());
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void anUnconfirmedRollbackIsSentOnceAndNeverReportedAsDone() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")).willReturn(aResponse().withStatus(503).withBody("busy")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", "1"));
+        assertTrue(e.getMessage().contains("outcome is unknown"), e.getMessage());
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")));
+    }
+
+    @Test
+    void anAclUpdateIsSentOnce() {
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(500).withBody("boom")));
+        assertThrows(LightbitsApiException.class, () -> client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), "1"));
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
+    @Test
+    void updatesWithoutAVolumeRevisionAreRefusedBeforeAnythingIsSent() {
+        for (String etag : new String[] {null, ""}) {
+            LightbitsApiException e = assertThrows(LightbitsApiException.class,
+                    () -> client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), etag));
+            assertEquals(Kind.INVALID, e.getKind());
+            assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", etag));
+        }
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(
+                com.github.tomakehurst.wiremock.client.WireMock.anyUrl()));
+    }
+
+    @Test
+    void aPollWithoutARevisionIsNotTakenForAChange() {
+        // the rollback is accepted, but the volume then reports no ETag at all: not proof it was applied
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")).willReturn(aResponse().withStatus(200).withBody("{}")));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"UUID\":\"" + VOL_UUID + "\",\"name\":\"cs-abc\",\"state\":\"Available\",\"size\":\"4294967296\"}")));
+        client.setSettleWait(50, 1);
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.rollbackVolume(VOL_UUID, "snap-1", "1"));
+        assertTrue(e.getMessage().contains("change not applied"), e.getMessage());
     }
 }

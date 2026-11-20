@@ -30,6 +30,8 @@ public class Volume {
     private int replicaCount;
     private String projectName;
     private Acl acl;
+    @JsonProperty("ETag")
+    private String etag;
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Acl {
@@ -46,6 +48,11 @@ public class Volume {
 
     public boolean isAvailable() {
         return "Available".equals(state);
+    }
+
+    /** Terminal failure: the cluster gave up on this volume; it will never become Available. */
+    public boolean isFailed() {
+        return "Failed".equals(state);
     }
 
     public long getSizeBytes() {
@@ -66,4 +73,6 @@ public class Volume {
     public void setProjectName(String projectName) { this.projectName = projectName; }
     public Acl getAcl() { return acl; }
     public void setAcl(Acl acl) { this.acl = acl; }
+    public String getEtag() { return etag; }
+    public void setEtag(String etag) { this.etag = etag; }
 }

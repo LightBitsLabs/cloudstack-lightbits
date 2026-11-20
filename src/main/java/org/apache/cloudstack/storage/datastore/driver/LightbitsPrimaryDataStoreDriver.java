@@ -170,7 +170,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         return clientFor(configForPool(poolId));
     }
 
-    private LightbitsApiClient clientFor(LightbitsPoolConfig cfg) {
+    LightbitsApiClient clientFor(LightbitsPoolConfig cfg) {
         // v1 dev/lab TLS: trust-all (see open item L3). Production uses the validated default.
         return LightbitsApiClient.insecureForDevelopment(cfg.apiEndpoint(), cfg.getJwt(), cfg.getProject());
     }
@@ -182,6 +182,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         caps.put("CAN_CREATE_VOLUME_FROM_SNAPSHOT", "true");
         caps.put("CAN_CREATE_VOLUME_FROM_VOLUME", "true");
         caps.put("CAN_CREATE_TEMPLATE_FROM_SNAPSHOT", "true");
+        // Without this StorageSystemSnapshotStrategy cannot handle REVERT for a backend
+        // snapshot and revertSnapshot fails in the core before the driver is ever called.
+        caps.put("CAN_REVERT_VOLUME_TO_SNAPSHOT", "true");
         // Materialize root volumes from a cached template with a native Lightbits
         // snapshot+clone (instant, no agent qemu-img). Drives root-disk-from-template boot
         // via StorageSystemDataMotionStrategy.handleCreateVolumeFromTemplateBothOnStorageSystem.
@@ -284,7 +287,20 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 LightbitsPoolConfig cfg = configForPool(store.getId());
                 LightbitsApiClient client = clientFor(cfg);
                 String name = LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), data.getUuid());
-                client.getVolumeByName(name).ifPresent(v -> client.deleteVolume(v.getUuid()));
+                // includes a volume an earlier, interrupted delete left in Deleting: that removal
+                // is waited for (without a second DELETE) rather than taken for done
+                java.util.Optional<org.apache.cloudstack.storage.datastore.client.model.Volume> lbVol =
+                        client.getVolumeByNameIncludingDeleting(name);
+                if (lbVol.isPresent()) {
+                    if (!lbVol.get().isDeletedOrDeleting()) {
+                        client.deleteVolume(lbVol.get().getUuid());
+                    }
+                    // the clone-source snapshot can only go once its clone is really gone
+                    client.waitForVolumeGone(lbVol.get().getUuid());
+                }
+                // Not found is success (idempotent teardown: a retried delete converges). The
+                // plugin's own clone-source snapshot goes with the volume. Snapshots the USER
+                // took of this volume are CloudStack objects with their own lifecycle and stay.
                 deleteCloneSourceSnapshot(client, name);
             } else if (data.getType() == DataObjectType.SNAPSHOT) {
                 LightbitsPoolConfig cfg = configForPool(store.getId());
@@ -293,29 +309,30 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 client.getSnapshotByName(name).ifPresent(s -> client.deleteSnapshot(s.getUuid()));
             }
         } catch (Exception e) {
-            errMsg = e.getMessage();
+            // A failed cluster-side delete must fail the CloudStack operation: reporting
+            // success here would orphan the volume on the cluster for good.
+            errMsg = "Lightbits: delete of " + data.getType() + " " + data.getUuid() + " failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.toString());
+            LOG.warn(errMsg, e);
         }
-        if (callback != null) {
-            callback.complete(new CommandResult());
+        if (callback == null) {
+            if (errMsg != null) {
+                throw new CloudRuntimeException(errMsg);
+            }
+            return;
         }
-        if (errMsg != null && callback == null) {
-            throw new CloudRuntimeException(errMsg);
-        }
+        CommandResult result = new CommandResult();
+        result.setResult(errMsg);
+        callback.complete(result);
     }
 
     /**
      * Drop the clone-source snapshot cloneOnStorage left behind (named {@code <cloneName>-src},
-     * taken on the clone's source). Best-effort: LightOS refuses to delete a snapshot whose
-     * clone still exists (e.g. clone deletion still in flight); the pool-delete sweep in the
-     * lifecycle catches any such straggler.
+     * taken on the clone's source). Failures propagate: the caller fails the delete, CloudStack
+     * retries it, and the retry finds the volume gone and comes straight back here.
      */
     private void deleteCloneSourceSnapshot(LightbitsApiClient client, String cloneName) {
-        try {
-            client.getSnapshotByName(cloneName + "-src").ifPresent(s -> client.deleteSnapshot(s.getUuid()));
-        } catch (Exception e) {
-            LOG.warn("Lightbits: could not delete clone-source snapshot {}-src ({}); "
-                    + "it will be swept when the pool is deleted", cloneName, e.getMessage());
-        }
+        client.getSnapshotByName(cloneName + "-src").ifPresent(s -> client.deleteSnapshot(s.getUuid()));
     }
 
     @Override
@@ -415,13 +432,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             // volume-from-snapshot: the Lightbits snapshot already exists (takeSnapshot made it)
             snap = client.getSnapshotByName(srcName).orElseThrow(
                     () -> new CloudRuntimeException("clone source snapshot not found on cluster: " + srcName));
-            // floor the clone size at the snapshot's base-volume size when it still exists
-            // (CloudStack normally passes it anyway; LightOS rejects too-small clones regardless)
-            org.apache.cloudstack.storage.datastore.client.model.Volume snapSrc =
-                    snap.getSourceVolumeUUID() == null ? null
-                            : client.getVolume(snap.getSourceVolumeUUID()).orElse(null);
-            srcSize = snapSrc == null ? 0L : snapSrc.getSizeBytes();
-            srcReplicas = snapSrc == null ? cfg.getReplicaCount() : snapSrc.getReplicaCount();
+            // Size and replica count come from the snapshot itself: its base volume may have
+            // been resized or deleted since, and a missing base volume must not read as "0 bytes".
+            srcSize = snap.getSizeBytes();
+            srcReplicas = snap.getReplicaCount() > 0 ? snap.getReplicaCount() : cfg.getReplicaCount();
         } else {
             // template/volume source: snapshot it, then clone from that snapshot
             org.apache.cloudstack.storage.datastore.client.model.Volume src = client.getVolumeByName(srcName)
@@ -430,22 +444,41 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             srcSize = src.getSizeBytes();
             srcReplicas = src.getReplicaCount();
         }
-        // Clone at the larger of the requested volume size and the source image size; LightOS
-        // requires an explicit size and rejects a clone smaller than its source.
-        long size = Math.max(destVol.getSize() != null ? destVol.getSize() : 0L, srcSize);
-        // LightOS requires a clone's replicaCount to EQUAL its source's (and replicaCount is
-        // immutable after create), so clones always inherit the source's replica factor. If
-        // the offering asks for a different lightbitsReplicas, warn — don't fail the deploy.
-        int replicas = srcReplicas > 0 ? srcReplicas : cfg.getReplicaCount();
-        int requested = replicasFor(destVol, cfg);
-        if (requested != replicas) {
-            LOG.warn("Lightbits: volume {} requested {} replicas via its offering, but clones inherit their "
-                    + "source's replica factor ({}) — LightOS requires clone == source and the count is "
-                    + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
+        // From here on the clone-source snapshot taken above is ours to remove if anything fails,
+        // including the lookups before the clone request is sent.
+        org.apache.cloudstack.storage.datastore.client.model.Volume created;
+        try {
+            // Clone at the larger of the requested volume size and the source image size; LightOS
+            // requires an explicit size and rejects a clone smaller than its source.
+            long size = Math.max(destVol.getSize() != null ? destVol.getSize() : 0L, srcSize);
+            // LightOS requires a clone's replicaCount to EQUAL its source's (and replicaCount is
+            // immutable after create), so clones always inherit the source's replica factor. If
+            // the offering asks for a different lightbitsReplicas, warn — don't fail the deploy.
+            int replicas = srcReplicas > 0 ? srcReplicas : cfg.getReplicaCount();
+            int requested = replicasFor(destVol, cfg);
+            if (requested != replicas) {
+                LOG.warn("Lightbits: volume {} requested {} replicas via its offering, but clones inherit their "
+                        + "source's replica factor ({}) — LightOS requires clone == source and the count is "
+                        + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
+            }
+            created = client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null,
+                    cfg.isCompression(), qosPolicyNameFor(destVol, cfg));
+        } catch (RuntimeException e) {
+            // Do not leave the clone-source snapshot we just took behind a failed clone. A clone
+            // this call created has been removed, and that removal waited for, by the client.
+            // Only a snapshot THIS call created: a user's snapshot is never ours, and a
+            // clone-source snapshot found through a 409 belongs to an earlier attempt that
+            // may still need it.
+            if (srcData.getType() != DataObjectType.SNAPSHOT && snap.isCreatedByThisCall()) {
+                try {
+                    client.deleteSnapshot(snap.getUuid());
+                } catch (RuntimeException cleanup) {
+                    LOG.warn("Lightbits: could not remove clone-source snapshot {}-src after a failed clone: {}",
+                            destName, cleanup.getMessage());
+                }
+            }
+            throw e;
         }
-        org.apache.cloudstack.storage.datastore.client.model.Volume created =
-                client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null,
-                        cfg.isCompression(), qosPolicyNameFor(destVol, cfg));
         String path = created.getUuid();
 
         VolumeVO vo = volumeDao.findById(destVol.getId());
@@ -542,14 +575,55 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
-        org.apache.cloudstack.storage.datastore.client.model.Volume v = client.getVolumeByName(name)
-                .orElseThrow(() -> new CloudRuntimeException("grantAccess: volume not found on cluster: " + name));
-        java.util.List<String> acl = currentAcl(v);
-        if (!acl.contains(nqn)) {
+        updateAcl(client, name, true, acl -> {
+            if (acl.contains(nqn)) {
+                return false;
+            }
             acl.add(nqn);
-            client.updateVolumeAcl(v.getUuid(), acl);
-        }
+            return true;
+        });
         return true;
+    }
+
+    private static final int ACL_UPDATE_ATTEMPTS = 8;
+
+    /**
+     * Read-modify-write of a volume's ACL, safe against concurrent updates of the same volume
+     * (two hosts attaching, or a migration's grant racing a revoke): the PUT is conditional on
+     * the ETag the ACL was read with, and a stale ETag (412) restarts from a fresh read. A
+     * plain read-then-write would let the second writer drop the first writer's host.
+     */
+    private void updateAcl(LightbitsApiClient client, String name, boolean mustExist,
+                           java.util.function.Predicate<java.util.List<String>> change) {
+        for (int attempt = 1; ; attempt++) {
+            java.util.Optional<org.apache.cloudstack.storage.datastore.client.model.Volume> found =
+                    client.getVolumeByName(name);
+            if (found.isEmpty()) {
+                if (mustExist) {
+                    throw new CloudRuntimeException("grantAccess: volume not found on cluster: " + name);
+                }
+                return;
+            }
+            org.apache.cloudstack.storage.datastore.client.model.Volume v = found.get();
+            java.util.List<String> acl = currentAcl(v);
+            if (!change.test(acl)) {
+                return;
+            }
+            try {
+                client.updateVolumeAcl(v.getUuid(), acl, v.getEtag());
+                return;
+            } catch (org.apache.cloudstack.storage.datastore.client.LightbitsApiException e) {
+                // 412: the volume changed since it was read. Transient: the update was sent once
+                // and not confirmed. Either way start over from a fresh read; if the change is
+                // already there the predicate finds nothing to do.
+                boolean again = e.getKind() == org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind.PRECONDITION
+                        || e.getKind() == org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind.TRANSIENT;
+                if (!again || attempt >= ACL_UPDATE_ATTEMPTS) {
+                    throw e;
+                }
+                LOG.debug("Lightbits: ACL update of {} not applied ({}), re-reading (attempt {})", name, e.getKind(), attempt);
+            }
+        }
     }
 
     @Override
@@ -559,12 +633,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
-        client.getVolumeByName(name).ifPresent(v -> {
-            java.util.List<String> acl = currentAcl(v);
-            if (acl.remove(nqn)) {
-                client.updateVolumeAcl(v.getUuid(), acl);
-            }
-        });
+        updateAcl(client, name, false, acl -> acl.remove(nqn));
     }
 
     private String hostNqn(Host host) {
@@ -693,8 +762,38 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     client.getSnapshotByName(snapName).orElseThrow(() -> new CloudRuntimeException(
                             "snapshot not found on cluster: " + snapName));
 
+            // A rollback restores the snapshot's SIZE as well as its content: reverting a
+            // volume that was grown since would shrink it under CloudStack, which keeps the
+            // larger size on record. Refuse instead of silently truncating.
+            if (s.getSizeBytes() <= 0) {
+                throw new CloudRuntimeException("cannot revert volume " + vol.getUuid() + " to snapshot "
+                        + snapshot.getUuid() + ": the cluster does not report the snapshot's size, so a"
+                        + " shrink of the volume cannot be ruled out.");
+            }
+            if (s.getSizeBytes() < lbVol.getSizeBytes()) {
+                throw new CloudRuntimeException("cannot revert volume " + vol.getUuid() + " to snapshot "
+                        + snapshot.getUuid() + ": the volume was grown after the snapshot was taken ("
+                        + s.getSizeBytes() + " -> " + lbVol.getSizeBytes() + " bytes) and a revert would"
+                        + " shrink it. Create a new volume from the snapshot instead.");
+            }
+            // The rollback rewrites the volume in place. CloudStack only allows a revert with
+            // the VM stopped or the volume detached, and both revoke host access; a host still
+            // in the ACL means something is (or may be) using the device.
+            java.util.List<String> acl = currentAcl(lbVol);
+            if (!acl.isEmpty()) {
+                throw new CloudRuntimeException("cannot revert volume " + vol.getUuid() + " to snapshot "
+                        + snapshot.getUuid() + ": the volume is still exposed to host(s) " + acl
+                        + ". Stop the VM or detach the volume first.");
+            }
             // native in-place rollback (PUT .../volumes/{uuid}/rollback)
-            client.rollbackVolume(lbVol.getUuid(), s.getUuid());
+            if (lbVol.getEtag() == null || lbVol.getEtag().isEmpty()) {
+                throw new CloudRuntimeException("cannot revert volume " + vol.getUuid() + " to snapshot "
+                        + snapshot.getUuid() + ": the cluster does not report the volume's revision (ETag),"
+                        + " so the revert cannot be bound to the state that was checked.");
+            }
+            // Conditional on the revision the two guards above looked at: a resize or a host
+            // attach landing in between gets a 412 from the cluster and nothing is rolled back.
+            client.rollbackVolume(lbVol.getUuid(), s.getUuid(), lbVol.getEtag());
             LOG.info("Lightbits: rolled back volume {} to snapshot {}", volName, snapName);
         } catch (Exception e) {
             LOG.warn("Lightbits: revertSnapshot failed for snapshot {}", snapshot.getUuid(), e);

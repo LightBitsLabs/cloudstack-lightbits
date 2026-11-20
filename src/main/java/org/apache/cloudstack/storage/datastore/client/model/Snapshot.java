@@ -26,11 +26,31 @@ public class Snapshot {
     private String state;
     private String sourceVolumeUUID;
     private String sourceVolumeName;
+    private String size;
+    private int replicaCount;
+    /** Set by the client on a snapshot the current call created (not one it found through a 409). */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private boolean createdByThisCall;
 
     public boolean isDeletedOrDeleting() {
         return "Deleted".equals(state) || "Deleting".equals(state);
     }
 
+    public boolean isAvailable() {
+        return "Available".equals(state);
+    }
+
+    public boolean isFailed() {
+        return "Failed".equals(state);
+    }
+
+    /** Size of the source volume at the time the snapshot was taken, in bytes (0 if unknown). */
+    public long getSizeBytes() {
+        return size == null || size.isEmpty() ? 0L : Long.parseLong(size);
+    }
+
+    public boolean isCreatedByThisCall() { return createdByThisCall; }
+    public void setCreatedByThisCall(boolean createdByThisCall) { this.createdByThisCall = createdByThisCall; }
     public String getUuid() { return uuid; }
     public void setUuid(String uuid) { this.uuid = uuid; }
     public String getName() { return name; }
@@ -41,4 +61,8 @@ public class Snapshot {
     public void setSourceVolumeUUID(String v) { this.sourceVolumeUUID = v; }
     public String getSourceVolumeName() { return sourceVolumeName; }
     public void setSourceVolumeName(String v) { this.sourceVolumeName = v; }
+    public String getSize() { return size; }
+    public void setSize(String size) { this.size = size; }
+    public int getReplicaCount() { return replicaCount; }
+    public void setReplicaCount(int replicaCount) { this.replicaCount = replicaCount; }
 }
