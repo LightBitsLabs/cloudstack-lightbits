@@ -21,7 +21,7 @@ import java.util.Set;
 
 import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreDriver;
 import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreLifeCycle;
-import org.apache.cloudstack.engine.subsystem.api.storage.DataStoreProvider;
+import org.apache.cloudstack.engine.subsystem.api.storage.PrimaryDataStoreProvider;
 import org.apache.cloudstack.engine.subsystem.api.storage.HypervisorHostListener;
 import org.apache.cloudstack.storage.datastore.driver.LightbitsPrimaryDataStoreDriver;
 import org.apache.cloudstack.storage.datastore.lifecycle.LightbitsPrimaryDataStoreLifeCycle;
@@ -29,7 +29,9 @@ import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
 
 import com.cloud.utils.component.ComponentContext;
 
-public class LightbitsPrimaryDatastoreProvider implements DataStoreProvider {
+// PrimaryDataStoreProvider, not the plain DataStoreProvider: CloudStack notifies only providers of
+// that type when a host is added, enabled or removed (StoragePoolMonitor, StorageManagerImpl).
+public class LightbitsPrimaryDatastoreProvider implements PrimaryDataStoreProvider {
     public static final String PROVIDER_NAME = LightbitsUtil.PROVIDER_NAME;
 
     private DataStoreLifeCycle lifeCycle;
