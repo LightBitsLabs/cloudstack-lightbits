@@ -95,6 +95,11 @@ public class LightbitsApiClient {
     private static final Map<String, Long> DOWN_UNTIL = new java.util.concurrent.ConcurrentHashMap<>();
     private static final long DOWN_MILLIS = 60_000;
 
+    /** For tests: the list is shared by every client of the JVM, and test servers reuse ports. */
+    static void forgetDownEndpoints() {
+        DOWN_UNTIL.clear();
+    }
+
     static boolean isMarkedDown(String base) {
         Long until = DOWN_UNTIL.get(base);
         return until != null && until > System.currentTimeMillis();
