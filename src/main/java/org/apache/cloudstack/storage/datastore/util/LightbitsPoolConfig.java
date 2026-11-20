@@ -65,6 +65,7 @@ public class LightbitsPoolConfig {
      */
     public static final String KEY_NVME_DISCOVERY = "nvmeDiscovery";
     public static final int DISCOVERY_PORT = 8009;
+    private static final int MAX_DETAIL_LENGTH = 255;
 
     private static final int DEFAULT_PORT = 443;
     private static final int DEFAULT_REPLICAS = 3;
@@ -182,11 +183,31 @@ public class LightbitsPoolConfig {
                         + entry + "')");
             }
             String withPort = entry.contains(":") ? entry : entry + ":" + defaultPort;
+            requireUsableAuthority(withPort);
             if (!out.contains(withPort)) {
                 out.add(withPort);
             }
         }
+        // the list is stored as one pool detail, and CloudStack's detail value column holds 255 characters
+        int stored = String.join(",", out).length();
+        if (stored > MAX_DETAIL_LENGTH) {
+            throw new IllegalArgumentException("endpoints is too long to store: " + stored + " characters as host:port list, the limit is "
+                    + MAX_DETAIL_LENGTH + " (use IP addresses or shorter names)");
+        }
         return out;
+    }
+
+    /** The check the HTTP client applies when it builds a request: a parsable host and a valid port. */
+    private static void requireUsableAuthority(String hostPort) {
+        try {
+            java.net.URI uri = new java.net.URI("https://" + hostPort).parseServerAuthority();
+            if (uri.getHost() == null || uri.getPort() < 1 || uri.getPort() > 65535) {
+                throw new java.net.URISyntaxException(hostPort, "no usable host and port");
+            }
+        } catch (java.net.URISyntaxException e) {
+            throw new IllegalArgumentException("endpoints entry '" + hostPort + "' is not a usable host or host:port ("
+                    + e.getReason() + ")");
+        }
     }
 
     /** SHA-256 certificate fingerprints, comma-separated, colons optional. Returned normalized. */
