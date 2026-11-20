@@ -15,7 +15,9 @@
  */
 package org.apache.cloudstack.storage.datastore.lifecycle;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -47,6 +49,12 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     @Inject
     PrimaryDataStoreHelper dataStoreHelper;
+    @Inject
+    com.cloud.storage.StoragePoolAutomation storagePoolAutomation;
+    @Inject
+    com.cloud.agent.AgentManager agentMgr;
+    @Inject
+    com.cloud.storage.dao.StoragePoolHostDao storagePoolHostDao;
     @Inject
     com.cloud.storage.StorageManager storageMgr;
     @Inject
@@ -332,20 +340,69 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         return true;
     }
 
+    // Maintenance follows CloudStack's standard flow (StoragePoolAutomation), as the in-tree
+    // plugins do: the hosts are told to drop the pool (ModifyStoragePoolCommand add=false, which
+    // is what lets a host disconnect from the cluster when its last Lightbits pool leaves), the
+    // VMs with volumes on the pool are stopped, and cancelling maintenance registers the pool
+    // on the hosts again and restarts those VMs.
+
     @Override
     public boolean maintain(DataStore store) {
+        if (storagePoolAutomation != null) {
+            storagePoolAutomation.maintain(store);
+        }
         return dataStoreHelper.maintain(store);
     }
 
     @Override
     public boolean cancelMaintain(DataStore store) {
+        if (storagePoolAutomation != null) {
+            storagePoolAutomation.cancelMaintain(store);
+        }
         return dataStoreHelper.cancelMaintain(store);
     }
 
     @Override
     public boolean deleteDataStore(DataStore store) {
         cleanupClusterObjects(store);
+        if (agentMgr != null && storagePoolHostDao != null && store instanceof StoragePool) {
+            List<Long> hostIds = new ArrayList<>();
+            for (com.cloud.storage.StoragePoolHostVO ref : storagePoolHostDao.listByPoolId(store.getId())) {
+                hostIds.add(ref.getHostId());
+            }
+            StoragePool pool = (StoragePool) store;
+            releaseHosts(pool.getName(), hostIds, hostId -> agentMgr.easySend(hostId, new com.cloud.agent.api.DeleteStoragePoolCommand(pool)));
+        }
         return dataStoreHelper.deletePrimaryDataStore(store);
+    }
+
+    /**
+     * Tell every host of a pool that is being deleted to forget it, so the host can drop the
+     * NVMe/TCP connections it no longer needs. Best effort: a host that is down or refuses
+     * keeps its connections until it reboots, and that must not block deleting the pool.
+     * Returns the hosts that did not confirm.
+     */
+    static List<Long> releaseHosts(String poolName, List<Long> hostIds, java.util.function.Function<Long, com.cloud.agent.api.Answer> send) {
+        List<Long> unconfirmed = new ArrayList<>();
+        for (Long hostId : hostIds) {
+            String why = null;
+            try {
+                com.cloud.agent.api.Answer answer = send.apply(hostId);
+                if (answer == null) {
+                    why = "no answer (host down or disconnected)";
+                } else if (!answer.getResult()) {
+                    why = answer.getDetails();
+                }
+            } catch (RuntimeException e) {
+                why = e.toString();
+            }
+            if (why != null) {
+                unconfirmed.add(hostId);
+                LOG.warn("Lightbits: host {} did not confirm the removal of pool {} ({}); its NVMe/TCP connections to the"
+                        + " cluster stay until 'nvme disconnect' is run there or the host reboots", hostId, poolName, why);
+            }
+        }
+        return unconfirmed;
     }
 
     /**

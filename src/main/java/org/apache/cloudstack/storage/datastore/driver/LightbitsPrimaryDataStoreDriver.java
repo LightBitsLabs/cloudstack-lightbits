@@ -571,7 +571,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
-        updateAcl(client, name, true, acl -> {
+        org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
             if (acl.contains(nqn)) {
                 return false;
             }
@@ -581,47 +581,6 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         return true;
     }
 
-    private static final int ACL_UPDATE_ATTEMPTS = 8;
-
-    /**
-     * Read-modify-write of a volume's ACL, safe against concurrent updates of the same volume
-     * (two hosts attaching, or a migration's grant racing a revoke): the PUT is conditional on
-     * the ETag the ACL was read with, and a stale ETag (412) restarts from a fresh read. A
-     * plain read-then-write would let the second writer drop the first writer's host.
-     */
-    private void updateAcl(LightbitsApiClient client, String name, boolean mustExist,
-                           java.util.function.Predicate<java.util.List<String>> change) {
-        for (int attempt = 1; ; attempt++) {
-            java.util.Optional<org.apache.cloudstack.storage.datastore.client.model.Volume> found =
-                    client.getVolumeByName(name);
-            if (found.isEmpty()) {
-                if (mustExist) {
-                    throw new CloudRuntimeException("grantAccess: volume not found on cluster: " + name);
-                }
-                return;
-            }
-            org.apache.cloudstack.storage.datastore.client.model.Volume v = found.get();
-            java.util.List<String> acl = currentAcl(v);
-            if (!change.test(acl)) {
-                return;
-            }
-            try {
-                client.updateVolumeAcl(v.getUuid(), acl, v.getEtag());
-                return;
-            } catch (org.apache.cloudstack.storage.datastore.client.LightbitsApiException e) {
-                // 412: the volume changed since it was read. Transient: the update was sent once
-                // and not confirmed. Either way start over from a fresh read; if the change is
-                // already there the predicate finds nothing to do.
-                boolean again = e.getKind() == org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind.PRECONDITION
-                        || e.getKind() == org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind.TRANSIENT;
-                if (!again || attempt >= ACL_UPDATE_ATTEMPTS) {
-                    throw e;
-                }
-                LOG.debug("Lightbits: ACL update of {} not applied ({}), re-reading (attempt {})", name, e.getKind(), attempt);
-            }
-        }
-    }
-
     @Override
     public void revokeAccess(DataObject dataObject, Host host, DataStore dataStore) {
         String nqn = hostNqn(host);
@@ -629,7 +588,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
-        updateAcl(client, name, false, acl -> acl.remove(nqn));
+        org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn));
     }
 
     private String hostNqn(Host host) {
@@ -640,18 +599,6 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     + " connect - check nvme-cli on the host, then reconnect the host (see the listener warn log).");
         }
         return detail.getValue();
-    }
-
-    private java.util.List<String> currentAcl(org.apache.cloudstack.storage.datastore.client.model.Volume v) {
-        java.util.List<String> acl = new java.util.ArrayList<>();
-        if (v.getAcl() != null && v.getAcl().getValues() != null) {
-            for (String val : v.getAcl().getValues()) {
-                if (!"ALLOW_NONE".equals(val)) {
-                    acl.add(val);
-                }
-            }
-        }
-        return acl;
     }
 
     @Override
@@ -775,7 +722,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             // The rollback rewrites the volume in place. CloudStack only allows a revert with
             // the VM stopped or the volume detached, and both revoke host access; a host still
             // in the ACL means something is (or may be) using the device.
-            java.util.List<String> acl = currentAcl(lbVol);
+            java.util.List<String> acl = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.hosts(lbVol);
             if (!acl.isEmpty()) {
                 throw new CloudRuntimeException("cannot revert volume " + vol.getUuid() + " to snapshot "
                         + snapshot.getUuid() + ": the volume is still exposed to host(s) " + acl

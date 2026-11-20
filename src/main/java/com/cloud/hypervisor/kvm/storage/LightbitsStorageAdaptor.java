@@ -205,13 +205,39 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
 
     @Override
     public boolean deleteStoragePool(String uuid) {
-        POOLS.remove(uuid);
+        KVMStoragePool removed = POOLS.remove(uuid);
+        if (removed == null || !POOLS.isEmpty()) {
+            return true;
+        }
+        // The last Lightbits pool of this host is gone (deleted, or put in maintenance): drop the
+        // NVMe/TCP connections nothing uses any more. The next attach connects again.
+        synchronized (CONNECT_LOCK) {
+            if (!POOLS.isEmpty()) {
+                return true;
+            }
+            try {
+                nvme.disconnectIdleSubsystems();
+                lastLookupConnect = 0;
+            } catch (RuntimeException e) {
+                LOG.warn("Lightbits: could not clean up NVMe/TCP connections after pool {} was removed: {}", uuid, e.toString());
+            }
+        }
         return true;
     }
 
     @Override
     public boolean deleteStoragePool(KVMStoragePool pool) {
         return deleteStoragePool(pool.getUuid());
+    }
+
+    /**
+     * The agent takes this entry when the management server withdraws a pool from the host
+     * (ModifyStoragePoolCommand with add=false, sent for pool maintenance). The interface default
+     * returns true without doing anything, which left the pool registered and the host connected.
+     */
+    @Override
+    public boolean deleteStoragePool(String uuid, Map<String, String> details) {
+        return deleteStoragePool(uuid);
     }
 
     @Override
