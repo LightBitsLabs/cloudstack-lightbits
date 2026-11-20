@@ -170,18 +170,22 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
                 return;
             }
             boolean answered;
+            List<String> endpoints = discoveryEndpoints(pool);
             try {
-                answered = nvme.connect(discoveryEndpoints(pool), LOOKUP_CONNECT_TIMEOUT_MILLIS);
+                answered = nvme.connect(endpoints, LOOKUP_CONNECT_TIMEOUT_MILLIS);
             } catch (CloudRuntimeException e) {
                 state.lastFailure = e.getMessage();
                 backOff(state);
                 throw e;
             }
-            state.lastFailure = null;
             if (answered) {
+                state.lastFailure = null;
                 state.failures = 0;
                 state.notBefore = clock.getAsLong() + LOOKUP_CONNECT_INTERVAL_MILLIS;
             } else {
+                // reported only once the host has no live path left (see above)
+                state.lastFailure = "Lightbits: no NVMe discovery endpoint of pool " + pool.getUuid() + " answered "
+                        + endpoints + "; the host went on with the live paths it had, which can belong to another cluster";
                 backOff(state);
             }
         }

@@ -215,6 +215,19 @@ class LightbitsStorageAdaptorTest {
     }
 
     @Test
+    void fallbackOnAnotherClustersPathKeepsTheReasonForWhenThatPathGoes() {
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.results.put("-a 10.0.1.1 ", new LightbitsNvmeHost.Result(124, "nvme timed out"));
+        assertNull(adaptor.getPhysicalDisk(VOL, poolB));
+        // the only live path (pool A's cluster) goes away during pool B's backoff
+        sys.files.put("/sys/class/nvme/nvme3/state", "connecting");
+        sys.now += 3_000;
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> adaptor.getPhysicalDisk(VOL, poolB));
+        assertTrue(e.getMessage().contains("10.0.1.1:8009") && e.getMessage().contains(POOL_B), e.getMessage());
+        assertEquals(1, sys.connects("10.0.1.1"));
+    }
+
+    @Test
     void rememberedFailureDoesNotBlockTheRescanOnceTheHostIsConnected() {
         noEndpointAnswers();
         assertThrows(CloudRuntimeException.class, () -> adaptor.getPhysicalDisk(VOL, poolA));
