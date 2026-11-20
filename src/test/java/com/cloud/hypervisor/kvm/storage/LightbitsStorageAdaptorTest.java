@@ -202,6 +202,32 @@ class LightbitsStorageAdaptorTest {
     }
 
     @Test
+    void discoveryThatOnlyFallsBackOnPathsOfAnotherClusterBacksOff() {
+        // the host is connected to pool A's cluster; none of pool B's endpoints answers
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.results.put("-a 10.0.1.1 ", new LightbitsNvmeHost.Result(124, "nvme timed out"));
+        sys.connectTakes = LightbitsStorageAdaptor.LOOKUP_CONNECT_TIMEOUT_MILLIS;
+        for (int poll = 0; poll <= 100; poll++) {
+            assertNull(adaptor.getPhysicalDisk(VOL, poolB));
+            sys.now += 3_000;
+        }
+        assertTrue(sys.connects("10.0.1.1") <= 6, "connect attempts without backoff: " + sys.connects("10.0.1.1"));
+    }
+
+    @Test
+    void rememberedFailureDoesNotBlockTheRescanOnceTheHostIsConnected() {
+        noEndpointAnswers();
+        assertThrows(CloudRuntimeException.class, () -> adaptor.getPhysicalDisk(VOL, poolA));
+        // another pool of the same cluster connects the host; the namespace needs a rescan to show
+        sys.results.clear();
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.onRescan = this::deviceAppears;
+        sys.now += 3_000; // pool A is still in its backoff
+        assertNotNull(adaptor.getPhysicalDisk(VOL, poolA));
+        assertEquals(1, sys.connects("10.0.0.1"), "no new connect during the backoff");
+    }
+
+    @Test
     void lookupRescansForADeviceMissedOnAConnectedHost() {
         sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
         sys.onRescan = this::deviceAppears; // the namespace only shows up when the controller is rescanned

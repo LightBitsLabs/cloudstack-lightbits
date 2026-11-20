@@ -147,8 +147,13 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      * count from the end of an attempt, so a slow failure is not retried by the very next poll.
      *
      * A failure to connect is reported to the caller (it carries the diagnosis), and so is
-     * every lookup until the next attempt is due: no connect is made for those, and the caller
-     * ends with the reason instead of a bare "not found".
+     * every lookup until the next attempt is due, for as long as the host has no live path:
+     * no connect is made for those, and the caller ends with the reason instead of a bare
+     * "not found". Once the host has a live path (another pool of the same cluster connected
+     * it, or the kernel reconnected) the lookup goes on to its wait and rescan instead.
+     *
+     * A connect that no endpoint answered and that only went on because the host holds live
+     * paths counts as a failure for the backoff: those paths can belong to another cluster.
      */
     private void connectIfDue(KVMStoragePool pool) {
         if (pool == null) {
@@ -158,25 +163,34 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             LookupConnect state = lookupConnects.computeIfAbsent(pool.getUuid(), k -> new LookupConnect());
             long now = clock.getAsLong();
             if (now < state.notBefore) {
-                if (state.lastFailure != null) {
+                if (state.lastFailure != null && nvme.livePaths().isEmpty()) {
                     throw new CloudRuntimeException(state.lastFailure + " (next attempt in "
                             + ((state.notBefore - now + 999) / 1000) + "s)");
                 }
                 return;
             }
+            boolean answered;
             try {
-                nvme.connect(discoveryEndpoints(pool), LOOKUP_CONNECT_TIMEOUT_MILLIS);
+                answered = nvme.connect(discoveryEndpoints(pool), LOOKUP_CONNECT_TIMEOUT_MILLIS);
             } catch (CloudRuntimeException e) {
-                state.failures++;
                 state.lastFailure = e.getMessage();
-                long backoff = LOOKUP_CONNECT_INTERVAL_MILLIS << Math.min(state.failures, 10);
-                state.notBefore = clock.getAsLong() + Math.min(backoff, LOOKUP_CONNECT_MAX_BACKOFF_MILLIS);
+                backOff(state);
                 throw e;
             }
-            state.failures = 0;
             state.lastFailure = null;
-            state.notBefore = clock.getAsLong() + LOOKUP_CONNECT_INTERVAL_MILLIS;
+            if (answered) {
+                state.failures = 0;
+                state.notBefore = clock.getAsLong() + LOOKUP_CONNECT_INTERVAL_MILLIS;
+            } else {
+                backOff(state);
+            }
         }
+    }
+
+    private void backOff(LookupConnect state) {
+        state.failures++;
+        long backoff = LOOKUP_CONNECT_INTERVAL_MILLIS << Math.min(state.failures, 10);
+        state.notBefore = clock.getAsLong() + Math.min(backoff, LOOKUP_CONNECT_MAX_BACKOFF_MILLIS);
     }
 
     /**

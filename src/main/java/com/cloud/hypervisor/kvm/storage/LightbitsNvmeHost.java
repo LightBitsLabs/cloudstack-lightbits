@@ -161,16 +161,20 @@ class LightbitsNvmeHost {
      * does not need the discovery service); with no live path it fails here, naming every
      * endpoint and its error, instead of waiting for a device that cannot appear.
      */
-    void connect(List<String> endpoints) {
-        connect(endpoints, CONNECT_TIMEOUT_MS);
+    boolean connect(List<String> endpoints) {
+        return connect(endpoints, CONNECT_TIMEOUT_MS);
     }
 
     /**
      * {@link #connect(List)} with the time one endpoint gets to answer. A caller that is polled
      * (the disk lookup) passes a short one, so that a cluster that does not answer costs each
      * poll seconds, not minutes.
+     *
+     * Returns true if a discovery endpoint answered, false if none did and the call went on
+     * because the host holds live paths. Those paths can belong to another Lightbits cluster,
+     * so false is no proof that this pool's cluster is reachable.
      */
-    void connect(List<String> endpoints, long endpointTimeoutMillis) {
+    boolean connect(List<String> endpoints, long endpointTimeoutMillis) {
         if (endpoints.isEmpty()) {
             throw new CloudRuntimeException("Lightbits: the storage pool has no NVMe discovery endpoint");
         }
@@ -191,7 +195,7 @@ class LightbitsNvmeHost {
                     LOG.warn("Lightbits: NVMe discovery succeeded via {} after failing via {}; check those endpoints",
                             endpoint, failures);
                 }
-                return;
+                return true;
             }
             failures.add(endpoint + " (exit " + r.exit + (r.output.isEmpty() ? "" : ": " + r.output) + ")");
         }
@@ -204,6 +208,7 @@ class LightbitsNvmeHost {
         }
         LOG.warn("Lightbits: 'nvme connect-all' failed for every discovery endpoint {}; continuing on the {} live"
                 + " path(s) this host already has", failures, live.size());
+        return false;
     }
 
     /** Every controller of a Lightbits subsystem on this host, from sysfs. */
