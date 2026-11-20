@@ -219,4 +219,48 @@ class LightbitsApiClientFailoverTest {
         // no wall-clock assertion: what matters is that the second endpoint was not started on
         b.verify(0, getRequestedFor(urlEqualTo(VOLUMES + "/" + UUID)));
     }
+
+    @Test
+    void aResponseThatStallsAfterItsHeadersEndsAtTheDeadline() throws Exception {
+        // An endpoint that sends its response headers at once and never the body. The client's
+        // own request timeout stops at the headers, so only a bound on the whole exchange ends this.
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        try (ServerSocket stalling = new ServerSocket(0)) {
+            Thread server = new Thread(() -> {
+                try (java.net.Socket s = stalling.accept()) {
+                    s.getInputStream().read(new byte[4096]);
+                    s.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{")
+                            .getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                    s.getOutputStream().flush();
+                    release.await(60, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (Exception ignored) {
+                    // the test is over
+                }
+            });
+            server.setDaemon(true);
+            server.start();
+            String endpoint = "http://localhost:" + stalling.getLocalPort();
+            LightbitsApiClient c = client(endpoint, endpoint);
+            c.setSettleWait(1100, 1);
+            LightbitsApiException e = org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(java.time.Duration.ofSeconds(20),
+                    () -> assertThrows(LightbitsApiException.class, () -> c.waitForVolume(UUID, null)));
+            assertEquals(Kind.TRANSIENT, e.getKind());
+            assertFalse(e.isNeverSent());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void anEndpointThatDidNotAnswerInTimeIsTriedLastAfterwards() {
+        a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(200).withBody(VOLUME).withFixedDelay(4000)));
+        LightbitsApiClient c = client(url(a), url(b));
+        c.setSettleWait(1100, 1);
+        assertThrows(LightbitsApiException.class, () -> c.waitForVolume(UUID, null));
+        assertTrue(LightbitsApiClient.isMarkedDown(url(a)));
+        // a new client, as the plugin builds per operation, starts on the endpoint that answers
+        a.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[]}").withFixedDelay(4000)));
+        assertEquals(1, client(url(a), url(b)).listVolumes().size());
+        a.verify(0, getRequestedFor(urlPathEqualTo(VOLUMES)));
+    }
 }
