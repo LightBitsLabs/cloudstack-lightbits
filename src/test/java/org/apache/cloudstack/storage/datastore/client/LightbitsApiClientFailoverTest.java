@@ -256,7 +256,8 @@ class LightbitsApiClientFailoverTest {
     @Test
     void anEndpointThatDidNotAnswerInTimeIsTriedLastAfterwards() {
         a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(200).withBody(VOLUME).withFixedDelay(4000)));
-        LightbitsApiClient c = client(url(a), url(b));
+        // only node A is asked, so the outcome does not depend on how close to the deadline it gives up
+        LightbitsApiClient c = client(url(a), url(a));
         c.setSettleWait(1100, 1);
         assertThrows(LightbitsApiException.class, () -> c.waitForVolume(UUID, null));
         assertTrue(LightbitsApiClient.isMarkedDown(url(a)));
