@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- Host cleanup. When the last Lightbits pool of a KVM host is deleted or put in maintenance,
+  the host disconnects from the cluster's NVMe subsystems, but only from a subsystem that
+  shows no namespace on that host: a connection with a volume on it is never touched. The next
+  attach connects again. Before this the connections stayed until the host rebooted.
+- When a host is removed from CloudStack it is taken out of the ACL of every volume of every
+  Lightbits pool, so a machine CloudStack no longer tracks cannot keep access to a volume.
 - API failover: `&endpoints=<host[:port]>,...` lists further API endpoints of the cluster.
   Reads fail over on any transient failure; changes fail over only when the request provably
   never reached the endpoint, otherwise the state of the object decides. An endpoint that

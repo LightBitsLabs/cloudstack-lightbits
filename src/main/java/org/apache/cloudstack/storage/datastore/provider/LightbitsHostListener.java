@@ -64,6 +64,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
     @Inject
     private StoragePoolHostDao storagePoolHostDao;
     @Inject
+    private org.apache.cloudstack.storage.datastore.db.PrimaryDataStoreDao primaryDataStoreDao;
+    @Inject
     private org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao storagePoolDetailsDao;
 
     @Override
@@ -162,6 +164,35 @@ public class LightbitsHostListener implements HypervisorHostListener {
 
     @Override
     public boolean hostAboutToBeRemoved(long hostId) {
+        // Runs while the host's details still exist. Take the host out of the ACL of every
+        // volume it was granted: once CloudStack forgets the host nothing else would, and the
+        // machine could keep writing to a volume that is started elsewhere later.
+        try {
+            com.cloud.host.DetailVO nqn = hostDetailsDao.findDetail(hostId,
+                    org.apache.cloudstack.storage.datastore.driver.LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL);
+            if (nqn == null || nqn.getValue() == null || nqn.getValue().isBlank()) {
+                return true;
+            }
+            for (org.apache.cloudstack.storage.datastore.db.StoragePoolVO pool : primaryDataStoreDao.findPoolsByProvider(
+                    org.apache.cloudstack.storage.datastore.util.LightbitsUtil.PROVIDER_NAME)) {
+                try {
+                    org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
+                            org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());
+                    java.util.List<String> pruned = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(cfg.newClient(),
+                            org.apache.cloudstack.storage.datastore.util.LightbitsUtil.poolPrefix(cfg.getEnvironment(), pool.getId()),
+                            nqn.getValue());
+                    if (!pruned.isEmpty()) {
+                        LOG.warn("Lightbits: host {} is being removed and still had access to {} volume(s) of pool {}: removed it"
+                                + " from their ACLs {}", hostId, pruned.size(), pool.getName(), pruned);
+                    }
+                } catch (RuntimeException e) {
+                    LOG.warn("Lightbits: could not check the volumes of pool {} for ACL entries of host {} that is being"
+                            + " removed: {}", pool.getName(), hostId, e.getMessage());
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: ACL cleanup for host {} that is being removed failed: {}", hostId, e.getMessage());
+        }
         return true;
     }
 

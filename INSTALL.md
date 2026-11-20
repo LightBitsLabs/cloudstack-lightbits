@@ -233,7 +233,10 @@ attaching, snapshotting and deleting volumes is blocked until the pool is update
 - **After a CloudStack package upgrade:** re-copy the jar (package upgrades replace `lib/`), then
   restart.
 - **Uninstall:** put pools into maintenance and delete them, remove the jar from all `lib/`
-  directories, and restart the services.
+  directories, and restart the services. A host disconnects from the cluster when its last
+  Lightbits pool goes; a host that was down at that moment keeps its NVMe/TCP connections
+  until `nvme disconnect -n <subsystem NQN>` is run on it or it reboots (`nvme list-subsys`
+  shows them).
 
 ## Credential rotation
 
