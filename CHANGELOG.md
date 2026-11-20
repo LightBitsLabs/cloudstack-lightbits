@@ -28,6 +28,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   rescan. Paths that are not live are logged as a warning after every attach.
 
 ### Security
+- **The pool token was written to CloudStack's logs.** The token was supplied as
+  `details[0].jwt`, a parameter name CloudStack does not mask, so every pool registration left
+  it in clear text in `apilog.log` and `management-server.log` on the management server. It is
+  now supplied as `details[0].secretkey`, which CloudStack keeps out of its logs. **After
+  upgrading from 0.1.0-alpha.1, treat the tokens used so far as exposed: replace them (and
+  rotate the signing key if the logs left the server), and remove the old log files.**
+- Replacing the token of an existing pool now works, from a file on the management server
+  (`updateStoragePool details[0].tokenFile=<path>`, see docs/jwt-rotation.md), so the new
+  token never passes through the API or its logs. The previously documented command
+  (`details[0].jwt=<token>`) overwrote the stored token's bookkeeping with a clear-text value
+  cut at 255 characters and broke the pool; such a value is now rejected and removed and the
+  pool keeps working on its previous token.
+- An expired or rejected token produces an error that says so and how to set a new one.
 - A volume's device is handed to a VM only after the NVMe namespace's own UUID and subsystem
   were matched against the volume; a stale or foreign device link is refused.
 - Commands on the KVM hosts (`nvme`, `modprobe`, `qemu-img`) run as argument vectors with

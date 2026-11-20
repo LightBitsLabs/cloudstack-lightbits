@@ -63,7 +63,6 @@ import com.cloud.storage.VolumeVO;
 import com.cloud.storage.StoragePool;
 import com.cloud.storage.Volume;
 import com.cloud.utils.Pair;
-import com.cloud.utils.crypt.DBEncryptionUtil;
 import com.cloud.utils.exception.CloudRuntimeException;
 
 public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
@@ -160,9 +159,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     /** Rebuild the validated pool config (incl. environment) from persisted details. */
     LightbitsPoolConfig configForPool(long poolId) {
-        Map<String, String> details = storagePoolDetailsDao.listDetailsKeyPairs(poolId);
-        String jwt = DBEncryptionUtil.decrypt(LightbitsPoolConfig.readChunked(details, LightbitsPoolConfig.KEY_JWT));
-        return LightbitsPoolConfig.fromDetails(details, jwt);
+        return org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
     }
 
     /** Build an API client for a pool (by id) from its persisted (JWT-encrypted) details. */
