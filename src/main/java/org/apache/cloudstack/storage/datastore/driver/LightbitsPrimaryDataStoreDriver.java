@@ -788,12 +788,40 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canProvideVolumeStats() {
-        return false;
+        // The cluster knows how much of each volume holds data; a KVM host would only see a
+        // raw block device of the full size.
+        return true;
     }
 
     @Override
     public Pair<Long, Long> getVolumeStats(StoragePool storagePool, String volumeId) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        return volumeStats(clientForPool(storagePool.getId()), volumeId);
+    }
+
+    /**
+     * Pair of (bytes holding data, provisioned size) for a volume addressed by its Lightbits
+     * UUID, which is what CloudStack stores as the volume's path. "Holding data" is the
+     * logical figure, before compression and replication, capped at the size: it is what the
+     * owner of the volume consumed, independent of how the cluster stores it.
+     *
+     * Returns null when the volume is not on the cluster or the cluster does not report its
+     * usage, which CloudStack treats as "no statistics for this round"; a failure to reach the
+     * cluster propagates. A made-up zero would be shown and metered as a real value.
+     */
+    static Pair<Long, Long> volumeStats(LightbitsApiClient client, String volumeId) {
+        if (volumeId == null || !volumeId.matches("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")) {
+            return null;   // not a volume this plugin created; never put a foreign value into a request path
+        }
+        java.util.Optional<org.apache.cloudstack.storage.datastore.client.model.Volume> found = client.getVolume(volumeId);
+        if (found.isEmpty() || found.get().isDeletedOrDeleting()) {
+            return null;
+        }
+        long size = found.get().getSizeBytes();
+        long used = found.get().getLogicalUsedBytes();
+        if (used < 0) {
+            return null;
+        }
+        return new Pair<>(Math.min(used, size), size);
     }
 
     @Override

@@ -40,4 +40,60 @@ class LightbitsPrimaryDataStoreDriverTest {
             assertEquals("true", caps.get(c.toString()), c.toString());
         }
     }
+
+    // ---- per-volume statistics ----
+
+    private static final String VOL = "03c281aa-a348-4933-8a6e-ee5bab91a0df";
+
+    private static com.cloud.utils.Pair<Long, Long> statsFor(int status, String body) {
+        com.github.tomakehurst.wiremock.WireMockServer wm = new com.github.tomakehurst.wiremock.WireMockServer(
+                com.github.tomakehurst.wiremock.core.WireMockConfiguration.options().dynamicPort());
+        wm.start();
+        try {
+            wm.stubFor(com.github.tomakehurst.wiremock.client.WireMock.get(
+                    com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/api/v2/projects/default/volumes/" + VOL))
+                    .willReturn(com.github.tomakehurst.wiremock.client.WireMock.aResponse().withStatus(status).withBody(body)));
+            org.apache.cloudstack.storage.datastore.client.LightbitsApiClient client =
+                    new org.apache.cloudstack.storage.datastore.client.LightbitsApiClient("http://localhost:" + wm.port(), "jwt",
+                            "default", java.net.http.HttpClient.newHttpClient(), 1);
+            return LightbitsPrimaryDataStoreDriver.volumeStats(client, VOL);
+        } finally {
+            wm.stop();
+        }
+    }
+
+    private static String volume(String state, String size, String statistics) {
+        return "{\"UUID\":\"" + VOL + "\",\"name\":\"cs-x\",\"state\":\"" + state + "\",\"size\":\"" + size + "\""
+                + (statistics == null ? "" : ",\"statistics\":" + statistics) + "}";
+    }
+
+    @Test
+    void volumeStatsReportLogicalUseAndSize() {
+        com.cloud.utils.Pair<Long, Long> stats = statsFor(200, volume("Available", "8589934592",
+                "{\"logicalUsedStorage\":\"903396608\",\"physicalUsedStorage\":\"1024\",\"compressionRatio\":0.1}"));
+        assertEquals(903396608L, stats.first());
+        assertEquals(8589934592L, stats.second());
+    }
+
+    @Test
+    void volumeStatsNeverReportMoreUsedThanTheSize() {
+        com.cloud.utils.Pair<Long, Long> stats = statsFor(200, volume("Available", "1073741824", "{\"logicalUsedStorage\":\"2147483648\"}"));
+        assertEquals(1073741824L, stats.first());
+    }
+
+    @Test
+    void volumeStatsAreAbsentRatherThanMadeUp() {
+        org.junit.jupiter.api.Assertions.assertNull(statsFor(404, "{}"), "volume not on the cluster");
+        org.junit.jupiter.api.Assertions.assertNull(statsFor(200, volume("Deleting", "1073741824", "{\"logicalUsedStorage\":\"5\"}")));
+        org.junit.jupiter.api.Assertions.assertNull(statsFor(200, volume("Available", "1073741824", null)), "no statistics reported");
+        org.junit.jupiter.api.Assertions.assertNull(statsFor(200, volume("Available", "1073741824", "{\"logicalUsedStorage\":\"n/a\"}")));
+        org.junit.jupiter.api.Assertions.assertNull(LightbitsPrimaryDataStoreDriver.volumeStats(null, "../../nodes"), "not a volume UUID");
+        org.junit.jupiter.api.Assertions.assertNull(LightbitsPrimaryDataStoreDriver.volumeStats(null, null));
+    }
+
+    @Test
+    void aClusterThatCannotBeReachedIsAnErrorNotAnEmptyVolume() {
+        org.junit.jupiter.api.Assertions.assertThrows(org.apache.cloudstack.storage.datastore.client.LightbitsApiException.class,
+                () -> statsFor(503, "no leader"));
+    }
 }
