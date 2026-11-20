@@ -171,8 +171,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     }
 
     LightbitsApiClient clientFor(LightbitsPoolConfig cfg) {
-        // v1 dev/lab TLS: trust-all (see open item L3). Production uses the validated default.
-        return LightbitsApiClient.insecureForDevelopment(cfg.apiEndpoint(), cfg.getJwt(), cfg.getProject());
+        return cfg.newClient();
     }
 
     @Override

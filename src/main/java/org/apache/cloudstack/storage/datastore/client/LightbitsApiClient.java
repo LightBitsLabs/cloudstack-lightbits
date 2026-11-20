@@ -16,13 +16,21 @@
 package org.apache.cloudstack.storage.datastore.client;
 
 import java.io.IOException;
+import java.net.ConnectException;
+import java.net.Socket;
 import java.net.URI;
 import java.net.URLEncoder;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.nio.channels.UnresolvedAddressException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -30,10 +38,16 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
+import javax.net.ssl.X509ExtendedTrustManager;
 
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiException.Kind;
 import org.apache.cloudstack.storage.datastore.client.model.Snapshot;
@@ -69,7 +83,28 @@ public class LightbitsApiClient {
     private static final int MAX_ATTEMPTS = 3;
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
-    private final String base;
+    /**
+     * Endpoints that recently refused a connection or did not answer in time, with the time until which they
+     * are tried last. Shared by all clients: the plugin builds a client per operation, and
+     * without this every operation would pay the connect timeout of a dead node again.
+     */
+    private static final Map<String, Long> DOWN_UNTIL = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long DOWN_MILLIS = 60_000;
+
+    /** For tests: the list is shared by every client of the JVM, and test servers reuse ports. */
+    static void forgetDownEndpoints() {
+        DOWN_UNTIL.clear();
+    }
+
+    static boolean isMarkedDown(String base) {
+        Long until = DOWN_UNTIL.get(base);
+        return until != null && until > System.currentTimeMillis();
+    }
+
+    /** API endpoints of ONE cluster, e.g. https://10.0.0.1:443. Every node serves the same state. */
+    private final List<String> bases;
+    /** Index of the endpoint that answered last; calls start there instead of re-probing a dead node. */
+    private volatile int preferred;
     private final String jwt;
     private final String project;
     private final HttpClient http;
@@ -79,12 +114,28 @@ public class LightbitsApiClient {
     private long settleTimeoutMillis = 120_000;
     private long settlePollMillis = 250;
 
+    /** Client validating the cluster certificate against the JVM trust store (CA and host name). */
     public LightbitsApiClient(String endpoint, String jwt, String project) {
-        this(endpoint, jwt, project, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(), 1000);
+        this(List.of(endpoint), jwt, project);
+    }
+
+    public LightbitsApiClient(List<String> endpoints, String jwt, String project) {
+        this(endpoints, jwt, project, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(), 1000);
     }
 
     public LightbitsApiClient(String endpoint, String jwt, String project, HttpClient http, long retryBackoffMillis) {
-        this.base = endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint;
+        this(List.of(endpoint), jwt, project, http, retryBackoffMillis);
+    }
+
+    public LightbitsApiClient(List<String> endpoints, String jwt, String project, HttpClient http, long retryBackoffMillis) {
+        if (endpoints == null || endpoints.isEmpty()) {
+            throw new IllegalArgumentException("at least one Lightbits API endpoint is required");
+        }
+        List<String> b = new ArrayList<>();
+        for (String endpoint : endpoints) {
+            b.add(endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint);
+        }
+        this.bases = List.copyOf(b);
         this.jwt = jwt;
         this.project = project;
         this.http = http;
@@ -92,24 +143,90 @@ public class LightbitsApiClient {
     }
 
     /**
-     * DEV/LAB ONLY: trusts any certificate CHAIN (self-signed clusters). Note that
-     * hostname verification still applies — the JDK HttpClient cannot disable it per
-     * client, so the cluster certificate's SAN must match the endpoint address even
-     * in dev. Production pools must use a fully validated chain (default constructor).
+     * Client that accepts exactly the certificate(s) whose SHA-256 fingerprint is pinned, and
+     * nothing else. This is the way to verify a Lightbits cluster: its API certificate is issued
+     * to the name {@code api.service} by a CA internal to the cluster, so CA and host name
+     * validation of an endpoint addressed by IP cannot pass. Every node presents the same
+     * certificate, so one fingerprint covers all endpoints; a second fingerprint is accepted so a
+     * certificate rotation can be staged (add the new one before, remove the old one after).
      */
-    public static LightbitsApiClient insecureForDevelopment(String endpoint, String jwt, String project) {
+    public static LightbitsApiClient pinned(List<String> endpoints, String jwt, String project, List<String> sha256Fingerprints) {
+        return pinned(endpoints, jwt, project, sha256Fingerprints, 1000);
+    }
+
+    static LightbitsApiClient pinned(List<String> endpoints, String jwt, String project, List<String> sha256Fingerprints,
+                                     long retryBackoffMillis) {
+        if (sha256Fingerprints == null || sha256Fingerprints.isEmpty()) {
+            throw new IllegalArgumentException("at least one certificate fingerprint is required");
+        }
+        List<String> pins = new ArrayList<>();
+        for (String f : sha256Fingerprints) {
+            pins.add(normalizeFingerprint(f));
+        }
         try {
             SSLContext ssl = SSLContext.getInstance("TLS");
-            ssl.init(null, new TrustManager[] {new X509TrustManager() {
-                @Override public void checkClientTrusted(X509Certificate[] c, String a) { }
-                @Override public void checkServerTrusted(X509Certificate[] c, String a) { }
-                @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-            }}, new SecureRandom());
+            ssl.init(null, new TrustManager[] {new PinnedTrustManager(pins)}, new SecureRandom());
             HttpClient http = HttpClient.newBuilder().sslContext(ssl).connectTimeout(Duration.ofSeconds(10)).build();
-            return new LightbitsApiClient(endpoint, jwt, project, http, 1000);
-        } catch (Exception e) {
-            throw new LightbitsApiException(Kind.UNKNOWN, "failed to build insecure client", e);
+            return new LightbitsApiClient(endpoints, jwt, project, http, retryBackoffMillis);
+        } catch (java.security.GeneralSecurityException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "failed to build the TLS context", e);
         }
+    }
+
+    /**
+     * Canonical form of a SHA-256 certificate fingerprint: 64 upper-case hex digits. Accepts the
+     * {@code openssl x509 -fingerprint -sha256} form with colons.
+     */
+    public static String normalizeFingerprint(String fingerprint) {
+        String f = fingerprint == null ? "" : fingerprint.replace(":", "").replace(" ", "").trim().toUpperCase();
+        if (!f.matches("[0-9A-F]{64}")) {
+            throw new IllegalArgumentException("a certificate fingerprint must be a SHA-256 fingerprint of 64 hex digits, "
+                    + "with or without colons (read it with: openssl x509 -fingerprint -sha256 -noout)");
+        }
+        return f;
+    }
+
+    /**
+     * Trusts a server certificate only by its SHA-256 fingerprint. Extending
+     * {@link X509ExtendedTrustManager} makes this the complete decision: the JDK applies its own
+     * host name check only around a plain X509TrustManager, and a pinned certificate identifies
+     * the cluster more strictly than a name would.
+     */
+    static final class PinnedTrustManager extends X509ExtendedTrustManager {
+        private final List<String> pins;
+
+        PinnedTrustManager(List<String> pins) {
+            this.pins = List.copyOf(pins);
+        }
+
+        private void verify(X509Certificate[] chain) throws CertificateException {
+            if (chain == null || chain.length == 0) {
+                throw new CertificateException("the Lightbits API presented no certificate");
+            }
+            String actual;
+            try {
+                StringBuilder sb = new StringBuilder();
+                for (byte b : MessageDigest.getInstance("SHA-256").digest(chain[0].getEncoded())) {
+                    sb.append(String.format("%02X", b));
+                }
+                actual = sb.toString();
+            } catch (java.security.NoSuchAlgorithmException e) {
+                throw new CertificateException(e);
+            }
+            if (!pins.contains(actual)) {
+                throw new CertificateException("the Lightbits API certificate (SHA-256 fingerprint " + actual
+                        + ") does not match the fingerprint pinned on this storage pool. If the cluster certificate"
+                        + " was replaced, update the pool's fingerprint; otherwise this is not the expected cluster.");
+            }
+        }
+
+        @Override public void checkServerTrusted(X509Certificate[] c, String a) throws CertificateException { verify(c); }
+        @Override public void checkServerTrusted(X509Certificate[] c, String a, Socket s) throws CertificateException { verify(c); }
+        @Override public void checkServerTrusted(X509Certificate[] c, String a, SSLEngine e) throws CertificateException { verify(c); }
+        @Override public void checkClientTrusted(X509Certificate[] c, String a) throws CertificateException { throw new CertificateException("not a server"); }
+        @Override public void checkClientTrusted(X509Certificate[] c, String a, Socket s) throws CertificateException { throw new CertificateException("not a server"); }
+        @Override public void checkClientTrusted(X509Certificate[] c, String a, SSLEngine e) throws CertificateException { throw new CertificateException("not a server"); }
+        @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
     }
 
     public String getProject() {
@@ -284,7 +401,9 @@ public class LightbitsApiClient {
             // Project-scoped route: a project-scoped token is denied the flat /api/v2/volumes.
             created = parse(execute("POST", projectColl("volumes"), body.toString()), Volume.class);
         } catch (LightbitsApiException e) {
-            if (e.getKind() == Kind.CONFLICT) {
+            if (e.getKind() == Kind.CONFLICT || outcomeUnknown(e)) {
+                // already there, or the POST failed after it was sent: the name is ours alone,
+                // so if the volume exists the create took effect and is settled like any other
                 created = getVolumeByName(name).orElseThrow(() -> e);
                 createdHere = false;
             } else {
@@ -436,8 +555,8 @@ public class LightbitsApiClient {
      */
     private String pollGet(String path, long deadlineNanos) {
         long leftMillis = (deadlineNanos - System.nanoTime()) / 1_000_000L;
-        long timeoutMillis = Math.max(1000L, Math.min(REQUEST_TIMEOUT.toMillis(), leftMillis));
-        return execute("GET", path, null, null, Duration.ofMillis(timeoutMillis), 1);
+        long timeoutMillis = Math.max(MIN_POLL_TIMEOUT_MILLIS, Math.min(REQUEST_TIMEOUT.toMillis(), leftMillis));
+        return execute("GET", path, null, null, Duration.ofMillis(timeoutMillis), 1, deadlineNanos);
     }
 
     public Optional<Volume> getVolumeByName(String name) {
@@ -576,7 +695,7 @@ public class LightbitsApiClient {
      * change that happened as a failure. The caller decides from the volume's state.
      */
     private String executeConditional(String method, String path, String jsonBody, String ifMatchEtag) {
-        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, 1);
+        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, 1, NO_DEADLINE);
     }
 
     /** Idempotent delete via the project-scoped route. Returns false if already gone. */
@@ -588,8 +707,17 @@ public class LightbitsApiClient {
             if (e.getKind() == Kind.NOT_FOUND) {
                 return false;
             }
+            // the DELETE may have been applied before it failed: the volume's state decides
+            if (outcomeUnknown(e) && getVolume(uuid).isEmpty()) {
+                return true;
+            }
             throw e;
         }
+    }
+
+    /** A mutating call that failed after it was sent: it may or may not have been applied. */
+    private static boolean outcomeUnknown(LightbitsApiException e) {
+        return e.getKind() == Kind.TRANSIENT && !e.isNeverSent();
     }
 
     // ---------------- snapshots ----------------
@@ -606,7 +734,7 @@ public class LightbitsApiClient {
             // /api/v2/snapshots route does not exist on LightOS (404).
             created = parse(execute("POST", projectColl("snapshots"), body.toString()), Snapshot.class);
         } catch (LightbitsApiException e) {
-            if (e.getKind() == Kind.CONFLICT) {
+            if (e.getKind() == Kind.CONFLICT || outcomeUnknown(e)) {
                 created = getSnapshotByName(name).orElseThrow(() -> e);
                 createdHere = false;
             } else {
@@ -709,7 +837,9 @@ public class LightbitsApiClient {
             // Project-scoped route (flat /api/v2/volumes is denied to a project-scoped token).
             created = parse(execute("POST", projectColl("volumes"), body.toString()), Volume.class);
         } catch (LightbitsApiException e) {
-            if (e.getKind() == Kind.CONFLICT) {
+            if (e.getKind() == Kind.CONFLICT || outcomeUnknown(e)) {
+                // already there, or the POST failed after it was sent: the name is ours alone,
+                // so if the volume exists the create took effect and is settled like any other
                 created = getVolumeByName(name).orElseThrow(() -> e);
                 createdHere = false;
             } else {
@@ -829,50 +959,202 @@ public class LightbitsApiClient {
         return execute(method, path, jsonBody, null);
     }
 
+    /**
+     * Send one API call, failing over across the cluster's endpoints.
+     *
+     * Reads (GET) move to the next endpoint on any transient failure (connection failure,
+     * timeout, 5xx) and the whole round is repeated with backoff. Mutating calls move on only
+     * when the request provably never reached the endpoint (connection refused, connect timeout,
+     * unresolvable name, failed TLS handshake): after a 5xx, a read timeout or a reset the change
+     * may already be applied, so that failure is reported as is and the caller decides by
+     * looking at the object's state. A 4xx is a definitive answer from the cluster and is never
+     * retried on another endpoint.
+     */
     private String execute(String method, String path, String jsonBody, String ifMatchEtag) {
-        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, MAX_ATTEMPTS);
+        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, MAX_ATTEMPTS, NO_DEADLINE);
     }
 
-    private String execute(String method, String path, String jsonBody, String ifMatchEtag, Duration timeout, int attempts) {
+    private static final long NO_DEADLINE = Long.MIN_VALUE;
+    private static final long MIN_POLL_TIMEOUT_MILLIS = 1000L;
+
+    /**
+     * {@code rounds} passes over all endpoints. A settle poll uses one round and passes its
+     * absolute deadline ({@link System#nanoTime()} based): all endpoints share it, so each
+     * attempt gets only what is left and a failover stops once the deadline has passed.
+     */
+    private String execute(String method, String path, String jsonBody, String ifMatchEtag, Duration timeout, int rounds,
+            long deadlineNanos) {
+        boolean read = "GET".equals(method);
         LightbitsApiException last = null;
-        for (int attempt = 1; attempt <= attempts; attempt++) {
-            try {
-                HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(base + path))
-                        .timeout(timeout)
-                        .header("Authorization", "Bearer " + jwt)
-                        .header("Content-Type", "application/json");
-                if (ifMatchEtag != null && !ifMatchEtag.isEmpty()) {
-                    rb.header("If-Match", ifMatchEtag);
-                }
-                HttpRequest.BodyPublisher pub = jsonBody == null
-                        ? HttpRequest.BodyPublishers.noBody()
-                        : HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8);
-                HttpResponse<String> resp = http.send(rb.method(method, pub).build(),
-                        HttpResponse.BodyHandlers.ofString());
-                int status = resp.statusCode();
-                if (status >= 200 && status < 300) {
-                    return resp.body();
-                }
-                Kind kind = LightbitsApiException.kindOf(status, resp.body());
-                LightbitsApiException e = new LightbitsApiException(kind, status,
-                        method + " " + path + " -> HTTP " + status + ": " + snippet(resp.body()));
-                if (kind != Kind.TRANSIENT) {
-                    throw e;
-                }
-                last = e;
-            } catch (LightbitsApiException e) {
-                throw e;
-            } catch (IOException | InterruptedException e) {
-                if (e instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-                last = new LightbitsApiException(Kind.TRANSIENT, method + " " + path + " failed: " + e.getMessage(), e);
+        for (int round = 1; round <= rounds; round++) {
+            int start = preferred;
+            // endpoints known to be down go last: still tried, but not before the live ones
+            List<Integer> order = new ArrayList<>();
+            List<Integer> down = new ArrayList<>();
+            for (int i = 0; i < bases.size(); i++) {
+                int idx = (start + i) % bases.size();
+                (isMarkedDown(bases.get(idx)) ? down : order).add(idx);
             }
-            if (attempt < attempts) {
-                sleep(retryBackoffMillis * attempt);
+            order.addAll(down);
+            String failedVia = null;
+            for (int idx : order) {
+                String base = bases.get(idx);
+                Duration attemptTimeout = timeout;
+                if (deadlineNanos != NO_DEADLINE) {
+                    long leftMillis = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+                    if (last != null && leftMillis <= 0) {
+                        throw last;
+                    }
+                    // rounded up: an attempt that runs into the deadline ends at or after it, never a
+                    // fraction of a millisecond before, where the caller would start one more poll
+                    attemptTimeout = Duration.ofMillis(Math.max(MIN_POLL_TIMEOUT_MILLIS, Math.min(timeout.toMillis(), leftMillis + 1)));
+                }
+                try {
+                    String body = send(base, method, path, jsonBody, ifMatchEtag, attemptTimeout);
+                    DOWN_UNTIL.remove(base);
+                    if (failedVia != null) {
+                        preferred = idx;
+                        LOG.warn("Lightbits API {} {} succeeded via {} after failing via {} ({}); check that endpoint",
+                                method, path, base, failedVia, last == null ? "?" : last.getMessage());
+                    }
+                    return body;
+                } catch (LightbitsApiException e) {
+                    if (e.getKind() != Kind.TRANSIENT) {
+                        throw e;
+                    }
+                    // Tried last for a while: an endpoint that could not be reached, and one that
+                    // took a request and did not answer in time. This is only the order of the
+                    // next attempts; whether a mutation may be sent again is decided below.
+                    if (e.isNeverSent() || timedOut(e)) {
+                        DOWN_UNTIL.put(base, System.currentTimeMillis() + DOWN_MILLIS);
+                    }
+                    if (!read && !e.isNeverSent()) {
+                        throw e;
+                    }
+                    last = e;
+                    failedVia = base;
+                }
+            }
+            if (round < rounds) {
+                sleep(retryBackoffMillis * round);
             }
         }
         throw last;
+    }
+
+    private String send(String base, String method, String path, String jsonBody, String ifMatchEtag, Duration timeout) {
+        try {
+            HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(base + path))
+                    .timeout(timeout)
+                    .header("Authorization", "Bearer " + jwt)
+                    .header("Content-Type", "application/json");
+            if (ifMatchEtag != null && !ifMatchEtag.isEmpty()) {
+                rb.header("If-Match", ifMatchEtag);
+            }
+            HttpRequest.BodyPublisher pub = jsonBody == null
+                    ? HttpRequest.BodyPublishers.noBody()
+                    : HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8);
+            HttpResponse<String> resp = exchange(rb.method(method, pub).build(), timeout);
+            int status = resp.statusCode();
+            if (status >= 200 && status < 300) {
+                return resp.body();
+            }
+            throw new LightbitsApiException(LightbitsApiException.kindOf(status, resp.body()), status,
+                    method + " " + path + " via " + base + " -> HTTP " + status + ": " + snippet(resp.body()));
+        } catch (IOException | InterruptedException | UnresolvedAddressException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            LightbitsApiException failure = new LightbitsApiException(Kind.TRANSIENT,
+                    method + " " + path + " via " + base + " failed: " + describe(e), e);
+            return rethrow(neverReachedTheEndpoint(e) ? failure.neverSent() : failure);
+        }
+    }
+
+    /**
+     * The whole exchange within {@code timeout}, body included. The request timeout of the JDK
+     * client ends when the response headers arrive; an endpoint that sends headers and then
+     * stalls would hold a blocking send for as long as it likes, past the failover and past a
+     * settle deadline. The exchange is abandoned at the limit instead and reported as a timeout.
+     */
+    private HttpResponse<String> exchange(HttpRequest request, Duration timeout) throws IOException, InterruptedException {
+        CompletableFuture<HttpResponse<String>> pending = http.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        try {
+            return pending.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            pending.cancel(true);
+            throw new HttpTimeoutException("no complete response within " + timeout.toMillis() + " ms");
+        } catch (InterruptedException e) {
+            pending.cancel(true);
+            throw e;
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof IOException) {
+                throw (IOException) cause;
+            }
+            if (cause instanceof UnresolvedAddressException) {
+                throw (UnresolvedAddressException) cause;
+            }
+            throw new IOException(cause == null ? e.toString() : cause.toString(), cause);
+        }
+    }
+
+    /** True when the endpoint accepted the request (or the connection) and did not answer in time. */
+    static boolean timedOut(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof HttpTimeoutException) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    private static String rethrow(LightbitsApiException e) {
+        throw e;
+    }
+
+    /** True for failures that happen before any byte of the request is sent. */
+    static boolean neverReachedTheEndpoint(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof ConnectException || t instanceof HttpConnectTimeoutException
+                    || t instanceof UnknownHostException || t instanceof UnresolvedAddressException
+                    || t instanceof SSLHandshakeException || t instanceof CertificateException) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A message an operator can act on. A pinning refusal is buried under two SSL wrappers, and
+     * a failed CA validation surfaces as "PKIX path building failed", which says nothing about
+     * what to do.
+     */
+    static String describe(Throwable e) {
+        boolean handshake = false;
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof CertificateException && t.getMessage() != null && t.getMessage().contains("pinned")) {
+                return t.getMessage();
+            }
+            handshake |= t instanceof SSLHandshakeException;
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+        if (handshake) {
+            return "the certificate of the Lightbits API is not trusted (" + msg + "). A Lightbits cluster is verified by"
+                    + " its certificate fingerprint: read it on a Lightbits node with 'openssl s_client -connect 127.0.0.1:443"
+                    + " </dev/null | openssl x509 -fingerprint -sha256 -noout' and set it as the " + "tlsFingerprint"
+                    + " detail of the storage pool";
+        }
+        return msg;
     }
 
     private static void sleep(long ms) {

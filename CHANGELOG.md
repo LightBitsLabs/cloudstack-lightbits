@@ -5,6 +5,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- API failover: `&endpoints=<host[:port]>,...` lists further API endpoints of the cluster.
+  Reads fail over on any transient failure; changes fail over only when the request provably
+  never reached the endpoint, otherwise the state of the object decides. An endpoint that
+  refused or timed out a connection is tried last for the next minute.
+- TLS certificate pinning: `&fingerprint=<SHA-256>` (two values during a certificate rotation).
+  Both settings can be changed on an existing pool with `updateStoragePool`
+  (`tlsFingerprint`, `apiEndpoints`).
+
+### Security
+- The plugin no longer accepts any certificate from the Lightbits API. A pool is either pinned
+  to a fingerprint or validated against the management server's trust store. **Pools created
+  with 0.1.0-alpha.1 need their fingerprint set after the upgrade** (see INSTALL.md).
+
 ### Fixed
 - Snapshot revert never reached the plugin: the driver did not advertise the
   `CAN_REVERT_VOLUME_TO_SNAPSHOT` capability, so CloudStack rejected every revert.
@@ -15,6 +29,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Concurrent ACL updates of one volume could drop a host; updates are now conditional on the
   volume ETag and retried.
 - A failed clone left its clone-source snapshot behind.
+- A 5xx answer whose body mentions "quota" is treated as a transient failure (it fails over and
+  is retried) instead of a quota error.
+- A wait for a volume or snapshot to settle no longer runs past its deadline when the first API
+  endpoint is slow: all endpoints share the one deadline.
+- An `endpoints` entry the HTTP client cannot use (for example `bad..host`), or a list longer
+  than the 255 characters CloudStack can store, is rejected when the pool is registered.
 
 ### Changed
 - Revert is refused when the volume was grown after the snapshot was taken (a rollback would

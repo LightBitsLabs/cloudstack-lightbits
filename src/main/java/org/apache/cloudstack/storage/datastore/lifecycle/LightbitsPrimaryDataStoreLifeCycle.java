@@ -185,8 +185,7 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         LightbitsApiClient create(LightbitsPoolConfig cfg);
     }
 
-    private ClientFactory clientFactory = cfg ->
-            LightbitsApiClient.insecureForDevelopment(cfg.apiEndpoint(), cfg.getJwt(), cfg.getProject());
+    private ClientFactory clientFactory = LightbitsPoolConfig::newClient;
 
     public void setClientFactory(ClientFactory factory) {
         this.clientFactory = factory;

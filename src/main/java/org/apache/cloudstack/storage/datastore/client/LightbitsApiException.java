@@ -31,6 +31,7 @@ public class LightbitsApiException extends RuntimeException {
 
     private final Kind kind;
     private final int httpStatus;
+    private boolean neverSent;
 
     public LightbitsApiException(Kind kind, int httpStatus, String message) {
         super(message);
@@ -52,6 +53,21 @@ public class LightbitsApiException extends RuntimeException {
         return httpStatus;
     }
 
+    /** Marks a failure where the request provably never reached the cluster (see {@link #isNeverSent()}). */
+    public LightbitsApiException neverSent() {
+        this.neverSent = true;
+        return this;
+    }
+
+    /**
+     * True when the request provably never reached the cluster: connection refused, connect
+     * timeout, unresolvable name, failed TLS handshake. Only such a failure of a mutating call
+     * may be sent again; after a 5xx, a read timeout or a reset the change may have been applied.
+     */
+    public boolean isNeverSent() {
+        return neverSent;
+    }
+
     public static Kind kindOf(int status, String body) {
         switch (status) {
             case 400: return Kind.INVALID;
@@ -61,10 +77,14 @@ public class LightbitsApiException extends RuntimeException {
             case 409: return Kind.CONFLICT;
             case 412: return Kind.PRECONDITION;
             default:
-                if (status == 507 || (body != null && body.toLowerCase().contains("quota"))) {
+                if (status == 507) {
                     return Kind.QUOTA;
                 }
-                return status >= 500 ? Kind.TRANSIENT : Kind.UNKNOWN;
+                if (status >= 500) {
+                    // a failing node may mention anything in its body; a 5xx must stay retryable
+                    return Kind.TRANSIENT;
+                }
+                return body != null && body.toLowerCase().contains("quota") ? Kind.QUOTA : Kind.UNKNOWN;
         }
     }
 }
