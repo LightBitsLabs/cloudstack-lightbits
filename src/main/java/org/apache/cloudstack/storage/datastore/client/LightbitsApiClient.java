@@ -549,8 +549,8 @@ public class LightbitsApiClient {
      */
     private String pollGet(String path, long deadlineNanos) {
         long leftMillis = (deadlineNanos - System.nanoTime()) / 1_000_000L;
-        long timeoutMillis = Math.max(1000L, Math.min(REQUEST_TIMEOUT.toMillis(), leftMillis));
-        return execute("GET", path, null, null, Duration.ofMillis(timeoutMillis), 1);
+        long timeoutMillis = Math.max(MIN_POLL_TIMEOUT_MILLIS, Math.min(REQUEST_TIMEOUT.toMillis(), leftMillis));
+        return execute("GET", path, null, null, Duration.ofMillis(timeoutMillis), 1, deadlineNanos);
     }
 
     public Optional<Volume> getVolumeByName(String name) {
@@ -689,7 +689,7 @@ public class LightbitsApiClient {
      * change that happened as a failure. The caller decides from the volume's state.
      */
     private String executeConditional(String method, String path, String jsonBody, String ifMatchEtag) {
-        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, 1);
+        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, 1, NO_DEADLINE);
     }
 
     /** Idempotent delete via the project-scoped route. Returns false if already gone. */
@@ -965,11 +965,19 @@ public class LightbitsApiClient {
      * retried on another endpoint.
      */
     private String execute(String method, String path, String jsonBody, String ifMatchEtag) {
-        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, MAX_ATTEMPTS);
+        return execute(method, path, jsonBody, ifMatchEtag, REQUEST_TIMEOUT, MAX_ATTEMPTS, NO_DEADLINE);
     }
 
-    /** {@code rounds} passes over all endpoints; a settle poll uses one round and a capped timeout. */
-    private String execute(String method, String path, String jsonBody, String ifMatchEtag, Duration timeout, int rounds) {
+    private static final long NO_DEADLINE = Long.MIN_VALUE;
+    private static final long MIN_POLL_TIMEOUT_MILLIS = 1000L;
+
+    /**
+     * {@code rounds} passes over all endpoints. A settle poll uses one round and passes its
+     * absolute deadline ({@link System#nanoTime()} based): all endpoints share it, so each
+     * attempt gets only what is left and a failover stops once the deadline has passed.
+     */
+    private String execute(String method, String path, String jsonBody, String ifMatchEtag, Duration timeout, int rounds,
+            long deadlineNanos) {
         boolean read = "GET".equals(method);
         LightbitsApiException last = null;
         for (int round = 1; round <= rounds; round++) {
@@ -985,8 +993,16 @@ public class LightbitsApiClient {
             String failedVia = null;
             for (int idx : order) {
                 String base = bases.get(idx);
+                Duration attemptTimeout = timeout;
+                if (deadlineNanos != NO_DEADLINE) {
+                    long leftMillis = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+                    if (last != null && leftMillis <= 0) {
+                        throw last;
+                    }
+                    attemptTimeout = Duration.ofMillis(Math.max(MIN_POLL_TIMEOUT_MILLIS, Math.min(timeout.toMillis(), leftMillis)));
+                }
                 try {
-                    String body = send(base, method, path, jsonBody, ifMatchEtag, timeout);
+                    String body = send(base, method, path, jsonBody, ifMatchEtag, attemptTimeout);
                     DOWN_UNTIL.remove(base);
                     if (failedVia != null) {
                         preferred = idx;
@@ -1084,8 +1100,8 @@ public class LightbitsApiClient {
         String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
         if (handshake) {
             return "the certificate of the Lightbits API is not trusted (" + msg + "). A Lightbits cluster is verified by"
-                    + " its certificate fingerprint: read it with 'openssl s_client -connect <api-host>:443 </dev/null"
-                    + " | openssl x509 -fingerprint -sha256 -noout' and set it as the " + "tlsFingerprint"
+                    + " its certificate fingerprint: read it on a Lightbits node with 'openssl s_client -connect 127.0.0.1:443"
+                    + " </dev/null | openssl x509 -fingerprint -sha256 -noout' and set it as the " + "tlsFingerprint"
                     + " detail of the storage pool";
         }
         return msg;

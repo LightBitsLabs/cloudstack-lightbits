@@ -182,12 +182,19 @@ The management server always verifies the certificate of the Lightbits API. Ther
 **Pin the certificate fingerprint.** A Lightbits cluster's API certificate is issued to the name
 `api.service` by a certificate authority internal to the cluster, so validation by CA and host
 name of an endpoint addressed by IP cannot pass. Every node of a cluster presents the same
-certificate, so one fingerprint covers all endpoints. Read it from any node:
+certificate, so one fingerprint covers all endpoints. Read it **on a Lightbits node**, in an SSH
+or console session you trust:
 
 ```bash
-openssl s_client -connect <api-host>:443 </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout
+# on a Lightbits node
+openssl s_client -connect 127.0.0.1:443 </dev/null 2>/dev/null | openssl x509 -fingerprint -sha256 -noout
 # sha256 Fingerprint=CA:B9:B1:57:...:21:67
 ```
+
+Do not read the fingerprint over the network from the management server and pin whatever comes
+back: `openssl s_client` does not verify the peer, so on a network where someone can intercept
+the connection that would pin the interceptor's certificate. Running the same command remotely
+is fine as a cross-check against the value read on the node.
 
 and pass it as `&fingerprint=<value>` in the pool URL (with or without the colons). With a
 fingerprint set the plugin accepts exactly that certificate and nothing else.
