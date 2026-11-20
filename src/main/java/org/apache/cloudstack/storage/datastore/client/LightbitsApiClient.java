@@ -1009,7 +1009,9 @@ public class LightbitsApiClient {
                     if (last != null && leftMillis <= 0) {
                         throw last;
                     }
-                    attemptTimeout = Duration.ofMillis(Math.max(MIN_POLL_TIMEOUT_MILLIS, Math.min(timeout.toMillis(), leftMillis)));
+                    // rounded up: an attempt that runs into the deadline ends at or after it, never a
+                    // fraction of a millisecond before, where the caller would start one more poll
+                    attemptTimeout = Duration.ofMillis(Math.max(MIN_POLL_TIMEOUT_MILLIS, Math.min(timeout.toMillis(), leftMillis + 1)));
                 }
                 try {
                     String body = send(base, method, path, jsonBody, ifMatchEtag, attemptTimeout);
