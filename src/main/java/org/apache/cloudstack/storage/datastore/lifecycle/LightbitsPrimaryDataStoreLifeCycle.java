@@ -166,7 +166,7 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         } catch (RuntimeException e) {
             throw new IllegalArgumentException("cannot access Lightbits project '" + cfg.getProject()
                     + "' at " + cfg.apiEndpoint() + " with the supplied credentials: " + e.getMessage()
-                    + " — check the JWT is a project-admin token for this project and that the project exists");
+                    + ": check the JWT is a project-admin token for this project and that the project exists");
         }
 
         refuseEnvironmentInUseElsewhere(cfg, client);
@@ -185,7 +185,7 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
                 // surfaces as the same actionable IllegalArgumentException as the other checks
                 throw new IllegalArgumentException("cannot verify Lightbits QoS policy '" + qosName
                         + "' for project '" + cfg.getProject() + "' at " + cfg.apiEndpoint() + ": "
-                        + e.getMessage() + " — check the token can read GET /api/v2/policies,"
+                        + e.getMessage() + ": check the token can read GET /api/v2/policies,"
                         + " or remove ?qosPolicy= from the pool URL");
             }
             if (!qosExists) {
@@ -208,7 +208,7 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
         } catch (RuntimeException e) {
             throw new IllegalArgumentException("cannot read the Lightbits node list (GET /api/v2/nodes) at "
                     + cfg.apiEndpoint() + ": " + e.getMessage()
-                    + " — the node list supplies the pool's capacity and the replica-count check and is"
+                    + ": the node list supplies the pool's capacity and the replica-count check and is"
                     + " readable by a project-scoped JWT; check connectivity and the token's permissions");
         }
 
