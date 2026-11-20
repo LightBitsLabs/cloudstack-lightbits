@@ -370,4 +370,15 @@ class LightbitsNvmeHostTest {
         assertTrue(adaptor.deleteStoragePool("pool-b"));
         assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
     }
+
+    @Test
+    void aPoolWithdrawnForMaintenanceDisconnectsToo() {
+        // KVMStoragePoolManager calls the (uuid, details) form for ModifyStoragePoolCommand add=false
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        LightbitsStorageAdaptor adaptor = new LightbitsStorageAdaptor(host);
+        adaptor.createStoragePool("pool-a", "10.0.0.1", 443, null, null, com.cloud.storage.Storage.StoragePoolType.IscsiLUN, null, true);
+        assertTrue(adaptor.deleteStoragePool("pool-a", new java.util.HashMap<>()));
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN), sys.commands.toString());
+        assertTrue(adaptor.deleteStoragePool("pool-a", null));
+    }
 }

@@ -230,6 +230,16 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         return deleteStoragePool(pool.getUuid());
     }
 
+    /**
+     * The agent takes this entry when the management server withdraws a pool from the host
+     * (ModifyStoragePoolCommand with add=false, sent for pool maintenance). The interface default
+     * returns true without doing anything, which left the pool registered and the host connected.
+     */
+    @Override
+    public boolean deleteStoragePool(String uuid, Map<String, String> details) {
+        return deleteStoragePool(uuid);
+    }
+
     @Override
     public List<KVMPhysicalDisk> listPhysicalDisks(String storagePoolUuid, KVMStoragePool pool) {
         return new ArrayList<>();
