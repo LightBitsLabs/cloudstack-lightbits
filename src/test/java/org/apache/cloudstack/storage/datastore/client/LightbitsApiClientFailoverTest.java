@@ -62,6 +62,8 @@ class LightbitsApiClientFailoverTest {
 
     @BeforeEach
     void setUp() throws Exception {
+        // an endpoint remembered as down by an earlier test must not reorder this one: ports are reused
+        LightbitsApiClient.forgetDownEndpoints();
         a = new WireMockServer(WireMockConfiguration.options().dynamicPort());
         b = new WireMockServer(WireMockConfiguration.options().dynamicPort());
         a.start();
