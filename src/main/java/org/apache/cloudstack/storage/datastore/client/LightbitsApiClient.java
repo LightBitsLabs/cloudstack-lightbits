@@ -457,7 +457,9 @@ public class LightbitsApiClient {
                 }
                 if (e.getKind() == Kind.TRANSIENT && roomForAnotherAttempt(deadline)) {
                     sleep(settlePollMillis);
-                    continue;
+                    if (roomForAnotherAttempt(deadline)) {   // again: the pause may have used up the margin
+                        continue;
+                    }
                 }
                 throw e;
             }
@@ -495,7 +497,9 @@ public class LightbitsApiClient {
             } catch (LightbitsApiException e) {
                 if (e.getKind() == Kind.TRANSIENT && roomForAnotherAttempt(deadline)) {
                     sleep(settlePollMillis);
-                    continue;
+                    if (roomForAnotherAttempt(deadline)) {   // again: the pause may have used up the margin
+                        continue;
+                    }
                 }
                 throw e;
             }
@@ -524,6 +528,7 @@ public class LightbitsApiClient {
         long deadline = System.nanoTime() + settleTimeoutMillis * 1_000_000L;
         String last = "unknown";
         while (true) {
+            boolean failed = false;
             try {
                 Volume v = parse(pollGet(projectPath("volumes", uuid), deadline), Volume.class);
                 if ("Deleted".equals(v.getState())) {
@@ -538,16 +543,17 @@ public class LightbitsApiClient {
                     throw e;
                 }
                 last = e.getMessage();
-                if (!roomForAnotherAttempt(deadline)) {
-                    throw new LightbitsApiException(Kind.TRANSIENT, -1, "volume " + uuid + " was not removed within "
-                            + (settleTimeoutMillis / 1000) + "s (last: " + last + ")");
-                }
+                failed = true;
             }
-            if (System.nanoTime() >= deadline) {
+            if (System.nanoTime() >= deadline || (failed && !roomForAnotherAttempt(deadline))) {
                 throw new LightbitsApiException(Kind.TRANSIENT, -1, "volume " + uuid + " was not removed within "
                         + (settleTimeoutMillis / 1000) + "s (last: " + last + ")");
             }
             sleep(settlePollMillis);
+            if (failed && !roomForAnotherAttempt(deadline)) {   // again: the pause may have used up the margin
+                throw new LightbitsApiException(Kind.TRANSIENT, -1, "volume " + uuid + " was not removed within "
+                        + (settleTimeoutMillis / 1000) + "s (last: " + last + ")");
+            }
         }
     }
 
