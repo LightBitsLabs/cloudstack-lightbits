@@ -124,6 +124,13 @@ public class LightbitsPoolConfig {
         if (host == null || host.isBlank()) {
             throw new IllegalArgumentException("Lightbits pool URL must include an API host");
         }
+        if (host.startsWith("[")) {
+            // The KVM hosts take their NVMe discovery endpoints from the API hosts, and neither
+            // that list nor the endpoints lists carry IPv6 literals: a pool registered with one
+            // could be created and then never attach a volume.
+            throw new IllegalArgumentException("Lightbits pool URL: an IPv6 address (" + host + ") is not supported as"
+                    + " the API host; use an IPv4 address or a DNS name");
+        }
         int port = uri.getPort() > 0 ? uri.getPort() : DEFAULT_PORT;
 
         String project = uri.getPath() == null ? "" : uri.getPath().replaceAll("^/+", "").replaceAll("/+$", "");
