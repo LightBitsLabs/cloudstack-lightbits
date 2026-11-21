@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -78,6 +79,13 @@ class LightbitsStorageAdaptorTest {
         adaptor.clock = () -> sys.now;
         poolA = pool(POOL_A, "10.0.0.1");
         poolB = pool(POOL_B, "10.0.1.1");
+    }
+
+    // The adaptor's pool registry is static (one per agent JVM): leave it empty for the other test classes.
+    @AfterEach
+    void tearDown() {
+        adaptor.deleteStoragePool(POOL_A);
+        adaptor.deleteStoragePool(POOL_B);
     }
 
     private KVMStoragePool pool(String uuid, String discovery) {
