@@ -95,7 +95,10 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
      */
     void refuseEnvironmentInUseElsewhere(LightbitsPoolConfig cfg, LightbitsApiClient client) {
         java.util.regex.Pattern owned = java.util.regex.Pattern.compile(
-                "^" + java.util.regex.Pattern.quote("cs-" + cfg.getEnvironment() + "-p") + "([0-9]+)-.*");
+                "^" + java.util.regex.Pattern.quote("cs-" + cfg.getEnvironment() + "-p") + "([0-9]+)-"
+                        // the CloudStack uuid of the object, and "-src" on the snapshot behind a clone; anything
+                        // else is another environment whose name starts with this one plus "-p<digits>-"
+                        + "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(-src)?");
         java.util.List<String> names = new java.util.ArrayList<>();
         try {
             client.listVolumes().forEach(v -> names.add(v.getName()));
