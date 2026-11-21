@@ -152,10 +152,41 @@ class LightbitsPoolSecretTest {
     }
 
     @Test
-    void aShortTokenPassedThroughTheApiIsStillTakenIn() {
-        String small = "aaa.bbb.ccc";
-        rows.put("secretkey", small);
-        assertEquals(small, load().getJwt());
+    void aTokenPassedThroughTheApiIsRejectedEvenWhenItLooksLikeAJwt() {
+        // a token cut after its second dot still matches the JWT pattern: it must not replace a working one
+        rows.put("secretkey", "aaa.bbb.ccc");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, this::load);
+        assertTrue(e.getMessage().contains("tokenFile"), e.getMessage());
+        assertNoClearTextOrPointer();
+        assertEquals(OLD, load().getJwt());
+    }
+
+    @Test
+    void aJwtLookingValuePassedAsTheJwtDetailIsRejectedAndTheCounterRestored() {
+        int chunks = Integer.parseInt(rows.get("jwt"));
+        rows.put("jwt", "aaa.bbb.ccc");
+        assertThrows(IllegalArgumentException.class, this::load);
+        assertNoClearTextOrPointer();
+        assertEquals(String.valueOf(chunks), rows.get("jwt"));
+        assertEquals(OLD, load().getJwt());
+    }
+
+    @Test
+    void anOverwrittenCounterIsRestoredEvenWhenTheTokenFileCannotBeRead() {
+        int chunks = Integer.parseInt(rows.get("jwt"));
+        rows.put("jwt", NEW.substring(0, 255));
+        rows.put("tokenFile", "/etc/cloudstack/management/missing.jwt");
+        assertThrows(IllegalArgumentException.class, this::load);
+        assertEquals(String.valueOf(chunks), rows.get("jwt"));
+        assertEquals(OLD, load().getJwt());
+    }
+
+    @Test
+    void aFileReplacementStillWorksAfterTheCounterWasOverwritten() {
+        rows.put("jwt", NEW.substring(0, 255));
+        files.put("/t", NEW);
+        rows.put("tokenFile", "/t");
+        assertEquals(NEW, load().getJwt());
         assertNoClearTextOrPointer();
     }
 
