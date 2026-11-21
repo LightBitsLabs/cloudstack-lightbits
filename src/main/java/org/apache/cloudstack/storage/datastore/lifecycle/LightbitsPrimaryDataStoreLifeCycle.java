@@ -423,8 +423,15 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
      */
     private void cleanupClusterObjects(DataStore store) {
         try {
-            LightbitsPoolConfig cfg = org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(
-                    storagePoolDetailsDao, store.getId());
+            LightbitsPoolConfig cfg;
+            try {
+                cfg = org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, store.getId());
+            } catch (IllegalArgumentException e) {
+                // A failed token replacement (missing file, a token passed through the API) clears the
+                // pending replacement and keeps the stored token: report it and clean up with that one.
+                LOG.warn("Lightbits pool {} delete: {}; cleaning up with the stored token", store.getId(), e.getMessage());
+                cfg = org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, store.getId());
+            }
             LightbitsApiClient client = clientFactory.create(cfg);
 
             for (com.cloud.storage.VMTemplateStoragePoolVO ref : templatePoolDao.listByPoolId(store.getId())) {
