@@ -62,7 +62,8 @@ unaffected (no JWT on the data path).
    shred -u /etc/cloudstack/management/lightbits-pool.jwt
    ```
    With several management servers, put the file on each of them before the update, since
-   any of them may handle the next operation.
+   any of them may handle the next operation, and after the log line appears (on any of
+   them) run the `shred` above on every one of them: each copy is the token in clear text.
 
    The file must be a regular file below `/etc/cloudstack/management`, readable by the
    `cloud` user. If it is missing, unreadable or does not hold a JWT, one operation fails

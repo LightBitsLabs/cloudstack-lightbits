@@ -182,11 +182,43 @@ class LightbitsPoolSecretTest {
     }
 
     @Test
-    void aFileReplacementStillWorksAfterTheCounterWasOverwritten() {
+    void aFileNamedInTheSameUpdateAsAnOverwrittenCounterIsNotReadAndARetryWorks() {
+        int chunks = Integer.parseInt(rows.get("jwt"));
         rows.put("jwt", NEW.substring(0, 255));
         files.put("/t", NEW);
         rows.put("tokenFile", "/t");
+        assertThrows(IllegalArgumentException.class, this::load);
+        assertNoClearTextOrPointer();
+        assertEquals(String.valueOf(chunks), rows.get("jwt"));
+        assertEquals(OLD, load().getJwt());
+        rows.put("tokenFile", "/t");   // the update repeated with the file only
         assertEquals(NEW, load().getJwt());
+        assertNoClearTextOrPointer();
+    }
+
+    @Test
+    void aTokenPassedThroughTheApiIsRejectedEvenWithATokenFileInTheSameUpdate() {
+        files.put("/t", NEW);
+        rows.put("tokenFile", "/t");
+        rows.put("secretkey", "aaa.bbb.ccc");
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, this::load);
+        assertTrue(e.getMessage().contains("not read"), e.getMessage());
+        assertNoClearTextOrPointer();
+        assertEquals(OLD, load().getJwt());
+    }
+
+    @Test
+    void theDetailWritesOfAReplacementRunInTransactions() {
+        java.util.List<Integer> batches = new java.util.ArrayList<>();
+        files.put("/t", NEW);
+        rows.put("tokenFile", "/t");
+        assertEquals(NEW, LightbitsPoolSecret.load(dao, POOL, ENC, DEC, readFile, writes -> {
+            int before = rows.size();
+            writes.run();
+            batches.add(rows.size() - before);
+        }).getJwt());
+        // one batch drops the pointer, one swaps the chunks: no write runs outside a batch
+        assertEquals(2, batches.size(), batches.toString());
         assertNoClearTextOrPointer();
     }
 
