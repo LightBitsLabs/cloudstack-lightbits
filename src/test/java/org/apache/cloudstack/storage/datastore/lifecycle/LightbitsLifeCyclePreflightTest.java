@@ -252,6 +252,16 @@ class LightbitsLifeCyclePreflightTest {
     }
 
     @Test
+    void anEnvironmentWhoseNameExtendsThisOneWithPDigitsIsNotMistakenForAPool() {
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        // pool 3 of environment "cs1-p7": for environment cs1 it is no pool 7 of its own
+        stubVolumeNames("cs-cs1-p7-p3-eeeeeeee-2222-3333-4444-555555555555");
+        lc.setKnownPoolIds(() -> java.util.Set.of(1L));
+        lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt"));
+    }
+
+    @Test
     void aLeftoverSnapshotOfAnUnknownPoolBlocksRegistrationToo() {
         stubProjectAccess();
         stubNodes(3, 30_000_000_000L, 20_000_000_000L);
