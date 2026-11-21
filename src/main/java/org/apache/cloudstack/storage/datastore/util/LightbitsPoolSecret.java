@@ -21,6 +21,7 @@ package org.apache.cloudstack.storage.datastore.util;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
@@ -29,6 +30,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.cloud.utils.crypt.DBEncryptionUtil;
+import com.cloud.utils.db.Transaction;
+import com.cloud.utils.db.TransactionCallbackNoReturn;
+import com.cloud.utils.db.TransactionStatus;
 
 /**
  * The pool's API token: how it is supplied, stored and replaced.
@@ -91,17 +95,34 @@ public final class LightbitsPoolSecret {
     /** The validated configuration of a pool, with its token; takes in a replacement token first. */
     public static LightbitsPoolConfig load(StoragePoolDetailsDao dao, long poolId) {
         return load(dao, poolId, DBEncryptionUtil::encrypt, DBEncryptionUtil::decrypt,
-                path -> readTokenFile(path, TOKEN_FILE_ROOT));
+                path -> readTokenFile(path, TOKEN_FILE_ROOT), LightbitsPoolSecret::inTransaction);
+    }
+
+    /** Tests: details rows in memory, no database transaction. */
+    static LightbitsPoolConfig load(StoragePoolDetailsDao dao, long poolId, UnaryOperator<String> encrypt,
+                                    UnaryOperator<String> decrypt, UnaryOperator<String> readFile) {
+        return load(dao, poolId, encrypt, decrypt, readFile, Runnable::run);
+    }
+
+    /** Several detail writes that must commit together or not at all. */
+    private static void inTransaction(Runnable writes) {
+        Transaction.execute(new TransactionCallbackNoReturn() {
+            @Override
+            public void doInTransactionWithoutResult(TransactionStatus status) {
+                writes.run();
+            }
+        });
     }
 
     static LightbitsPoolConfig load(StoragePoolDetailsDao dao, long poolId, UnaryOperator<String> encrypt,
-                                    UnaryOperator<String> decrypt, UnaryOperator<String> readFile) {
+                                    UnaryOperator<String> decrypt, UnaryOperator<String> readFile,
+                                    Consumer<Runnable> atomically) {
         Map<String, String> details = dao.listDetailsKeyPairs(poolId);
         if (hasReplacement(details)) {
             synchronized (LOCK) {
                 details = dao.listDetailsKeyPairs(poolId);
                 if (hasReplacement(details)) {
-                    replace(dao, poolId, details, encrypt, readFile);
+                    replace(dao, poolId, details, encrypt, readFile, atomically);
                     details = dao.listDetailsKeyPairs(poolId);
                 }
             }
@@ -134,23 +155,29 @@ public final class LightbitsPoolSecret {
      * its reason instead of every operation from then on.
      */
     private static void replace(StoragePoolDetailsDao dao, long poolId, Map<String, String> details,
-                                UnaryOperator<String> encrypt, UnaryOperator<String> readFile) {
+                                UnaryOperator<String> encrypt, UnaryOperator<String> readFile, Consumer<Runnable> atomically) {
         String file = details.get(KEY_TOKEN_FILE);
-        dao.removeDetail(poolId, KEY_TOKEN_FILE);
-        dao.removeDetail(poolId, KEY_TOKEN_INPUT);
-        if (counterOverwritten(details)) {
-            restoreCounter(dao, poolId, details);   // first, so that no failure below leaves it overwritten
-        }
+        boolean viaApi = notBlank(details.get(KEY_TOKEN_INPUT)) || counterOverwritten(details);
+        // first, in one transaction: drop the pending replacement and put back an overwritten chunk
+        // counter, so that no failure below leaves either behind
+        atomically.accept(() -> {
+            dao.removeDetail(poolId, KEY_TOKEN_FILE);
+            dao.removeDetail(poolId, KEY_TOKEN_INPUT);
+            if (counterOverwritten(details)) {
+                restoreCounter(dao, poolId, details);
+            }
+        });
 
-        if (!notBlank(file)) {
+        if (viaApi || !notBlank(file)) {
             // A token passed through the API (details[0].secretkey, or details[0].jwt, which
             // overwrites the chunk counter) is in CloudStack's logs and, beyond 255 characters, cut.
             // A cut token can still look like a JWT, so none is taken in: the previous token stays.
             LOG.warn("Lightbits: a token for pool {} was passed through updateStoragePool and was rejected; CloudStack"
                     + " logs such a value, so treat it as exposed. {}", poolId, HOW_TO_SET);
             throw new IllegalArgumentException("a token passed through updateStoragePool is not taken in for Lightbits"
-                    + " pool " + poolId + ": CloudStack logs it and cuts it at 255 characters. The previous token stays"
-                    + " in use. To replace it, " + HOW_TO_SET);
+                    + " pool " + poolId + ": CloudStack logs it and cuts it at 255 characters"
+                    + (notBlank(file) ? " (the token file named in the same update was not read either)" : "")
+                    + ". The previous token stays in use. To replace it, " + HOW_TO_SET);
         }
         String token = readFile.apply(file.trim());   // throws with the reason; the stored token is untouched
         if (token == null || !JWT.matcher(token).matches()) {
@@ -165,12 +192,14 @@ public final class LightbitsPoolSecret {
         }
         java.util.HashMap<String, String> chunks = new java.util.HashMap<>();
         LightbitsPoolConfig.putChunked(chunks, KEY_STORED, encrypt.apply(token));
-        for (String key : old) {
-            dao.removeDetail(poolId, key);
-        }
-        for (Map.Entry<String, String> e : chunks.entrySet()) {
-            dao.addDetail(poolId, e.getKey(), e.getValue(), false);
-        }
+        atomically.accept(() -> {   // the old chunks go only together with the new ones being written
+            for (String key : old) {
+                dao.removeDetail(poolId, key);
+            }
+            for (Map.Entry<String, String> e : chunks.entrySet()) {
+                dao.addDetail(poolId, e.getKey(), e.getValue(), false);
+            }
+        });
         LOG.info("Lightbits: the API token of pool {} was replaced and stored encrypted{}", poolId,
                 notBlank(file) ? "; delete the token file " + file.trim() : "");
     }
