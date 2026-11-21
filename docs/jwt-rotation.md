@@ -49,7 +49,15 @@ unaffected (no JWT on the data path).
    ```
    The plugin reads the file on the next use of the pool (at the latest the next capacity
    poll, about a minute), stores the token encrypted and removes the `tokenFile` detail. No
-   restart is needed. Then delete the file:
+   restart is needed. The `tokenFile` detail is removed on failure too, so its absence proves
+   nothing: before deleting the file, confirm that the management server logged the
+   replacement:
+   ```bash
+   grep "the API token of pool <poolId> was replaced and stored encrypted" \
+       /var/log/cloudstack/management/management-server.log
+   ```
+   If the line is not there, look for the reason logged for the pool instead (the file is
+   still needed for the next attempt). Only after the line is there, delete the file:
    ```bash
    shred -u /etc/cloudstack/management/lightbits-pool.jwt
    ```
@@ -64,9 +72,11 @@ unaffected (no JWT on the data path).
    affected.
 
    Do not pass a token as `details[0].jwt` or `details[0].secretkey` to `updateStoragePool`:
-   it is cut at 255 characters and rejected, and by then it is in CloudStack's logs.
+   it is always rejected (whatever its length; beyond 255 characters it is also cut), and by
+   then it is in CloudStack's logs.
 
-3. **Verify** the new token works: trigger a control-plane op (e.g. list/refresh the pool, or
+3. **Verify** the new token works (after the log line of step 2, so the check exercises the
+   replacement and not the previous token): trigger a control-plane op (e.g. list/refresh the pool, or
    create+delete a small test volume) and confirm success and that pool capacity still reports.
 
 4. **Retire the old JWT.** LightOS JWTs are stateless bearer tokens validated by signature —

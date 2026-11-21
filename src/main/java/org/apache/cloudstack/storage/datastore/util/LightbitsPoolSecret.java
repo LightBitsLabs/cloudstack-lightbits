@@ -136,37 +136,26 @@ public final class LightbitsPoolSecret {
     private static void replace(StoragePoolDetailsDao dao, long poolId, Map<String, String> details,
                                 UnaryOperator<String> encrypt, UnaryOperator<String> readFile) {
         String file = details.get(KEY_TOKEN_FILE);
-        String inline = details.get(KEY_TOKEN_INPUT);
-        boolean overwritten = counterOverwritten(details);
         dao.removeDetail(poolId, KEY_TOKEN_FILE);
         dao.removeDetail(poolId, KEY_TOKEN_INPUT);
-
-        String token;
-        if (notBlank(file)) {
-            token = readFile.apply(file.trim());   // throws with the reason; the stored token is untouched
-        } else {
-            // A token passed through the API: it is in CloudStack's logs and, beyond 255
-            // characters, it was cut. Usable only if it survived whole.
-            token = notBlank(inline) ? inline.trim() : details.get(KEY_STORED).trim();
-            LOG.warn("Lightbits: a token for pool {} was passed through updateStoragePool; CloudStack logs such a value"
-                    + " and cuts it at 255 characters. Treat it as exposed and replace it from a file: {}", poolId, HOW_TO_SET);
+        if (counterOverwritten(details)) {
+            restoreCounter(dao, poolId, details);   // first, so that no failure below leaves it overwritten
         }
+
+        if (!notBlank(file)) {
+            // A token passed through the API (details[0].secretkey, or details[0].jwt, which
+            // overwrites the chunk counter) is in CloudStack's logs and, beyond 255 characters, cut.
+            // A cut token can still look like a JWT, so none is taken in: the previous token stays.
+            LOG.warn("Lightbits: a token for pool {} was passed through updateStoragePool and was rejected; CloudStack"
+                    + " logs such a value, so treat it as exposed. {}", poolId, HOW_TO_SET);
+            throw new IllegalArgumentException("a token passed through updateStoragePool is not taken in for Lightbits"
+                    + " pool " + poolId + ": CloudStack logs it and cuts it at 255 characters. The previous token stays"
+                    + " in use. To replace it, " + HOW_TO_SET);
+        }
+        String token = readFile.apply(file.trim());   // throws with the reason; the stored token is untouched
         if (token == null || !JWT.matcher(token).matches()) {
-            if (overwritten && !notBlank(file) && !notBlank(inline)) {
-                // the chunk counter itself was overwritten: restore it from the chunks still there
-                int n = 0;
-                while (details.containsKey(KEY_STORED + "." + n)) {
-                    n++;
-                }
-                dao.removeDetail(poolId, KEY_STORED);
-                if (n > 0) {
-                    dao.addDetail(poolId, KEY_STORED, String.valueOf(n), false);
-                }
-            }
-            throw new IllegalArgumentException("the value supplied as the new token of Lightbits pool " + poolId
-                    + " is not a JWT (three dot-separated parts)" + (notBlank(file) ? "" : "; a token passed through"
-                    + " updateStoragePool is cut at 255 characters") + ". The previous token stays in use. To replace it, "
-                    + HOW_TO_SET);
+            throw new IllegalArgumentException("the token file of Lightbits pool " + poolId + " does not hold a JWT"
+                    + " (three dot-separated parts). The previous token stays in use. To replace it, " + HOW_TO_SET);
         }
         List<String> old = new ArrayList<>();
         for (String key : details.keySet()) {
@@ -184,6 +173,18 @@ public final class LightbitsPoolSecret {
         }
         LOG.info("Lightbits: the API token of pool {} was replaced and stored encrypted{}", poolId,
                 notBlank(file) ? "; delete the token file " + file.trim() : "");
+    }
+
+    /** Put back the chunk counter that a value passed as details[0].jwt overwrote. */
+    private static void restoreCounter(StoragePoolDetailsDao dao, long poolId, Map<String, String> details) {
+        int n = 0;
+        while (details.containsKey(KEY_STORED + "." + n)) {
+            n++;
+        }
+        dao.removeDetail(poolId, KEY_STORED);
+        if (n > 0) {
+            dao.addDetail(poolId, KEY_STORED, String.valueOf(n), false);
+        }
     }
 
     /**
