@@ -212,6 +212,19 @@ class LightbitsApiClientFailoverTest {
     }
 
     @Test
+    void aSettlePollDoesNotFailOverWithLessThanOneAttemptLeft() {
+        // a fails after 600 ms of a 1100 ms wait: about 500 ms are left, less than the 1 s an attempt
+        // always gets, so trying b would end after the deadline. Deterministic: before the fix b was
+        // always tried here and answered.
+        a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(503).withFixedDelay(600)));
+        LightbitsApiClient c = client(url(a), url(b));
+        c.setSettleWait(1100, 1);
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> c.waitForVolume(UUID, null));
+        assertEquals(Kind.TRANSIENT, e.getKind());
+        b.verify(0, getRequestedFor(urlEqualTo(VOLUMES + "/" + UUID)));
+    }
+
+    @Test
     void aSettlePollDoesNotStartOnAnotherEndpointAfterItsDeadline() {
         a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(200).withBody(VOLUME).withFixedDelay(4000)));
         LightbitsApiClient c = client(url(a), url(b));

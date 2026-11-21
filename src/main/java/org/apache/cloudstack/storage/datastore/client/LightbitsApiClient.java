@@ -455,7 +455,7 @@ public class LightbitsApiClient {
                     throw new LightbitsApiException(Kind.NOT_FOUND, 404,
                             "volume " + uuid + " disappeared from the cluster while waiting for it to become Available");
                 }
-                if (e.getKind() == Kind.TRANSIENT && System.nanoTime() < deadline) {
+                if (e.getKind() == Kind.TRANSIENT && roomForAnotherAttempt(deadline)) {
                     sleep(settlePollMillis);
                     continue;
                 }
@@ -493,7 +493,7 @@ public class LightbitsApiClient {
             try {
                 sn = parse(pollGet(projectPath("snapshots", uuid), deadline), Snapshot.class);
             } catch (LightbitsApiException e) {
-                if (e.getKind() == Kind.TRANSIENT && System.nanoTime() < deadline) {
+                if (e.getKind() == Kind.TRANSIENT && roomForAnotherAttempt(deadline)) {
                     sleep(settlePollMillis);
                     continue;
                 }
@@ -538,6 +538,10 @@ public class LightbitsApiClient {
                     throw e;
                 }
                 last = e.getMessage();
+                if (!roomForAnotherAttempt(deadline)) {
+                    throw new LightbitsApiException(Kind.TRANSIENT, -1, "volume " + uuid + " was not removed within "
+                            + (settleTimeoutMillis / 1000) + "s (last: " + last + ")");
+                }
             }
             if (System.nanoTime() >= deadline) {
                 throw new LightbitsApiException(Kind.TRANSIENT, -1, "volume " + uuid + " was not removed within "
@@ -978,6 +982,18 @@ public class LightbitsApiClient {
     private static final long MIN_POLL_TIMEOUT_MILLIS = 1000L;
 
     /**
+     * Whether another attempt may start after a failed one. An attempt never gets less than
+     * {@link #MIN_POLL_TIMEOUT_MILLIS}, so one started with less time left would end after the
+     * deadline. This also keeps the wait bounded when the HTTP client's timer (wall clock) fires
+     * a few milliseconds before the deadline measured here ({@link System#nanoTime()}): a timed
+     * out attempt no longer leaves a sliver of time that starts one more attempt on another
+     * endpoint.
+     */
+    private static boolean roomForAnotherAttempt(long deadlineNanos) {
+        return deadlineNanos - System.nanoTime() >= MIN_POLL_TIMEOUT_MILLIS * 1_000_000L;
+    }
+
+    /**
      * {@code rounds} passes over all endpoints. A settle poll uses one round and passes its
      * absolute deadline ({@link System#nanoTime()} based): all endpoints share it, so each
      * attempt gets only what is left and a failover stops once the deadline has passed.
@@ -1002,7 +1018,7 @@ public class LightbitsApiClient {
                 Duration attemptTimeout = timeout;
                 if (deadlineNanos != NO_DEADLINE) {
                     long leftMillis = (deadlineNanos - System.nanoTime()) / 1_000_000L;
-                    if (last != null && leftMillis <= 0) {
+                    if (last != null && !roomForAnotherAttempt(deadlineNanos)) {
                         throw last;
                     }
                     // rounded up: an attempt that runs into the deadline ends at or after it, never a
