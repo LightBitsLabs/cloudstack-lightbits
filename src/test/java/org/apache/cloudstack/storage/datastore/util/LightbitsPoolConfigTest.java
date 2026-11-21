@@ -219,4 +219,12 @@ class LightbitsPoolConfigTest {
         org.junit.jupiter.api.Assertions.assertTrue(e.getMessage().contains("255"), e.getMessage());
         org.junit.jupiter.api.Assertions.assertEquals(1, LightbitsPoolConfig.parseEndpoints(name, 443).size());
     }
+
+    @Test
+    void ipv6ApiHostIsRefusedAtRegistration() {
+        // the KVM hosts could not attach from such a pool: refuse it instead of creating it
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> LightbitsPoolConfig.fromUrl("lightbits://[2001:db8::1]:443/proj?environment=cs1", "jwt"));
+        assertTrue(e.getMessage().contains("IPv6") && e.getMessage().contains("[2001:db8::1]"), e.getMessage());
+    }
 }
