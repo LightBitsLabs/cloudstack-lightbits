@@ -16,9 +16,11 @@
 package com.cloud.hypervisor.kvm.storage;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 
 import org.apache.cloudstack.utils.qemu.QemuImg.PhysicalDiskFormat;
 import org.apache.logging.log4j.LogManager;
@@ -43,10 +45,33 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     private static final Map<String, KVMStoragePool> POOLS = new ConcurrentHashMap<>();
     private static final int DEFAULT_WAIT_SECS = 60;
     private static final Object CONNECT_LOCK = new Object();
-    /** A lookup that finds no device triggers a connect at most this often. */
-    private static final long LOOKUP_CONNECT_INTERVAL_MILLIS = 10_000;
+    private static final Object RESCAN_LOCK = new Object();
+    /** A lookup that finds no device triggers a connect of its pool at most this often. */
+    static final long LOOKUP_CONNECT_INTERVAL_MILLIS = 10_000;
+    /** After failed lookup connects the interval doubles per failure, up to this. */
+    static final long LOOKUP_CONNECT_MAX_BACKOFF_MILLIS = 300_000;
+    /**
+     * Time one discovery endpoint gets to answer a connect made for a lookup. The agent polls
+     * the lookup up to 100 times, so the full connect timeout per endpoint and per poll would
+     * turn a five minute failure into hours and keep other connects waiting behind it.
+     */
+    static final long LOOKUP_CONNECT_TIMEOUT_MILLIS = 15_000;
+    /** A lookup that still finds no device rescans the controllers at most this often. */
+    static final long LOOKUP_RESCAN_INTERVAL_MILLIS = 10_000;
     private static final long LOOKUP_WAIT_MILLIS = 2_000;
-    private long lastLookupConnect;
+
+    /** The lookup-triggered connects of one pool. Guarded by CONNECT_LOCK. */
+    private static final class LookupConnect {
+        long notBefore;
+        int failures;
+        String lastFailure;
+    }
+
+    private final Map<String, LookupConnect> lookupConnects = new HashMap<>();
+    /** Guarded by RESCAN_LOCK. */
+    private long lookupRescanNotBefore;
+    /** Replaced in unit tests. */
+    LongSupplier clock = System::currentTimeMillis;
     /** Pool detail carrying the cluster's discovery endpoints, comma-separated host[:port]. */
     public static final String DETAIL_NVME_DISCOVERY = "nvmeDiscovery";
     /** Pool detail carrying the plugin version of the management server, for the mismatch warning. */
@@ -118,6 +143,8 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // other's connect-all against the same subsystem.
         synchronized (CONNECT_LOCK) {
             nvme.connect(endpoints);
+            // the host is connected: a failure an earlier lookup remembered for this pool is history
+            lookupConnects.remove(pool.getUuid());
         }
         // Throws with a diagnosis (paths, ACL hint) rather than returning false: the caller
         // would turn false into a generic "failed to connect disks".
@@ -128,21 +155,78 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     }
 
     /**
-     * Connect this host to the pool's cluster on behalf of a lookup, rate-limited: lookups are
-     * polled every few seconds and one connect serves them all. A failure to connect is
-     * reported to the caller (it carries the diagnosis); the next poll tries again.
+     * Connect this host to the pool's cluster on behalf of a lookup. Lookups are polled every
+     * few seconds, so the work is bounded per pool: one connect serves the lookups of the next
+     * {@link #LOOKUP_CONNECT_INTERVAL_MILLIS}, each endpoint gets
+     * {@link #LOOKUP_CONNECT_TIMEOUT_MILLIS}, and after a failure the next attempt waits twice
+     * as long as the one before (up to {@link #LOOKUP_CONNECT_MAX_BACKOFF_MILLIS}). The times
+     * count from the end of an attempt, so a slow failure is not retried by the very next poll.
+     *
+     * A failure to connect is reported to the caller (it carries the diagnosis), and so is
+     * every lookup until the next attempt is due, for as long as the host has no live path:
+     * no connect is made for those, and the caller ends with the reason instead of a bare
+     * "not found". Once the host has a live path (another pool of the same cluster connected
+     * it, or the kernel reconnected) the lookup goes on to its wait and rescan instead.
+     *
+     * A connect that no endpoint answered and that only went on because the host holds live
+     * paths counts as a failure for the backoff: those paths can belong to another cluster.
      */
     private void connectIfDue(KVMStoragePool pool) {
         if (pool == null) {
             return;
         }
         synchronized (CONNECT_LOCK) {
-            long now = System.currentTimeMillis();
-            if (now - lastLookupConnect < LOOKUP_CONNECT_INTERVAL_MILLIS) {
+            LookupConnect state = lookupConnects.computeIfAbsent(pool.getUuid(), k -> new LookupConnect());
+            long now = clock.getAsLong();
+            if (now < state.notBefore) {
+                if (state.lastFailure != null && nvme.livePaths().isEmpty()) {
+                    throw new CloudRuntimeException(state.lastFailure + " (next attempt in "
+                            + ((state.notBefore - now + 999) / 1000) + "s)");
+                }
                 return;
             }
-            lastLookupConnect = now;
-            nvme.connect(discoveryEndpoints(pool));
+            boolean answered;
+            List<String> endpoints = discoveryEndpoints(pool);
+            try {
+                answered = nvme.connect(endpoints, LOOKUP_CONNECT_TIMEOUT_MILLIS);
+            } catch (CloudRuntimeException e) {
+                state.lastFailure = e.getMessage();
+                backOff(state);
+                throw e;
+            }
+            if (answered) {
+                state.lastFailure = null;
+                state.failures = 0;
+                state.notBefore = clock.getAsLong() + LOOKUP_CONNECT_INTERVAL_MILLIS;
+            } else {
+                // reported only once the host has no live path left (see above)
+                state.lastFailure = "Lightbits: no NVMe discovery endpoint of pool " + pool.getUuid() + " answered "
+                        + endpoints + "; the host went on with the live paths it had, which can belong to another cluster";
+                backOff(state);
+            }
+        }
+    }
+
+    private void backOff(LookupConnect state) {
+        state.failures++;
+        long backoff = LOOKUP_CONNECT_INTERVAL_MILLIS << Math.min(state.failures, 10);
+        state.notBefore = clock.getAsLong() + Math.min(backoff, LOOKUP_CONNECT_MAX_BACKOFF_MILLIS);
+    }
+
+    /**
+     * Rescan the controllers on behalf of a lookup, rate-limited. Returns true if a rescan ran.
+     * A namespace whose arrival the kernel or udev missed never shows up by itself while the
+     * controller stays connected, and connecting again does not rescan a controller that is
+     * connected already.
+     */
+    private boolean rescanIfDue() {
+        synchronized (RESCAN_LOCK) {
+            if (clock.getAsLong() < lookupRescanNotBefore) {
+                return false;
+            }
+            nvme.rescan();
+            lookupRescanNotBefore = clock.getAsLong() + LOOKUP_RESCAN_INTERVAL_MILLIS;
+            return true;
         }
     }
 
@@ -163,9 +247,11 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             // The agent looks a VM's disks up before it asks for them to be connected (StartCommand
             // builds the disk definitions first). On a host with no connection to the cluster yet,
             // after a reboot or on first use, the device can only appear once the host connects,
-            // so a failed lookup makes sure it is connected. The caller polls this method.
+            // so a failed lookup makes sure it is connected. The caller polls this method, and
+            // it runs before connectPhysicalDisk: a device that is still missing on a connected
+            // host is looked for with a rescan here, or the VM start never gets past the lookup.
             connectIfDue(pool);
-            if (!nvme.waitForDeviceLink(uuid, LOOKUP_WAIT_MILLIS)) {
+            if (!nvme.waitForDeviceLink(uuid, LOOKUP_WAIT_MILLIS) && !(rescanIfDue() && nvme.deviceLinkExists(uuid))) {
                 LOG.debug("Lightbits device for volume {} not present", uuid);
                 return null;
             }
@@ -206,6 +292,9 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     @Override
     public boolean deleteStoragePool(String uuid) {
         POOLS.remove(uuid);
+        synchronized (CONNECT_LOCK) {
+            lookupConnects.remove(uuid);
+        }
         return true;
     }
 
