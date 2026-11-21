@@ -26,6 +26,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   and failed. A lookup that finds no device now connects the host first.
 - A namespace that does not show up is looked for again after a udev settle and a controller
   rescan. Paths that are not live are logged as a warning after every attach.
+- The disk lookup that connects a cold host is bounded: its connect is tracked per pool (a
+  lookup on one pool no longer holds back the first connect of another), an endpoint gets 15
+  seconds, and after a failure the next attempt waits twice as long as the one before (up to
+  five minutes) while the lookups in between report the reason. A VM start against a cluster
+  that does not answer fails in minutes, not hours. The lookup also rescans the controllers
+  (at most every 10 seconds) when the device is still missing on a connected host.
+- A pool URL with an IPv6 address as the API host is refused at registration with a clear
+  message. It was accepted before, and no volume of such a pool could be attached.
 
 ### Security
 - **The pool token was written to CloudStack's logs.** The token was supplied as
