@@ -48,6 +48,7 @@ class LightbitsNvmeHostTest {
         final Map<String, LightbitsNvmeHost.Result> results = new HashMap<>();
         Runnable onRescan = () -> { };
         Runnable onConnect = () -> { };
+        boolean disconnectRemoves = true;
         int slept;
 
         @Override
@@ -59,6 +60,18 @@ class LightbitsNvmeHostTest {
             }
             if (cmd.startsWith("nvme connect-all")) {
                 onConnect.run();
+            }
+            if (cmd.startsWith("nvme disconnect -n ") && disconnectRemoves) {
+                // like the kernel: a subsystem goes away with its last controller
+                String nqn = cmd.substring("nvme disconnect -n ".length());
+                List<String> gone = new ArrayList<>();
+                for (Map.Entry<String, String> f : files.entrySet()) {
+                    if (f.getKey().startsWith("/sys/class/nvme-subsystem/") && f.getKey().endsWith("/subsysnqn")
+                            && nqn.equals(f.getValue())) {
+                        gone.add(f.getKey().substring(0, f.getKey().length() - "subsysnqn".length()));
+                    }
+                }
+                files.keySet().removeIf(k -> gone.stream().anyMatch(k::startsWith));
             }
             for (Map.Entry<String, LightbitsNvmeHost.Result> e : results.entrySet()) {
                 if (cmd.contains(e.getKey())) {
@@ -369,6 +382,15 @@ class LightbitsNvmeHostTest {
         subsystem("nvme-subsys3", NQN, "nvme3");
         sys.results.put("nvme disconnect", new LightbitsNvmeHost.Result(1, "busy"));
         assertTrue(host.disconnectIdleSubsystems().isEmpty());
+    }
+
+    @Test
+    void aDisconnectThatLeavesAControllerIsNotReportedAsDone() {
+        // nvme-cli 2.8 returns 0 from 'disconnect -n' when a controller deletion fails
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme4");
+        sys.disconnectRemoves = false;
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
     }
 
     @Test
