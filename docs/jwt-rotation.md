@@ -72,9 +72,12 @@ unaffected (no JWT on the data path).
    rejected the storage pool's API token ...` until a valid one is set; running VMs are not
    affected.
 
-   Do not pass a token as `details[0].jwt` or `details[0].secretkey` to `updateStoragePool`:
-   it is always rejected (whatever its length; beyond 255 characters it is also cut), and by
-   then it is in CloudStack's logs.
+   Do not pass a token as `details[0].jwt` or `details[0].secretkey` to `updateStoragePool`.
+   CloudStack accepts the call and returns success, and stores the value as a pool detail in
+   clear text; the plugin rejects it at the next use of the pool (an operation or the capacity
+   poll), which fails with the reason, removes the value and keeps the previous token. Whatever
+   its length it is never taken in (beyond 255 characters it is also cut), and it is in
+   CloudStack's logs from the moment of the call: treat that token as exposed.
 
 3. **Verify** the new token works (after the log line of step 2, so the check exercises the
    replacement and not the previous token): trigger a control-plane op (e.g. list/refresh the pool, or
