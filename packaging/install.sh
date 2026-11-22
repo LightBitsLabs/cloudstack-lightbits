@@ -195,6 +195,7 @@ if [[ $has_agent -eq 1 ]]; then
         fail "the nvme_tcp kernel module could not be loaded for the running kernel $(uname -r)"
     fi
     if [[ ! -s /etc/nvme/hostnqn ]]; then
+        nvme_dir_existed=0; [[ -d /etc/nvme ]] && nvme_dir_existed=1
         if [[ $CHECK_ONLY -eq 1 ]]; then
             warn "/etc/nvme/hostnqn is missing or empty; install.sh without --check generates it"
         elif command -v nvme >/dev/null 2>&1 && mkdir -p /etc/nvme && nvme gen-hostnqn > /etc/nvme/hostnqn.new 2>/dev/null \
@@ -203,6 +204,10 @@ if [[ $has_agent -eq 1 ]]; then
             changed+=("generated /etc/nvme/hostnqn")
         else
             rm -f /etc/nvme/hostnqn.new
+            # leave no trace of the attempt: remove /etc/nvme again if this run created it (and it is empty)
+            if [[ $nvme_dir_existed -eq 0 && -d /etc/nvme ]] && ! rmdir /etc/nvme 2>/dev/null; then
+                changed+=("created /etc/nvme")
+            fi
             fail "/etc/nvme/hostnqn is missing and could not be generated"
         fi
     fi

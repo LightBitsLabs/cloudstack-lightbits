@@ -96,6 +96,17 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     @Override
     public KVMStoragePool createStoragePool(String uuid, String host, int port, String path, String userInfo,
                                             StoragePoolType type, Map<String, String> details, boolean isPrimaryStorage) {
+        if (details == null) {
+            // CloudStack's generic paths re-register a pool without details (cancelling maintenance sends
+            // ModifyStoragePoolCommand(add) with none, seen in 4.23.0.0): keep what the Lightbits host-connect
+            // path sent, or the pool would lose its NVMe discovery endpoints until the next host connect
+            KVMStoragePool known = POOLS.get(uuid);
+            if (known != null && known.getDetails() != null) {
+                details = known.getDetails();
+                LOG.info("Lightbits createStoragePool: pool {} re-registered without details, keeping its"
+                        + " discovery endpoints {}", uuid, details.get(DETAIL_NVME_DISCOVERY));
+            }
+        }
         LightbitsStoragePool pool = new LightbitsStoragePool(uuid, host, port, getStoragePoolType(), this, details);
         POOLS.put(uuid, pool);
         warnOnVersionMismatch(details == null ? null : details.get(DETAIL_PLUGIN_VERSION),
