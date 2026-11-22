@@ -95,17 +95,24 @@ class LightbitsStorageAdaptorTest {
 
     @Test
     void aPoolRegisteredAgainWithoutDetailsAfterMaintenanceKeepsItsDiscoveryEndpoints() {
-        // cancelling maintenance re-registers the pool through CloudStack's generic path, with no details
+        // the Lightbits host-connect path sends the plugin version and the discovery endpoints
         adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
-                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.9.1:8009,10.0.9.2:8009"), true);
+                Map.of(LightbitsStorageAdaptor.DETAIL_PLUGIN_VERSION, "test",
+                        LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.9.1:8009,10.0.9.2:8009"), true);
         List<String> before = LightbitsStorageAdaptor.discoveryEndpoints(adaptor.getStoragePool(POOL_A));
         adaptor.deleteStoragePool(POOL_A, null);   // maintenance withdraws the pool from the host first
-        KVMStoragePool again = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN, null, true);
+        // cancelling it registers the pool through CloudStack's generic path: no details from the management
+        // server, only the agent's own default (LibvirtModifyStoragePoolCommandWrapper, 4.23.0.0)
+        KVMStoragePool again = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                new java.util.HashMap<>(Map.of("clvmsecurezerofill", "false")), true);
         assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(again));
-        assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(adaptor.getStoragePool(POOL_A)));
-        // the Lightbits host-connect path always sends details: those replace the previous ones
+        assertEquals("false", again.getDetails().get("clvmsecurezerofill"));
+        // a null map too
+        again = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN, null, true);
+        assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(again));
+        // the next host connect replaces them
         KVMStoragePool fresh = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
-                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.8.1:8009"), true);
+                Map.of(LightbitsStorageAdaptor.DETAIL_PLUGIN_VERSION, "test", LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.8.1:8009"), true);
         assertEquals(LightbitsNvmeHost.discoveryEndpoints("10.0.8.1:8009", "10.0.0.1"), LightbitsStorageAdaptor.discoveryEndpoints(fresh));
     }
 
