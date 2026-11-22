@@ -71,6 +71,10 @@ class LightbitsNvmeHost {
         String canonical(String path);
         /** Names in a directory, empty if it does not exist. */
         List<String> list(String dir);
+        /** Names in a directory, or null if it cannot be read (gone, or an I/O error). */
+        default List<String> listOrNull(String dir) {
+            return list(dir);
+        }
         void sleep(long millis);
     }
 
@@ -240,17 +244,34 @@ class LightbitsNvmeHost {
             // With native NVMe multipath a namespace shows directly under the subsystem
             // (nvme3n1); without it (nvme_core.multipath=N) it shows under a controller
             // (nvme3/nvme3n1). Either counts.
+            // A directory that cannot be read proves nothing: the subsystem is kept.
             List<String> namespaces = new ArrayList<>();
-            for (String entry : sys.list(dir)) {
+            String unreadable = null;
+            List<String> entries = sys.listOrNull(dir);
+            if (entries == null) {
+                unreadable = dir;
+                entries = new ArrayList<>();
+            }
+            for (String entry : entries) {
                 if (NAMESPACE_ENTRY.matcher(entry).matches()) {
                     namespaces.add(entry);
                 } else if (CONTROLLER_ENTRY.matcher(entry).matches()) {
-                    for (String sub : sys.list(dir + "/" + entry)) {
+                    List<String> below = sys.listOrNull(dir + "/" + entry);
+                    if (below == null) {
+                        unreadable = dir + "/" + entry;
+                        continue;
+                    }
+                    for (String sub : below) {
                         if (NAMESPACE_ENTRY.matcher(sub).matches()) {
                             namespaces.add(entry + "/" + sub);
                         }
                     }
                 }
+            }
+            if (unreadable != null && namespaces.isEmpty()) {
+                LOG.warn("Lightbits: keeping the NVMe/TCP connection to {}: could not read {} to check for namespaces",
+                        nqn, unreadable);
+                continue;
             }
             if (!namespaces.isEmpty()) {
                 LOG.info("Lightbits: keeping the NVMe/TCP connection to {}: {} namespace(s) still present on this host {}",
@@ -513,6 +534,12 @@ class LightbitsNvmeHost {
         public List<String> list(String dir) {
             String[] names = new File(dir).list();
             return names == null ? new ArrayList<>() : new ArrayList<>(Arrays.asList(names));
+        }
+
+        @Override
+        public List<String> listOrNull(String dir) {
+            String[] names = new File(dir).list();
+            return names == null ? null : new ArrayList<>(Arrays.asList(names));
         }
 
         @Override
