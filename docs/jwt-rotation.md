@@ -69,11 +69,13 @@ unaffected (no JWT on the data path).
    any of them may handle the next operation, and after the log line appears (on any of
    them) run the `shred` above on every one of them: each copy is the token in clear text.
 
-   From the `tokenFile` update until the log line appears, run no other `updateStoragePool`
-   on this pool that passes details, `capacitybytes` or `capacityiops`. CloudStack reads all
-   pool details and writes them back in such a call, without a lock the plugin can take part
-   in; if the replacement commits in between, that write puts back the previous token. Name
-   and tag changes do not write the details and are safe.
+   Pause every other `updateStoragePool` on this pool (any parameter, name and tags
+   included) before the `tokenFile` update, wait for those in progress to finish, and resume
+   only after the log line appears. Each such call reads all pool details and writes them
+   back, without a lock the plugin can take part in: one that overlaps the replacement can
+   put back the previous token, or drop the `tokenFile` detail before the plugin reads it.
+   If neither the log line nor a reason for the pool appears within a few minutes, the
+   detail was lost that way: run the `cmk update storagepool` command above again.
 
    The file must be a regular file below `/etc/cloudstack/management`, readable by the
    `cloud` user. If it is missing, unreadable or does not hold a JWT, one operation fails

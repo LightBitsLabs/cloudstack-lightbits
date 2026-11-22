@@ -93,6 +93,21 @@ class LightbitsStorageAdaptorTest {
                 Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, discovery), true);
     }
 
+    @Test
+    void aReRegistrationWithoutDetailsKeepsTheDiscoveryEndpoints() {
+        // cancelling maintenance re-registers the pool through CloudStack's generic path, with no details
+        adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.9.1:8009,10.0.9.2:8009"), true);
+        List<String> before = LightbitsStorageAdaptor.discoveryEndpoints(adaptor.getStoragePool(POOL_A));
+        KVMStoragePool again = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN, null, true);
+        assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(again));
+        assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(adaptor.getStoragePool(POOL_A)));
+        // the Lightbits host-connect path always sends details: those replace the previous ones
+        KVMStoragePool fresh = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.8.1:8009"), true);
+        assertEquals(LightbitsNvmeHost.discoveryEndpoints("10.0.8.1:8009", "10.0.0.1"), LightbitsStorageAdaptor.discoveryEndpoints(fresh));
+    }
+
     private void noEndpointAnswers() {
         sys.results.put("connect-all", new LightbitsNvmeHost.Result(124, "nvme timed out"));
     }
