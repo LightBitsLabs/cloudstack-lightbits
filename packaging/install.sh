@@ -90,9 +90,9 @@ cloudstack_version() {  # $1=libdir
     for f in "$1"/cloudstack-[0-9]*.jar "$1"/cloud-agent-[0-9]*.jar "$1"/cloud-api-[0-9]*.jar; do
         [[ -e "$f" ]] || continue
         name="$(basename "$f" .jar)"
-        name="${name##*-}"
-        if [[ "$name" =~ ^[0-9]+(\.[0-9]+)+ ]]; then
-            echo "$name"
+        # the first dotted number after a dash: cloud-api-4.23.0.0.jar and cloud-api-4.23.0.0-SNAPSHOT.jar
+        if [[ "$name" =~ -([0-9]+(\.[0-9]+)+)(-|$) ]]; then
+            echo "${BASH_REMATCH[1]}"
             return 0
         fi
     done
@@ -151,7 +151,11 @@ check_target() {  # $1=libdir $2=role
     local installed
     installed="$(cloudstack_version "$1")"
     if [[ -z "$installed" ]]; then
-        warn "could not tell the CloudStack version of the $2 from $1"
+        if [[ $FORCE -eq 1 ]]; then
+            warn "could not tell the CloudStack version of the $2 from $1 (continuing because of --force)"
+        else
+            fail "could not tell the CloudStack version of the $2 from $1, so the jar cannot be matched to it. Use --force only if you know this jar is built for the CloudStack release installed here."
+        fi
         return 0
     fi
     say "  $2: CloudStack $installed"
@@ -170,6 +174,12 @@ if [[ $has_agent -eq 1 ]]; then check_target "$AGENT_LIB" "KVM agent"; fi
 # Stop on a wrong jar before anything on the host is touched (--check goes on, to list every problem).
 if [[ $errors -gt 0 && $CHECK_ONLY -eq 0 ]]; then
     die "$errors check(s) failed, nothing was changed"
+fi
+# One install at a time, from host preparation on: two runs could both generate a host NQN, or
+# publish different builds and each prune the other's jar. --check changes nothing and takes no lock.
+if [[ $CHECK_ONLY -eq 0 ]] && command -v flock >/dev/null 2>&1; then
+    exec 9>"${LIGHTBITS_LOCK:-/run/lock/cloudstack-lightbits-install.lock}"
+    flock -n 9 || die "another run of this installer is in progress; wait for it to finish, nothing was changed"
 fi
 changed=()   # what the host preparation below changed, for an accurate message if a later check fails
 
@@ -249,6 +259,7 @@ install_to() {  # $1=libdir
         say "  removing the previous build $(basename "$old")"
         rm -f -- "$old"
     done
+    [[ -f "$lib/$jar_name" ]] || die "$lib/$jar_name is gone after the previous builds were removed (another install ran at the same time?); run the installer again"
     say "installed $lib/$jar_name"
 }
 
@@ -265,8 +276,8 @@ loaded_lines() {  # $1=log $2=offset $3=where
 
 # Wait until the service is active and its log, after the restart, shows this build loaded.
 wait_loaded() {  # $1=service $2=log $3=offset $4=where $5=identity of the log at the restart
-    local svc="$1" log="$2" offset="$3" where="$4" id="$5" waited=0 line state size cur
-    while [[ $waited -lt $WAIT_SECS ]]; do
+    local svc="$1" log="$2" offset="$3" where="$4" id="$5" waited=0 line state size cur nap
+    while :; do
         state="$(systemctl is-active "$svc" 2>/dev/null || true)"
         if [[ "$state" == failed ]]; then
             fail "$svc failed to start; see 'journalctl -u $svc' and $log"
@@ -285,7 +296,10 @@ wait_loaded() {  # $1=service $2=log $3=offset $4=where $5=identity of the log a
                 return 0
             fi
         fi
-        sleep 5; waited=$((waited + 5))
+        # one last look at the deadline, and no sleep past it
+        if [[ $waited -ge $WAIT_SECS ]]; then break; fi
+        nap=$((WAIT_SECS - waited)); if [[ $nap -gt 5 ]]; then nap=5; fi
+        sleep "$nap"; waited=$((waited + nap))
     done
     fail "$svc did not report loading this build within ${WAIT_SECS}s (state: $(systemctl is-active "$svc" 2>/dev/null || true)); look for 'Lightbits storage plugin' in $log"
 }
