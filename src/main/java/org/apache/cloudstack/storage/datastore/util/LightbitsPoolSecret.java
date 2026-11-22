@@ -30,6 +30,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.cloud.utils.crypt.DBEncryptionUtil;
+import com.cloud.utils.db.GlobalLock;
 import com.cloud.utils.db.Transaction;
 import com.cloud.utils.db.TransactionCallbackNoReturn;
 import com.cloud.utils.db.TransactionStatus;
@@ -70,7 +71,8 @@ public final class LightbitsPoolSecret {
     static final String HOW_TO_SET = "write the token to a file under " + TOKEN_FILE_ROOT + " on the management server,"
             + " readable only by the cloud user, and run updateStoragePool details[0]." + KEY_TOKEN_FILE
             + "=<path> (see docs/jwt-rotation.md)";
-    private static final Object LOCK = new Object();
+    /** How long a management server waits for another one to finish replacing a pool's token. */
+    private static final int POOL_LOCK_SECONDS = 60;
 
     private LightbitsPoolSecret() {
     }
@@ -95,13 +97,36 @@ public final class LightbitsPoolSecret {
     /** The validated configuration of a pool, with its token; takes in a replacement token first. */
     public static LightbitsPoolConfig load(StoragePoolDetailsDao dao, long poolId) {
         return load(dao, poolId, DBEncryptionUtil::encrypt, DBEncryptionUtil::decrypt,
-                path -> readTokenFile(path, TOKEN_FILE_ROOT), LightbitsPoolSecret::inTransaction);
+                path -> readTokenFile(path, TOKEN_FILE_ROOT), LightbitsPoolSecret::inTransaction,
+                writes -> underPoolLock(poolId, writes));
     }
 
     /** Tests: details rows in memory, no database transaction. */
     static LightbitsPoolConfig load(StoragePoolDetailsDao dao, long poolId, UnaryOperator<String> encrypt,
                                     UnaryOperator<String> decrypt, UnaryOperator<String> readFile) {
-        return load(dao, poolId, encrypt, decrypt, readFile, Runnable::run);
+        return load(dao, poolId, encrypt, decrypt, readFile, Runnable::run, Runnable::run);
+    }
+
+    /**
+     * Run {@code work} while holding a lock on the pool that every management server sees
+     * (CloudStack's database-backed GlobalLock), so two servers never take in or repair the
+     * same pool's token at once: each re-reads the details under the lock and writes from that.
+     */
+    private static void underPoolLock(long poolId, Runnable work) {
+        GlobalLock lock = GlobalLock.getInternLock("lightbits.pool.token." + poolId);
+        try {
+            if (!lock.lock(POOL_LOCK_SECONDS)) {
+                throw new IllegalStateException("another management server has been replacing the API token of"
+                        + " Lightbits pool " + poolId + " for over " + POOL_LOCK_SECONDS + " s; retry the operation");
+            }
+            try {
+                work.run();
+            } finally {
+                lock.unlock();
+            }
+        } finally {
+            lock.releaseRef();
+        }
     }
 
     /** Several detail writes that must commit together or not at all. */
@@ -116,16 +141,19 @@ public final class LightbitsPoolSecret {
 
     static LightbitsPoolConfig load(StoragePoolDetailsDao dao, long poolId, UnaryOperator<String> encrypt,
                                     UnaryOperator<String> decrypt, UnaryOperator<String> readFile,
-                                    Consumer<Runnable> atomically) {
+                                    Consumer<Runnable> atomically, Consumer<Runnable> exclusively) {
         Map<String, String> details = dao.listDetailsKeyPairs(poolId);
         if (hasReplacement(details)) {
-            synchronized (LOCK) {
-                details = dao.listDetailsKeyPairs(poolId);
-                if (hasReplacement(details)) {
-                    replace(dao, poolId, details, encrypt, readFile, atomically);
-                    details = dao.listDetailsKeyPairs(poolId);
+            // the re-read, the counter repair and the token swap all happen under the pool lock,
+            // so no server writes from a view of the details another server has since changed
+            // (GlobalLock also serializes the threads of one server, per pool)
+            exclusively.accept(() -> {
+                Map<String, String> current = dao.listDetailsKeyPairs(poolId);
+                if (hasReplacement(current)) {
+                    replace(dao, poolId, current, encrypt, readFile, atomically);
                 }
-            }
+            });
+            details = dao.listDetailsKeyPairs(poolId);
         }
         String stored = LightbitsPoolConfig.readChunked(details, KEY_STORED);
         if (stored == null) {
