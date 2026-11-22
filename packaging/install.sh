@@ -247,8 +247,9 @@ install_to() {  # $1=libdir
     say "installed $lib/$jar_name"
 }
 
-log_size() { if [[ -f "$1" ]]; then stat -c %s "$1" 2>/dev/null || echo 0; else echo 0; fi; }
-log_id() { if [[ -f "$1" ]]; then stat -c %d:%i "$1" 2>/dev/null || true; fi; }   # device:inode
+# "<size> <device:inode>" of the file the log path leads to (-L: through a symbolic link), from one
+# stat call so that the size and the identity always belong to the same file; "0 " when there is none
+log_meta() { if [[ -f "$1" ]]; then stat -L -c '%s %d:%i' "$1" 2>/dev/null || echo "0 "; else echo "0 "; fi; }
 
 # Lines the service wrote after the restart that say this build was loaded.
 loaded_lines() {  # $1=log $2=offset $3=where
@@ -259,7 +260,7 @@ loaded_lines() {  # $1=log $2=offset $3=where
 
 # Wait until the service is active and its log, after the restart, shows this build loaded.
 wait_loaded() {  # $1=service $2=log $3=offset $4=where $5=identity of the log at the restart
-    local svc="$1" log="$2" offset="$3" where="$4" id="$5" waited=0 line state
+    local svc="$1" log="$2" offset="$3" where="$4" id="$5" waited=0 line state size cur
     while [[ $waited -lt $WAIT_SECS ]]; do
         state="$(systemctl is-active "$svc" 2>/dev/null || true)"
         if [[ "$state" == failed ]]; then
@@ -268,8 +269,9 @@ wait_loaded() {  # $1=service $2=log $3=offset $4=where $5=identity of the log a
         fi
         if [[ -f "$log" ]]; then
             # a log replaced since the restart (rotated, recreated) is read from its start
-            if [[ "$(log_id "$log")" != "$id" || "$(log_size "$log")" -lt "$offset" ]]; then
-                offset=0; id="$(log_id "$log")"
+            read -r size cur < <(log_meta "$log")
+            if [[ "$cur" != "$id" || "$size" -lt "$offset" ]]; then
+                offset=0; id="$cur"
             fi
             line="$(loaded_lines "$log" "$offset" "$where" | tail -1)"
             # success needs both: this build's load line and a service that is still running
@@ -285,8 +287,7 @@ wait_loaded() {  # $1=service $2=log $3=offset $4=where $5=identity of the log a
 
 restart_and_verify() {  # $1=service $2=log $3=where
     local offset id
-    offset="$(log_size "$2")"
-    id="$(log_id "$2")"
+    read -r offset id < <(log_meta "$2")
     say "restarting $1"
     if ! systemctl restart "$1"; then
         fail "'systemctl restart $1' failed; see 'journalctl -u $1'"

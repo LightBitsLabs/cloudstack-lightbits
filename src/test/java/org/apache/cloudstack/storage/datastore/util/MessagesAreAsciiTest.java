@@ -44,7 +44,9 @@ class MessagesAreAsciiTest {
      * rather than a regular expression: a quote inside a comment or a character literal must
      * not pair with the quote of a real literal, or the literal goes unchecked.
      */
-    static List<String> literals(String src) {
+    static List<String> literals(String source) {
+        // CR alone and CR LF end a line too (JLS 3.4), so a line comment ends at any of them
+        String src = source.replace("\r\n", "\n").replace('\r', '\n');
         List<String> out = new ArrayList<>();
         int line = 1;
         int i = 0;
@@ -136,6 +138,15 @@ class MessagesAreAsciiTest {
         assertTrue(found.stream().anyMatch(l -> l.equals("3: \"ok\"")), found.toString());
         assertTrue(found.stream().anyMatch(l -> l.startsWith("4: ") && !ascii(l)), found.toString());
         assertTrue(found.stream().noneMatch(l -> l.startsWith("3: ") && !ascii(l)), "a comment is not a literal: " + found);
+    }
+
+    @Test
+    void aLineCommentEndsAtCrAloneAsAtLfAndCrLf() {
+        String dash = "\u2014";
+        for (String eol : List.of("\n", "\r\n", "\r")) {
+            List<String> found = literals("// note" + eol + "String m = \"bad " + dash + "\";" + eol + "String n = \"ok\";" + eol);
+            assertEquals(List.of("2: \"bad " + dash + "\"", "3: \"ok\""), found, "line end " + eol.replace("\r", "CR").replace("\n", "LF"));
+        }
     }
 
     @Test
