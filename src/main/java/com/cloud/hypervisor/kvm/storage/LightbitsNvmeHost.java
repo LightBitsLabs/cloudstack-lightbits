@@ -223,7 +223,11 @@ class LightbitsNvmeHost {
      *
      * A subsystem with a namespace is never touched: a namespace means a volume is still
      * granted to this host, by CloudStack or by anything else on the host that uses the same
-     * cluster. A failed disconnect is logged and does not fail the caller.
+     * cluster. Each subsystem is checked right before its own disconnect; a namespace the
+     * kernel adds in the moment between the two cannot be excluded, since nothing lets a
+     * process hold off namespace changes. A failed disconnect is logged and does not fail
+     * the caller; a disconnect counts as done only when no controller of the subsystem is
+     * left in sysfs, since some nvme-cli builds return 0 when a controller deletion fails.
      */
     List<String> disconnectIdleSubsystems() {
         List<String> disconnected = new ArrayList<>();
@@ -254,9 +258,18 @@ class LightbitsNvmeHost {
                 continue;
             }
             Result r = sys.run(30_000, "nvme", "disconnect", "-n", nqn);
-            if (r.ok()) {
+            List<String> left = new ArrayList<>();
+            for (String entry : sys.list(dir)) {
+                if (CONTROLLER_ENTRY.matcher(entry).matches()) {
+                    left.add(entry);
+                }
+            }
+            if (r.ok() && left.isEmpty()) {
                 LOG.info("Lightbits: disconnected this host from {} (no Lightbits pool left, no namespace present)", nqn);
                 disconnected.add(nqn);
+            } else if (r.ok()) {
+                LOG.warn("Lightbits: 'nvme disconnect -n {}' returned 0 but controller(s) {} are still there. The"
+                        + " connection stays until it is disconnected by hand or the host reboots.", nqn, left);
             } else {
                 LOG.warn("Lightbits: 'nvme disconnect -n {}' failed (exit {}): {}. The connection stays until it is"
                         + " disconnected by hand or the host reboots.", nqn, r.exit, r.output);
