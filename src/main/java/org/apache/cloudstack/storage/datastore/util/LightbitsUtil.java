@@ -46,6 +46,21 @@ public final class LightbitsUtil {
         return "cs-" + environment + "-p" + poolId + "-";
     }
 
+    /** What follows the pool prefix in an object name: the CloudStack uuid, and "-src" on a clone's source snapshot. */
+    public static final String OBJECT_SUFFIX_REGEX =
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(-src)?";
+
+    /**
+     * True when {@code name} is an object of this pool exactly: the pool prefix followed by a
+     * CloudStack uuid (and "-src" for a clone's source snapshot). A plain prefix match is not
+     * enough: environment {@code cs1}, pool 7 has the prefix {@code cs-cs1-p7-}, which is also
+     * the start of every name of a deployment whose environment is {@code cs1-p7}.
+     */
+    public static boolean isPoolObject(String environment, long poolId, String name) {
+        return name != null && java.util.regex.Pattern.matches(
+                java.util.regex.Pattern.quote(poolPrefix(environment, poolId)) + OBJECT_SUFFIX_REGEX, name);
+    }
+
     /**
      * Name of the Lightbits volume/snapshot backing a CloudStack object.
      *
