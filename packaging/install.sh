@@ -62,7 +62,7 @@ while [[ $# -gt 0 ]]; do
         --force) FORCE=1 ;;
         --wait)
             [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || bad_usage "--wait needs a number of seconds"
-            WAIT_SECS="$2"; shift ;;
+            WAIT_SECS=$((10#$2)); shift ;;   # base 10: "08" is eight seconds, not an octal error
         -h|--help) usage; exit 0 ;;
         -*) bad_usage "unknown option '$1'" ;;
         *)
@@ -132,14 +132,14 @@ jar_version="$(prop version)"
 jar_built="$(prop built)"
 jar_cloudstack="$(prop cloudstack)"
 say "plugin jar: $JAR"
-if [[ -n "$jar_version" && -n "$jar_built" ]]; then
-    say "  plugin $jar_version, built $jar_built for CloudStack ${jar_cloudstack:-unknown}"
+if [[ -n "$jar_version" && -n "$jar_built" && -n "$jar_cloudstack" ]]; then
+    say "  plugin $jar_version, built $jar_built for CloudStack $jar_cloudstack"
 elif [[ $can_inspect -eq 0 ]]; then
     warn "neither unzip nor python3 is installed: the jar cannot be inspected, so its version and its target CloudStack version are not checked"
 elif [[ $FORCE -eq 1 ]]; then
     warn "'$jar_name' carries no build information ($PROPS); continuing because of --force"
 else
-    fail "'$jar_name' is damaged or carries no build information ($PROPS), so it cannot be matched to this CloudStack. Use --force only if you know this jar is right."
+    fail "'$jar_name' is damaged or its build information ($PROPS) is incomplete (it needs the plugin version, the build time and the target CloudStack version), so it cannot be matched to this CloudStack. Use --force only if you know this jar is right."
 fi
 
 same_line() {  # true if two versions share major.minor (4.23.0.0 and 4.23.1.0)
@@ -165,6 +165,12 @@ check_target() {  # $1=libdir $2=role
 if [[ $has_mgmt -eq 1 ]]; then check_target "$MGMT_LIB" "management server"; fi
 if [[ $has_agent -eq 1 ]]; then check_target "$AGENT_LIB" "KVM agent"; fi
 
+# Stop on a wrong jar before anything on the host is touched (--check goes on, to list every problem).
+if [[ $errors -gt 0 && $CHECK_ONLY -eq 0 ]]; then
+    die "$errors check(s) failed, nothing was changed"
+fi
+changed=()   # what the host preparation below changed, for an accurate message if a later check fails
+
 # ---- KVM host prerequisites ----
 
 if [[ $has_agent -eq 1 ]]; then
@@ -182,6 +188,7 @@ if [[ $has_agent -eq 1 ]]; then
         fi
     elif modprobe nvme-tcp 2>/dev/null; then
         say "  nvme_tcp kernel module: loaded now"
+        changed+=("loaded the nvme_tcp kernel module")
     else
         fail "the nvme_tcp kernel module could not be loaded for the running kernel $(uname -r)"
     fi
@@ -191,6 +198,7 @@ if [[ $has_agent -eq 1 ]]; then
         elif command -v nvme >/dev/null 2>&1 && mkdir -p /etc/nvme && nvme gen-hostnqn > /etc/nvme/hostnqn.new 2>/dev/null \
                 && [[ -s /etc/nvme/hostnqn.new ]] && mv -f /etc/nvme/hostnqn.new /etc/nvme/hostnqn; then
             say "  generated /etc/nvme/hostnqn"
+            changed+=("generated /etc/nvme/hostnqn")
         else
             rm -f /etc/nvme/hostnqn.new
             fail "/etc/nvme/hostnqn is missing and could not be generated"
@@ -208,6 +216,10 @@ if [[ $has_agent -eq 1 ]]; then
 fi
 
 if [[ $errors -gt 0 ]]; then
+    if [[ ${#changed[@]} -gt 0 ]]; then
+        done_list="$(printf '%s; ' "${changed[@]}")"
+        die "$errors check(s) failed; the plugin was not installed. Host preparation done before the failure: ${done_list%; }"
+    fi
     die "$errors check(s) failed, nothing was changed"
 fi
 if [[ $CHECK_ONLY -eq 1 ]]; then
@@ -233,6 +245,7 @@ install_to() {  # $1=libdir
 }
 
 log_size() { if [[ -f "$1" ]]; then stat -c %s "$1" 2>/dev/null || echo 0; else echo 0; fi; }
+log_id() { if [[ -f "$1" ]]; then stat -c %d:%i "$1" 2>/dev/null || true; fi; }   # device:inode
 
 # Lines the service wrote after the restart that say this build was loaded.
 loaded_lines() {  # $1=log $2=offset $3=where
@@ -242,17 +255,22 @@ loaded_lines() {  # $1=log $2=offset $3=where
 }
 
 # Wait until the service is active and its log, after the restart, shows this build loaded.
-wait_loaded() {  # $1=service $2=log $3=offset $4=where
-    local svc="$1" log="$2" offset="$3" where="$4" waited=0 line
+wait_loaded() {  # $1=service $2=log $3=offset $4=where $5=identity of the log at the restart
+    local svc="$1" log="$2" offset="$3" where="$4" id="$5" waited=0 line state
     while [[ $waited -lt $WAIT_SECS ]]; do
-        if [[ "$(systemctl is-active "$svc" 2>/dev/null || true)" == failed ]]; then
+        state="$(systemctl is-active "$svc" 2>/dev/null || true)"
+        if [[ "$state" == failed ]]; then
             fail "$svc failed to start; see 'journalctl -u $svc' and $log"
             return 0
         fi
         if [[ -f "$log" ]]; then
-            if [[ "$(log_size "$log")" -lt "$offset" ]]; then offset=0; fi     # the log was rotated
+            # a log replaced since the restart (rotated, recreated) is read from its start
+            if [[ "$(log_id "$log")" != "$id" || "$(log_size "$log")" -lt "$offset" ]]; then
+                offset=0; id="$(log_id "$log")"
+            fi
             line="$(loaded_lines "$log" "$offset" "$where" | tail -1)"
-            if [[ -n "$line" ]]; then
+            # success needs both: this build's load line and a service that is still running
+            if [[ -n "$line" && "$state" == active ]]; then
                 say "$svc loaded the plugin: Lightbits storage plugin${line##*Lightbits storage plugin}"
                 return 0
             fi
@@ -263,14 +281,15 @@ wait_loaded() {  # $1=service $2=log $3=offset $4=where
 }
 
 restart_and_verify() {  # $1=service $2=log $3=where
-    local offset
+    local offset id
     offset="$(log_size "$2")"
+    id="$(log_id "$2")"
     say "restarting $1"
     if ! systemctl restart "$1"; then
         fail "'systemctl restart $1' failed; see 'journalctl -u $1'"
         return 0
     fi
-    wait_loaded "$1" "$2" "$offset" "$3"
+    wait_loaded "$1" "$2" "$offset" "$3" "$id"
 }
 
 if [[ $has_mgmt -eq 1 ]]; then install_to "$MGMT_LIB"; fi
