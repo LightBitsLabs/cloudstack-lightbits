@@ -42,10 +42,12 @@ unaffected (no JWT on the data path).
 2. **Update the pool credential from a file.** The new token is not passed through the
    CloudStack API: a pool detail holds 255 characters (less than a token), and CloudStack
    writes API parameters and responses to its logs. Instead, on the management server:
+   Use one file per pool (the pool ID in its name): the plugin reads the file up to about a
+   minute after the update, and a shared file could by then hold another pool's token.
    ```bash
-   install -o cloud -g cloud -m 600 /dev/null /etc/cloudstack/management/lightbits-pool.jwt
-   cat > /etc/cloudstack/management/lightbits-pool.jwt     # paste the token, then Ctrl-D
-   cmk update storagepool id=<poolId> details[0].tokenFile=/etc/cloudstack/management/lightbits-pool.jwt
+   install -o cloud -g cloud -m 600 /dev/null /etc/cloudstack/management/lightbits-pool-<poolId>.jwt
+   cat > /etc/cloudstack/management/lightbits-pool-<poolId>.jwt     # paste the token, then Ctrl-D
+   cmk update storagepool id=<poolId> details[0].tokenFile=/etc/cloudstack/management/lightbits-pool-<poolId>.jwt
    ```
    The plugin reads the file on the next use of the pool (at the latest the next capacity
    poll, about a minute), stores the token encrypted and removes the `tokenFile` detail. No
@@ -56,10 +58,12 @@ unaffected (no JWT on the data path).
    grep "the API token of pool <poolId> was replaced and stored encrypted" \
        /var/log/cloudstack/management/management-server.log
    ```
-   If the line is not there, look for the reason logged for the pool instead (the file is
-   still needed for the next attempt). Only after the line is there, delete the file:
+   If the line is not there, look for the reason logged for the pool instead. A failed
+   attempt removes the `tokenFile` detail, so nothing retries on its own: correct the cause
+   (the file or the token in it), then run the `cmk update storagepool` command above again.
+   Only after the line is there, delete the file:
    ```bash
-   shred -u /etc/cloudstack/management/lightbits-pool.jwt
+   shred -u /etc/cloudstack/management/lightbits-pool-<poolId>.jwt
    ```
    With several management servers, put the file on each of them before the update, since
    any of them may handle the next operation, and after the log line appears (on any of
