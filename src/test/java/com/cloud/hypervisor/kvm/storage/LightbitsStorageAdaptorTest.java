@@ -116,6 +116,22 @@ class LightbitsStorageAdaptorTest {
         assertEquals(LightbitsNvmeHost.discoveryEndpoints("10.0.8.1:8009", "10.0.0.1"), LightbitsStorageAdaptor.discoveryEndpoints(fresh));
     }
 
+    @Test
+    void deletingAPoolMaintenanceAlreadyWithdrewDropsTheSubsystemsThatBecameIdle() {
+        String subsys = "/sys/class/nvme-subsystem/nvme-subsys3/";
+        sys.files.put(subsys + "subsysnqn", NQN);
+        sys.files.put(subsys + "nvme3/uevent", "");
+        adaptor.deleteStoragePool("cccccccc-0000-0000-0000-000000000003");   // unknown pool, A and B still there
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+        sys.files.put(subsys + "nvme3n2/uevent", "");   // a VM still uses a volume
+        adaptor.deleteStoragePool(POOL_B);
+        adaptor.deleteStoragePool(POOL_A, null);         // maintenance withdraws the pool before it stops the VMs
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+        sys.files.remove(subsys + "nvme3n2/uevent");     // the VM stopped
+        adaptor.deleteStoragePool(POOL_A);               // the pool is deleted, though no longer registered
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN), sys.commands.toString());
+    }
+
     private void noEndpointAnswers() {
         sys.results.put("connect-all", new LightbitsNvmeHost.Result(124, "nvme timed out"));
     }
