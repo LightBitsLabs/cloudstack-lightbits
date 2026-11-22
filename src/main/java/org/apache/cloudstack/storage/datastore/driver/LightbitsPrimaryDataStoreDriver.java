@@ -623,12 +623,11 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         // ("pool is empty") would green-light allocations against unknown state.
         long poolId = storagePool.getId();
         LightbitsPoolConfig cfg = configForPool(poolId);
-        String prefix = LightbitsUtil.poolPrefix(cfg.getEnvironment(), poolId);
         try {
             long total = 0L;
             for (org.apache.cloudstack.storage.datastore.client.model.Volume v
                     : clientFor(cfg).listVolumes()) {
-                if (v.getName() != null && v.getName().startsWith(prefix)) {
+                if (LightbitsUtil.isPoolObject(cfg.getEnvironment(), poolId, v.getName())) {
                     total += v.getSizeBytes();
                 }
             }
