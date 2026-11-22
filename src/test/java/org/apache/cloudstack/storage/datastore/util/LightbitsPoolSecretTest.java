@@ -216,10 +216,62 @@ class LightbitsPoolSecretTest {
             int before = rows.size();
             writes.run();
             batches.add(rows.size() - before);
-        }).getJwt());
+        }, Runnable::run).getJwt());
         // one batch drops the pointer, one swaps the chunks: no write runs outside a batch
         assertEquals(2, batches.size(), batches.toString());
         assertNoClearTextOrPointer();
+    }
+
+    @Test
+    void everyWriteOfAReplacementRunsWhileThePoolLockIsHeld() {
+        files.put("/t", NEW);
+        rows.put("tokenFile", "/t");
+        boolean[] held = {false};
+        int[] locks = {0};
+        java.util.List<String> outside = new java.util.ArrayList<>();
+        assertEquals(NEW, LightbitsPoolSecret.load(dao, POOL, ENC, DEC, readFile, writes -> {
+            if (!held[0]) {
+                outside.add("write batch");
+            }
+            writes.run();
+        }, work -> {
+            locks[0]++;
+            held[0] = true;
+            try {
+                work.run();
+            } finally {
+                held[0] = false;
+            }
+        }).getJwt());
+        assertEquals(1, locks[0]);
+        assertTrue(outside.isEmpty(), outside.toString());
+        assertNoClearTextOrPointer();
+    }
+
+    @Test
+    void theDetailsAreReadAgainUnderThePoolLock() {
+        // seen pending at first, but another management server took it in while this one waited
+        rows.put("jwt", "aaa.bbb.ccc");
+        java.util.List<String> read = new java.util.ArrayList<>();
+        UnaryOperator<String> countingRead = path -> {
+            read.add(path);
+            return readFile.apply(path);
+        };
+        assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC, countingRead, Runnable::run, work -> {
+            rows.put("jwt", String.valueOf(rows.keySet().stream().filter(k -> k.startsWith("jwt.")).count()));
+            work.run();
+        }).getJwt());
+        assertTrue(read.isEmpty(), read.toString());
+    }
+
+    @Test
+    void noLockIsTakenWhenNothingIsPending() {
+        int[] locks = {0};
+        assertEquals(OLD, LightbitsPoolSecret.load(dao, POOL, ENC, DEC, readFile, Runnable::run, work -> {
+            locks[0]++;
+            work.run();
+        }).getJwt());
+        assertEquals(0, locks[0]);
     }
 
     @Test
