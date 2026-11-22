@@ -57,6 +57,7 @@ class LightbitsNvmeHost {
     private static final long CONNECT_TIMEOUT_MS = 60_000;
     private static final Pattern SUBSYS_NQN = Pattern.compile("nqn\\.2016-01\\.com\\.lightbitslabs:[A-Za-z0-9:._-]{1,200}");
     private static final Pattern NAMESPACE_ENTRY = Pattern.compile("nvme[0-9]+(c[0-9]+)?n[0-9]+");
+    private static final Pattern CONTROLLER_ENTRY = Pattern.compile("nvme[0-9]+");
     private static final String SUBSYSTEMS = "/sys/class/nvme-subsystem";
     private static final AtomicInteger ROTATION = new AtomicInteger();
 
@@ -232,10 +233,19 @@ class LightbitsNvmeHost {
             if (nqn == null || !SUBSYS_NQN.matcher(nqn).matches()) {
                 continue;
             }
+            // With native NVMe multipath a namespace shows directly under the subsystem
+            // (nvme3n1); without it (nvme_core.multipath=N) it shows under a controller
+            // (nvme3/nvme3n1). Either counts.
             List<String> namespaces = new ArrayList<>();
             for (String entry : sys.list(dir)) {
                 if (NAMESPACE_ENTRY.matcher(entry).matches()) {
                     namespaces.add(entry);
+                } else if (CONTROLLER_ENTRY.matcher(entry).matches()) {
+                    for (String sub : sys.list(dir + "/" + entry)) {
+                        if (NAMESPACE_ENTRY.matcher(sub).matches()) {
+                            namespaces.add(entry + "/" + sub);
+                        }
+                    }
                 }
             }
             if (!namespaces.isEmpty()) {

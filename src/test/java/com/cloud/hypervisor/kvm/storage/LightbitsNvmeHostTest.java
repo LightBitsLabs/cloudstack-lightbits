@@ -344,6 +344,19 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
+    void aNamespaceBelowAControllerKeepsTheSubsystemWhenNativeMultipathIsOff() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme4", "nvme3/nvme3n1");
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+    }
+
+    @Test
+    void controllersWithNoNamespaceBelowThemAreStillIdle() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme3/device", "nvme4/state");
+        assertEquals(List.of(NQN), host.disconnectIdleSubsystems());
+    }
+
+    @Test
     void subsystemsOfOtherVendorsAndOddNqnsAreLeftAlone() {
         subsystem("nvme-subsys0", "nqn.2014-08.org.nvmexpress:uuid:local-disk", "nvme0");
         subsystem("nvme-subsys1", "nqn.2016-01.com.lightbitslabs:uuid:x; rm -rf /", "nvme1");
