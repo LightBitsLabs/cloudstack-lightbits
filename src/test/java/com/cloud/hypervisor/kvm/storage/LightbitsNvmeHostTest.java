@@ -49,6 +49,7 @@ class LightbitsNvmeHostTest {
         Runnable onRescan = () -> { };
         Runnable onConnect = () -> { };
         boolean disconnectRemoves = true;
+        final java.util.Set<String> unreadable = new java.util.HashSet<>();
         int slept;
 
         @Override
@@ -85,6 +86,11 @@ class LightbitsNvmeHostTest {
         @Override public String read(String path) { return files.get(path); }
         @Override public String canonical(String path) { return links.get(path); }
         @Override public void sleep(long millis) { slept++; }
+
+        @Override
+        public List<String> listOrNull(String dir) {
+            return unreadable.contains(dir) ? null : list(dir);
+        }
 
         @Override
         public List<String> list(String dir) {
@@ -382,6 +388,18 @@ class LightbitsNvmeHostTest {
         subsystem("nvme-subsys3", NQN, "nvme3");
         sys.results.put("nvme disconnect", new LightbitsNvmeHost.Result(1, "busy"));
         assertTrue(host.disconnectIdleSubsystems().isEmpty());
+    }
+
+    @Test
+    void aSubsystemWhoseNamespacesCannotBeReadIsKept() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme3n1");              // a namespace is there
+        subsystem("nvme-subsys4", NQN + "-b", "nvme4", "nvme4/nvme4n1");  // one below a controller
+        subsystem("nvme-subsys5", NQN + "-c", "nvme5");                  // really idle
+        sys.unreadable.add(SUBSYS + "nvme-subsys3");
+        sys.unreadable.add(SUBSYS + "nvme-subsys4/nvme4");
+        assertEquals(List.of(NQN + "-c"), host.disconnectIdleSubsystems());
+        assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -n " + NQN)
+                || c.equals("nvme disconnect -n " + NQN + "-b")), sys.commands.toString());
     }
 
     @Test
