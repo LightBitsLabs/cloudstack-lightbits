@@ -134,8 +134,10 @@ jar_cloudstack="$(prop cloudstack)"
 say "plugin jar: $JAR"
 if [[ -n "$jar_version" && -n "$jar_built" && -n "$jar_cloudstack" ]]; then
     say "  plugin $jar_version, built $jar_built for CloudStack $jar_cloudstack"
+elif [[ $can_inspect -eq 0 && $FORCE -eq 1 ]]; then
+    warn "neither unzip nor python3 is installed: the jar cannot be inspected, so its version and its target CloudStack version are not checked; continuing because of --force"
 elif [[ $can_inspect -eq 0 ]]; then
-    warn "neither unzip nor python3 is installed: the jar cannot be inspected, so its version and its target CloudStack version are not checked"
+    fail "neither unzip nor python3 is installed, so the jar cannot be inspected and cannot be matched to this CloudStack. Install one of them, or use --force only if you know this jar is right."
 elif [[ $FORCE -eq 1 ]]; then
     warn "'$jar_name' carries no build information ($PROPS); continuing because of --force"
 else
@@ -234,13 +236,14 @@ install_to() {  # $1=libdir
     tmp="$lib/.${jar_name}.installing"
     cp -f -- "$JAR" "$tmp"
     chmod 644 "$tmp"
+    # publish first: if this fails, the previous build is still in place
+    mv -f -- "$tmp" "$lib/$jar_name"
     # one plugin jar only: two builds on the class path load in an undefined order
     for old in "$lib"/$JAR_GLOB; do
         [[ -e "$old" && "$(basename "$old")" != "$jar_name" ]] || continue
         say "  removing the previous build $(basename "$old")"
         rm -f -- "$old"
     done
-    mv -f -- "$tmp" "$lib/$jar_name"
     say "installed $lib/$jar_name"
 }
 
