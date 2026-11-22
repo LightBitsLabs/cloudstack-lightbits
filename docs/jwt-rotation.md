@@ -65,6 +65,12 @@ unaffected (no JWT on the data path).
    any of them may handle the next operation, and after the log line appears (on any of
    them) run the `shred` above on every one of them: each copy is the token in clear text.
 
+   From the `tokenFile` update until the log line appears, run no other `updateStoragePool`
+   on this pool that passes details, `capacitybytes` or `capacityiops`. CloudStack reads all
+   pool details and writes them back in such a call, without a lock the plugin can take part
+   in; if the replacement commits in between, that write puts back the previous token. Name
+   and tag changes do not write the details and are safe.
+
    The file must be a regular file below `/etc/cloudstack/management`, readable by the
    `cloud` user. If it is missing, unreadable or does not hold a JWT, one operation fails
    with the reason, the `tokenFile` detail is removed and the previous token stays in use. A
