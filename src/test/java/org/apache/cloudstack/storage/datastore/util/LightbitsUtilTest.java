@@ -57,4 +57,17 @@ class LightbitsUtilTest {
                 () -> LightbitsUtil.parseReplicasDetail("two"));
         assertTrue(e.getMessage().contains("must be an integer"), e.getMessage());
     }
+
+    @Test
+    void onlyNamesThatAreExactlyThisPoolsAreItsObjects() {
+        String uuid = "dddddddd-2222-3333-4444-555555555555";
+        org.junit.jupiter.api.Assertions.assertTrue(LightbitsUtil.isPoolObject("cs1", 7, "cs-cs1-p7-" + uuid));
+        org.junit.jupiter.api.Assertions.assertTrue(LightbitsUtil.isPoolObject("cs1", 7, "cs-cs1-p7-" + uuid + "-src"));
+        // environment "cs1-p7", pool 3: starts with cs1/pool 7's prefix but is not its object
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsUtil.isPoolObject("cs1", 7, "cs-cs1-p7-p3-" + uuid));
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsUtil.isPoolObject("cs1", 7, "cs-cs1-p7-" + uuid + "-x"));
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsUtil.isPoolObject("cs1", 7, "cs-cs1-p70-" + uuid));
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsUtil.isPoolObject("c.1", 7, "cs-cx1-p7-" + uuid));
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsUtil.isPoolObject("cs1", 7, null));
+    }
 }

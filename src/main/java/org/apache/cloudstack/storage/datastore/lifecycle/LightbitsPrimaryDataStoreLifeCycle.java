@@ -98,7 +98,7 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
                 "^" + java.util.regex.Pattern.quote("cs-" + cfg.getEnvironment() + "-p") + "([0-9]+)-"
                         // the CloudStack uuid of the object, and "-src" on the snapshot behind a clone; anything
                         // else is another environment whose name starts with this one plus "-p<digits>-"
-                        + "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(-src)?");
+                        + LightbitsUtil.OBJECT_SUFFIX_REGEX);
         java.util.List<String> names = new java.util.ArrayList<>();
         try {
             client.listVolumes().forEach(v -> names.add(v.getName()));
@@ -450,17 +450,17 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
                 templatePoolDao.remove(ref.getId());
             }
 
-            // Per-pool prefix: cs-<environment>-p<poolId>- — unique to THIS pool, so the
-            // project-wide list can be filtered safely without touching sibling pools.
-            String prefix = LightbitsUtil.poolPrefix(cfg.getEnvironment(), store.getId());
+            // Only names that are exactly this pool's (prefix cs-<environment>-p<poolId>- plus a
+            // CloudStack uuid): a prefix match would also take the objects of an environment
+            // named "<environment>-p<poolId>" sharing the project.
             for (org.apache.cloudstack.storage.datastore.client.model.Snapshot s : client.listSnapshots()) {
-                if (s.getName() != null && s.getName().startsWith(prefix)) {
+                if (LightbitsUtil.isPoolObject(cfg.getEnvironment(), store.getId(), s.getName())) {
                     client.deleteSnapshot(s.getUuid());
                     LOG.info("Lightbits pool {} delete: swept snapshot {}", store.getId(), s.getName());
                 }
             }
             for (org.apache.cloudstack.storage.datastore.client.model.Volume v : client.listVolumes()) {
-                if (v.getName() != null && v.getName().startsWith(prefix)) {
+                if (LightbitsUtil.isPoolObject(cfg.getEnvironment(), store.getId(), v.getName())) {
                     client.deleteVolume(v.getUuid());
                     LOG.info("Lightbits pool {} delete: swept volume {}", store.getId(), v.getName());
                 }
