@@ -19,6 +19,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.delete;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.absent;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
@@ -91,6 +92,41 @@ class LightbitsApiClientTest {
         return "{\"UUID\":\"" + VOL_UUID + "\",\"name\":\"cs-abc\",\"state\":\"" + state
                 + "\",\"size\":\"" + size + "\",\"replicaCount\":3,\"projectName\":\"default\","
                 + "\"ETag\":\"" + etag + "\",\"acl\":{\"values\":[\"ALLOW_NONE\"]}}";
+    }
+
+    // ---- lists read every page ----
+
+    private static String page(String kind, int from, int count) {
+        StringBuilder b = new StringBuilder("{\"" + kind + "\":[");
+        for (int i = from; i < from + count; i++) {
+            b.append(i == from ? "" : ",").append(String.format(
+                    "{\"UUID\":\"%08d-0000-0000-0000-000000000000\",\"name\":\"n%d\",\"state\":\"Available\",\"size\":\"1\"}", i, i));
+        }
+        return b.append("]}").toString();
+    }
+
+    @Test
+    void volumeAndSnapshotListsReadEveryPage() {
+        for (String kind : new String[] {"volumes", "snapshots"}) {
+            String path = "/api/v2/projects/default/" + kind;
+            wm.stubFor(get(urlPathEqualTo(path)).withQueryParam("limit", equalTo("1000")).atPriority(1)
+                    .withQueryParam("offsetUUID", absent())
+                    .willReturn(aResponse().withStatus(200).withBody(page(kind, 0, 1000))));
+            wm.stubFor(get(urlPathEqualTo(path)).withQueryParam("limit", equalTo("1000")).atPriority(1)
+                    .withQueryParam("offsetUUID", equalTo("00000999-0000-0000-0000-000000000000"))
+                    .willReturn(aResponse().withStatus(200).withBody(page(kind, 1000, 3))));
+        }
+        assertEquals(1003, client.listVolumes().size());
+        assertEquals(1003, client.listSnapshots().size());
+        assertEquals("n1002", client.listSnapshots().get(1002).getName());
+    }
+
+    @Test
+    void aListThatDoesNotAdvanceIsAnErrorNotAPartialList() {
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/volumes")).atPriority(1)
+                .willReturn(aResponse().withStatus(200).withBody(page("volumes", 0, 1000))));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.listVolumes());
+        assertTrue(e.getMessage().contains("did not advance"), e.getMessage());
     }
 
     // ---- sunny day ----
@@ -278,7 +314,7 @@ class LightbitsApiClientTest {
 
     @Test
     void listSnapshotsFiltersDeletedAndDeleting() {
-        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/snapshots"))
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/snapshots"))
                 .willReturn(aResponse().withStatus(200).withBody("{\"snapshots\":["
                     + "{\"UUID\":\"snap-1\",\"name\":\"cs-env-a-src\",\"state\":\"Available\"},"
                     + "{\"UUID\":\"snap-2\",\"name\":\"cs-env-b-src\",\"state\":\"Deleting\"},"

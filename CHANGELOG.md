@@ -66,6 +66,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   with 0.1.0-alpha.1 need their fingerprint set after the upgrade** (see INSTALL.md).
 
 ### Fixed
+- Volume and snapshot lists are read page by page (the cluster returns at most 1000 objects
+  per request). Before, the capacity sum, the environment-name check and the pool-delete sweep
+  saw only the first 1000 objects of the project.
+- Deleting a pool removes only objects named exactly as its own (`cs-<environment>-p<id>-`
+  plus a CloudStack uuid), not every name with that prefix: environment `cs1`, pool 7 no longer
+  matches the objects of an environment named `cs1-p7`. The pool's provisioned-bytes sum uses
+  the same rule.
 - Snapshot revert never reached the plugin: the driver did not advertise the
   `CAN_REVERT_VOLUME_TO_SNAPSHOT` capability, so CloudStack rejected every revert.
 - A failed cluster-side delete was reported to CloudStack as success, orphaning the volume.
