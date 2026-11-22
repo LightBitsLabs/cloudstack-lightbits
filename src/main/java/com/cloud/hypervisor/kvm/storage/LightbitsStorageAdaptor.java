@@ -313,15 +313,17 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
 
     @Override
     public boolean deleteStoragePool(String uuid) {
-        KVMStoragePool removed = POOLS.remove(uuid);
+        POOLS.remove(uuid);
         synchronized (CONNECT_LOCK) {
             lookupConnects.remove(uuid);
         }
-        if (removed == null || !POOLS.isEmpty()) {
+        if (!POOLS.isEmpty()) {
             return true;
         }
-        // The last Lightbits pool of this host is gone (deleted, or put in maintenance): drop the
-        // NVMe/TCP connections nothing uses any more. The next attach connects again.
+        // No Lightbits pool is left on this host (deleted, or put in maintenance): drop the NVMe/TCP
+        // connections nothing uses any more. The next attach connects again. This also runs when the
+        // pool was already withdrawn: maintenance withdraws it before it stops the VMs, so a subsystem
+        // that still had a namespace then is only idle when the pool is finally deleted.
         synchronized (CONNECT_LOCK) {
             if (!POOLS.isEmpty()) {
                 return true;
