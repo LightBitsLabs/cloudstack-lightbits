@@ -359,10 +359,14 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     @Override
     public boolean cancelMaintain(DataStore store) {
+        // The pool goes Up first, as in CloudStack's in-tree plugins: the VM restarts that
+        // cancelMaintain triggers must be able to place volumes on this pool, and a failed
+        // restart must not leave the pool in maintenance.
+        boolean up = dataStoreHelper.cancelMaintain(store);
         if (storagePoolAutomation != null) {
             storagePoolAutomation.cancelMaintain(store);
         }
-        return dataStoreHelper.cancelMaintain(store);
+        return up;
     }
 
     @Override
@@ -394,7 +398,8 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
                 if (answer == null) {
                     why = "no answer (host down or disconnected)";
                 } else if (!answer.getResult()) {
-                    why = answer.getDetails();
+                    String details = answer.getDetails();
+                    why = details == null || details.isBlank() ? "refused, no details given" : details;
                 }
             } catch (RuntimeException e) {
                 why = e.toString();
