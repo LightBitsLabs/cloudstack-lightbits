@@ -82,13 +82,15 @@ class LightbitsAclTest {
         String shared = "cs-cs1-p2-bbbbbbbb-2222-3333-4444-555555555555";
         String clean = "cs-cs1-p2-cccccccc-2222-3333-4444-555555555555";
         String otherPool = "cs-cs1-p20-dddddddd-2222-3333-4444-555555555555";
+        String otherEnv = "cs-cs1-p2-p5-eeeeeeee-2222-3333-4444-555555555555";   // environment "cs1-p2", pool 5
         wm.stubFor(get(urlPathEqualTo(VOLUMES)).atPriority(5).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":["
                 + vol("u-mine", mine, "1", GONE) + "," + vol("u-shared", shared, "1", STAYS, GONE) + ","
-                + vol("u-clean", clean, "1", STAYS) + "," + vol("u-other", otherPool, "1", GONE) + "]}")));
+                + vol("u-clean", clean, "1", STAYS) + "," + vol("u-other", otherPool, "1", GONE) + ","
+                + vol("u-env", otherEnv, "1", GONE) + "]}")));
         stubVolume("u-mine", mine, GONE);
         stubVolume("u-shared", shared, STAYS, GONE);
 
-        assertEquals(List.of(mine, shared), LightbitsAcl.pruneHost(client, "cs-cs1-p2-", GONE));
+        assertEquals(List.of(mine, shared), LightbitsAcl.pruneHost(client, "cs1", 2, GONE));
 
         wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u-mine")).withHeader("If-Match", equalTo("1"))
                 .withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo("ALLOW_NONE"))));
@@ -97,6 +99,7 @@ class LightbitsAclTest {
                 .withRequestBody(matchingJsonPath("$.acl.values.length()", equalTo("1"))));
         wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u-clean")));
         wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u-other")));
+        wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u-env")));
     }
 
     @Test
@@ -110,6 +113,6 @@ class LightbitsAclTest {
         wm.stubFor(put(urlEqualTo(VOLUMES + "/u-broken")).willReturn(aResponse().withStatus(403).withBody("denied")));
         stubVolume("u-fine", fine, GONE);
 
-        assertEquals(List.of(fine), LightbitsAcl.pruneHost(client, "cs-cs1-p2-", GONE));
+        assertEquals(List.of(fine), LightbitsAcl.pruneHost(client, "cs1", 2, GONE));
     }
 }

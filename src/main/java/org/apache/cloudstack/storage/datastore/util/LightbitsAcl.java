@@ -92,15 +92,15 @@ public final class LightbitsAcl {
     }
 
     /**
-     * Remove a host from the ACL of every volume whose name starts with {@code namePrefix} (one
-     * pool's volumes). Used when the host leaves CloudStack: an entry left behind would let that
+     * Remove a host from the ACL of every volume of one pool (names exactly as
+     * {@link LightbitsUtil#isPoolObject} defines them, not every name with the pool's prefix). Used when the host leaves CloudStack: an entry left behind would let that
      * machine keep reading and writing the volume after CloudStack has stopped tracking it.
      * A volume that cannot be updated is logged and skipped. Returns the names updated.
      */
-    public static List<String> pruneHost(LightbitsApiClient client, String namePrefix, String hostNqn) {
+    public static List<String> pruneHost(LightbitsApiClient client, String environment, long poolId, String hostNqn) {
         List<String> pruned = new ArrayList<>();
         for (Volume v : client.listVolumes()) {
-            if (v.getName() == null || !v.getName().startsWith(namePrefix) || !hosts(v).contains(hostNqn)) {
+            if (v.getName() == null || !LightbitsUtil.isPoolObject(environment, poolId, v.getName()) || !hosts(v).contains(hostNqn)) {
                 continue;
             }
             try {
