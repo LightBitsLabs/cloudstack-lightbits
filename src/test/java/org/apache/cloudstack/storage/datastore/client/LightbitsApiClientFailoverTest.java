@@ -212,6 +212,41 @@ class LightbitsApiClientFailoverTest {
     }
 
     @Test
+    void aSettlePollDoesNotFailOverWithLessThanOneAttemptLeft() {
+        // a fails after 600 ms of a 1100 ms wait: about 500 ms are left, less than the 1 s an attempt
+        // always gets, so trying b would end after the deadline. Deterministic: before the fix b was
+        // always tried here and answered.
+        a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(503).withFixedDelay(600)));
+        LightbitsApiClient c = client(url(a), url(b));
+        c.setSettleWait(1100, 1);
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> c.waitForVolume(UUID, null));
+        assertEquals(Kind.TRANSIENT, e.getKind());
+        b.verify(0, getRequestedFor(urlEqualTo(VOLUMES + "/" + UUID)));
+    }
+
+    @Test
+    void noNewPollStartsWhenThePauseBetweenPollsUsedUpTheMargin() {
+        // both endpoints fail after about 200 ms of a 2000 ms wait: well over 1 s is left (room for an
+        // attempt), but after the 900 ms pause less than 1 s is: no second poll may start
+        a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(503).withFixedDelay(200)));
+        LightbitsApiClient c = client(url(a), deadEndpoint);
+        c.setSettleWait(2000, 900);
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> c.waitForVolume(UUID, null));
+        assertEquals(Kind.TRANSIENT, e.getKind());
+        a.verify(1, getRequestedFor(urlEqualTo(VOLUMES + "/" + UUID)));
+    }
+
+    @Test
+    void aNewPollStillStartsWhenEnoughIsLeftAfterThePause() {
+        // the same with a 3500 ms wait: well over 1 s is left after the pause, so the poll is retried
+        a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(503).withFixedDelay(200)));
+        LightbitsApiClient c = client(url(a), deadEndpoint);
+        c.setSettleWait(3500, 900);
+        assertThrows(LightbitsApiException.class, () -> c.waitForVolume(UUID, null));
+        assertTrue(a.countRequestsMatching(getRequestedFor(urlEqualTo(VOLUMES + "/" + UUID)).build()).getCount() >= 2);
+    }
+
+    @Test
     void aSettlePollDoesNotStartOnAnotherEndpointAfterItsDeadline() {
         a.stubFor(get(urlEqualTo(VOLUMES + "/" + UUID)).willReturn(aResponse().withStatus(200).withBody(VOLUME).withFixedDelay(4000)));
         LightbitsApiClient c = client(url(a), url(b));
