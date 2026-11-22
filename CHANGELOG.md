@@ -11,7 +11,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   shows no namespace on that host: a connection with a volume on it is never touched. The next
   attach connects again. Before this the connections stayed until the host rebooted.
 - When a host is removed from CloudStack it is taken out of the ACL of every volume of every
-  Lightbits pool, so a machine CloudStack no longer tracks cannot keep access to a volume.
+  Lightbits pool, so a machine CloudStack no longer tracks does not keep access to a volume.
+  This is best effort: a volume whose ACL cannot be updated is logged ("could not remove host
+  ... from the ACL of volume ...") and the host removal goes on. Check the management server
+  log for that warning and remove such entries on the cluster before treating the host's
+  access as revoked.
 - API failover: `&endpoints=<host[:port]>,...` lists further API endpoints of the cluster.
   Reads fail over on any transient failure; changes fail over only when the request provably
   never reached the endpoint, otherwise the state of the object decides. An endpoint that
