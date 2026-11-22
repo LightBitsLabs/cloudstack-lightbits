@@ -179,8 +179,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                             org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());
                     java.util.List<String> pruned = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(cfg.newClient(),
-                            org.apache.cloudstack.storage.datastore.util.LightbitsUtil.poolPrefix(cfg.getEnvironment(), pool.getId()),
-                            nqn.getValue());
+                            cfg.getEnvironment(), pool.getId(), nqn.getValue());
                     if (!pruned.isEmpty()) {
                         LOG.warn("Lightbits: host {} is being removed and still had access to {} volume(s) of pool {}: removed it"
                                 + " from their ACLs {}", hostId, pruned.size(), pool.getName(), pruned);
