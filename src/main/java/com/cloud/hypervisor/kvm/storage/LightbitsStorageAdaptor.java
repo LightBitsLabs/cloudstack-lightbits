@@ -43,6 +43,8 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     private static final Logger LOG = LogManager.getLogger(LightbitsStorageAdaptor.class);
 
     private static final Map<String, KVMStoragePool> POOLS = new ConcurrentHashMap<>();
+    /** The details each pool was last registered with, kept after the pool is removed (see createStoragePool). */
+    private static final Map<String, Map<String, String>> LAST_DETAILS = new ConcurrentHashMap<>();
     private static final int DEFAULT_WAIT_SECS = 60;
     private static final Object CONNECT_LOCK = new Object();
     private static final Object RESCAN_LOCK = new Object();
@@ -97,15 +99,18 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     public KVMStoragePool createStoragePool(String uuid, String host, int port, String path, String userInfo,
                                             StoragePoolType type, Map<String, String> details, boolean isPrimaryStorage) {
         if (details == null) {
-            // CloudStack's generic paths re-register a pool without details (cancelling maintenance sends
-            // ModifyStoragePoolCommand(add) with none, seen in 4.23.0.0): keep what the Lightbits host-connect
-            // path sent, or the pool would lose its NVMe discovery endpoints until the next host connect
-            KVMStoragePool known = POOLS.get(uuid);
-            if (known != null && known.getDetails() != null) {
-                details = known.getDetails();
-                LOG.info("Lightbits createStoragePool: pool {} re-registered without details, keeping its"
+            // CloudStack's generic paths register a pool without details: maintenance removes the pool from
+            // the host and cancelling it sends ModifyStoragePoolCommand(add) with none (seen in 4.23.0.0).
+            // Use what the Lightbits host-connect path last sent, or the pool would lose its NVMe discovery
+            // endpoints until the next host connect.
+            Map<String, String> last = LAST_DETAILS.get(uuid);
+            if (last != null) {
+                details = last;
+                LOG.info("Lightbits createStoragePool: pool {} registered without details, keeping its"
                         + " discovery endpoints {}", uuid, details.get(DETAIL_NVME_DISCOVERY));
             }
+        } else {
+            LAST_DETAILS.put(uuid, java.util.Collections.unmodifiableMap(new java.util.HashMap<>(details)));
         }
         LightbitsStoragePool pool = new LightbitsStoragePool(uuid, host, port, getStoragePoolType(), this, details);
         POOLS.put(uuid, pool);

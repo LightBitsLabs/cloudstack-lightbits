@@ -94,11 +94,12 @@ class LightbitsStorageAdaptorTest {
     }
 
     @Test
-    void aReRegistrationWithoutDetailsKeepsTheDiscoveryEndpoints() {
+    void aPoolRegisteredAgainWithoutDetailsAfterMaintenanceKeepsItsDiscoveryEndpoints() {
         // cancelling maintenance re-registers the pool through CloudStack's generic path, with no details
         adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
                 Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.9.1:8009,10.0.9.2:8009"), true);
         List<String> before = LightbitsStorageAdaptor.discoveryEndpoints(adaptor.getStoragePool(POOL_A));
+        adaptor.deleteStoragePool(POOL_A, null);   // maintenance withdraws the pool from the host first
         KVMStoragePool again = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN, null, true);
         assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(again));
         assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(adaptor.getStoragePool(POOL_A)));
