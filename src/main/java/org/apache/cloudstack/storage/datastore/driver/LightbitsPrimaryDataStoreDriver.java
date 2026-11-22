@@ -795,8 +795,44 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public Pair<Long, Long> getVolumeStats(StoragePool storagePool, String volumeId) {
-        return volumeStats(clientForPool(storagePool.getId()), volumeId, LAST_STATS);
+        StatsBackoff backoff = STATS_BACKOFF.computeIfAbsent(storagePool.getId(), id -> new StatsBackoff(System::currentTimeMillis));
+        return volumeStats(clientForPool(storagePool.getId()), volumeId, LAST_STATS, backoff);
     }
+
+    /** How long after a failed statistics read of a pool its volumes are not read again. */
+    static final long STATS_RETRY_MILLIS = 60_000L;
+
+    /**
+     * When a statistics read of a pool last failed. CloudStack asks for each volume in turn,
+     * without a timeout, and a stalled endpoint makes a read take about 90 s (three attempts):
+     * without this, every volume of the pool would repeat that read in the same pass. For
+     * {@link #STATS_RETRY_MILLIS} after a failure the volumes of the pool get their last sample
+     * without a read; then reads start again, so collection recovers on its own.
+     */
+    static final class StatsBackoff {
+        private final java.util.function.LongSupplier clock;
+        private volatile long failedAt;
+        private volatile boolean failed;
+
+        StatsBackoff(java.util.function.LongSupplier clock) {
+            this.clock = clock;
+        }
+
+        boolean active() {
+            return failed && clock.getAsLong() - failedAt < STATS_RETRY_MILLIS;
+        }
+
+        void failed() {
+            failedAt = clock.getAsLong();
+            failed = true;
+        }
+
+        void succeeded() {
+            failed = false;
+        }
+    }
+
+    private static final Map<Long, StatsBackoff> STATS_BACKOFF = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * Last sample of each volume, by Lightbits UUID. CloudStack asks for the volumes of one host
@@ -820,17 +856,31 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      * cluster propagates. A made-up zero would be shown and metered as a real value.
      */
     static Pair<Long, Long> volumeStats(LightbitsApiClient client, String volumeId) {
-        return volumeStats(client, volumeId, new HashMap<>());
+        return volumeStats(client, volumeId, new HashMap<>(), new StatsBackoff(System::currentTimeMillis));
     }
 
-    static Pair<Long, Long> volumeStats(LightbitsApiClient client, String volumeId, Map<String, Pair<Long, Long>> last) {
+    static Pair<Long, Long> volumeStats(LightbitsApiClient client, String volumeId, Map<String, Pair<Long, Long>> last,
+                                        StatsBackoff backoff) {
         if (volumeId == null || !volumeId.matches("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")) {
             return null;   // not a volume this plugin created; never put a foreign value into a request path
+        }
+        if (backoff.active()) {
+            Pair<Long, Long> previous = last.get(volumeId);
+            if (previous == null) {
+                throw new com.cloud.utils.exception.CloudRuntimeException("Lightbits: no statistics for volume " + volumeId
+                        + ": a statistics read of its pool failed less than " + STATS_RETRY_MILLIS / 1000
+                        + " s ago, so the cluster is not asked again yet");
+            }
+            LOG.debug("Lightbits: a statistics read of the pool failed less than {} s ago; reporting the last sample of"
+                    + " volume {} without a read", STATS_RETRY_MILLIS / 1000, volumeId);
+            return previous;
         }
         java.util.Optional<org.apache.cloudstack.storage.datastore.client.model.Volume> found;
         try {
             found = client.getVolume(volumeId);
+            backoff.succeeded();
         } catch (RuntimeException e) {
+            backoff.failed();
             Pair<Long, Long> previous = last.get(volumeId);
             if (previous == null) {
                 throw e;
