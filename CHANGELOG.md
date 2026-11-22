@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 - Per-volume statistics: CloudStack shows and meters how much of each Lightbits volume holds
   data (the cluster's logical figure, before compression and replication) next to its size.
+  A volume with no figure in one round reports its last one: CloudStack drops the figures of
+  every volume of a host in a round where one is missing.
 - Host cleanup. When the last Lightbits pool of a KVM host is deleted or put in maintenance,
   the host disconnects from the cluster's NVMe subsystems, but only from a subsystem that
   shows no namespace on that host: a connection with a volume on it is never touched. The next

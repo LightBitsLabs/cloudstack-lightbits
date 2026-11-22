@@ -96,4 +96,70 @@ class LightbitsPrimaryDataStoreDriverTest {
         org.junit.jupiter.api.Assertions.assertThrows(org.apache.cloudstack.storage.datastore.client.LightbitsApiException.class,
                 () -> statsFor(503, "no leader"));
     }
+
+    /**
+     * CloudStack's loop (StorageManagerImpl.getVolumeStats, 4.22 and 4.23): one request per
+     * host, and the whole answer is dropped at the first volume with no sample.
+     */
+    private static Map<String, com.cloud.utils.Pair<Long, Long>> cloudStackRound(
+            java.util.function.Function<String, com.cloud.utils.Pair<Long, Long>> driver, String... volumes) {
+        Map<String, com.cloud.utils.Pair<Long, Long>> answer = new java.util.HashMap<>();
+        for (String v : volumes) {
+            com.cloud.utils.Pair<Long, Long> p = driver.apply(v);
+            if (p == null) {
+                return null;
+            }
+            answer.put(v, p);
+        }
+        return answer;
+    }
+
+    @Test
+    void aVolumeWithNoSampleThisRoundDoesNotCostTheOthersTheirs() {
+        String a = "aaaaaaaa-0000-0000-0000-000000000001", b = "bbbbbbbb-0000-0000-0000-000000000002",
+                c = "cccccccc-0000-0000-0000-000000000003";
+        com.github.tomakehurst.wiremock.WireMockServer wm = new com.github.tomakehurst.wiremock.WireMockServer(
+                com.github.tomakehurst.wiremock.core.WireMockConfiguration.options().dynamicPort());
+        wm.start();
+        try {
+            org.apache.cloudstack.storage.datastore.client.LightbitsApiClient client =
+                    new org.apache.cloudstack.storage.datastore.client.LightbitsApiClient("http://localhost:" + wm.port(), "jwt",
+                            "default", java.net.http.HttpClient.newHttpClient(), 1);
+            Map<String, com.cloud.utils.Pair<Long, Long>> last = new java.util.HashMap<>();
+            java.util.function.BiConsumer<String, String> stub = (uuid, used) -> wm.stubFor(
+                    com.github.tomakehurst.wiremock.client.WireMock.get(
+                            com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/api/v2/projects/default/volumes/" + uuid))
+                    .willReturn(com.github.tomakehurst.wiremock.client.WireMock.aResponse().withStatus(200).withBody(
+                            "{\"UUID\":\"" + uuid + "\",\"name\":\"x\",\"state\":\"Available\",\"size\":\"1000\""
+                                    + (used == null ? "" : ",\"statistics\":{\"logicalUsedStorage\":\"" + used + "\"}") + "}")));
+            stub.accept(a, "100");
+            stub.accept(b, "200");
+            stub.accept(c, "300");
+            assertEquals(3, cloudStackRound(v -> LightbitsPrimaryDataStoreDriver.volumeStats(client, v, last), a, b, c).size());
+
+            stub.accept(a, "110");
+            stub.accept(b, null);    // the cluster has no statistics for b this round
+            stub.accept(c, "330");
+            Map<String, com.cloud.utils.Pair<Long, Long>> round2 =
+                    cloudStackRound(v -> LightbitsPrimaryDataStoreDriver.volumeStats(client, v, last), a, b, c);
+            assertEquals(110L, round2.get(a).first());
+            assertEquals(200L, round2.get(b).first(), "b keeps its last sample, nothing made up");
+            assertEquals(330L, round2.get(c).first());
+
+            wm.stubFor(com.github.tomakehurst.wiremock.client.WireMock.get(
+                    com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/api/v2/projects/default/volumes/" + b))
+                    .willReturn(com.github.tomakehurst.wiremock.client.WireMock.aResponse().withStatus(404).withBody("{}")));
+            assertEquals(200L, LightbitsPrimaryDataStoreDriver.volumeStats(client, b, last).first(), "gone: last sample once");
+            org.junit.jupiter.api.Assertions.assertNull(LightbitsPrimaryDataStoreDriver.volumeStats(client, b, last),
+                    "then forgotten");
+
+            wm.stubFor(com.github.tomakehurst.wiremock.client.WireMock.get(
+                    com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo("/api/v2/projects/default/volumes/" + a))
+                    .willReturn(com.github.tomakehurst.wiremock.client.WireMock.aResponse().withStatus(503).withBody("no leader")));
+            assertEquals(110L, LightbitsPrimaryDataStoreDriver.volumeStats(client, a, last).first(),
+                    "a failed read with an earlier sample reports that sample");
+        } finally {
+            wm.stop();
+        }
+    }
 }
