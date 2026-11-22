@@ -116,6 +116,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Builds and passes unit tests against CloudStack 4.23.0.0 (`-Dcloudstack.version=4.23.0.0`) as
   well as 4.22.1.0.
 
+### Known limitations
+- Volume statistics pause after a failed read. When the plugin cannot read a volume's
+  statistics from the cluster (for example, the Lightbits API does not answer), it stops
+  asking the cluster about that pool's volumes for 60 seconds. During that minute a volume
+  with an earlier figure reports the last one read, which is older than the round when the
+  outage lasts longer. A volume with no earlier figure (such as one created during the
+  outage) gets an error, and CloudStack then does not update the figures of any volume on
+  that host in that round (it keeps their previous ones). Reads resume on their own after
+  the minute. Running VMs and volume I/O are not affected.
+
 ## [0.1.0-alpha.1] - 2026-10-18
 
 First alpha, **for evaluation only. Not for production use.** Built against CloudStack 4.22.1.0
