@@ -57,9 +57,13 @@ unaffected (no JWT on the data path).
    since=$(date '+%Y-%m-%d %H:%M:%S')    # the log check below only counts lines from now on
    cmk update storagepool id=<poolUuid> details[0].tokenFile=/etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt
    ```
-   The plugin reads the file on the next use of the pool (at the latest the next capacity
-   poll, about a minute), stores the token encrypted and removes the `tokenFile` detail. No
-   restart is needed. The `tokenFile` detail is removed on failure too, so its absence proves
+   The plugin reads the file on the next use of the pool, stores the token encrypted and
+   removes the `tokenFile` detail. No restart is needed. On an idle pool the next use is
+   usually the storage capacity poll (`storage.stats.interval`, a minute by default), but
+   CloudStack does not run it when the interval is 0 or less, and it skips a pool none of
+   whose hosts is enabled and up. If the line below does not appear within a few minutes, use
+   the pool once, for example create a small data volume on it, attach it to a VM, then
+   detach and delete it. The `tokenFile` detail is removed on failure too, so its absence proves
    nothing: before deleting the file, confirm that the management server logged this
    replacement. Earlier rotations of the same pool logged the same line, so count only
    lines written after the update (`$since`, set in the same shell before the `cmk` command):
