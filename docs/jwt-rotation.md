@@ -44,11 +44,18 @@ unaffected (no JWT on the data path).
    writes API parameters and responses to its logs. Instead, on the management server:
    Use one file per pool (the pool ID in its name): the plugin reads the file up to about a
    minute after the update, and a shared file could by then hold another pool's token.
+   Two IDs of the pool appear below: `<poolUuid>` is the ID the UI and the API show (the `id`
+   of `cmk list storagepools`), and `<poolDbId>` is the numeric database ID the management
+   server log uses. Read the second one from the first:
    ```bash
-   install -o cloud -g cloud -m 600 /dev/null /etc/cloudstack/management/lightbits-pool-<poolId>.jwt
-   cat > /etc/cloudstack/management/lightbits-pool-<poolId>.jwt     # paste the token, then Ctrl-D
+   mysql -u cloud -p cloud -N -e "SELECT id FROM storage_pool WHERE uuid='<poolUuid>'"
+   ```
+   Then:
+   ```bash
+   install -o cloud -g cloud -m 600 /dev/null /etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt
+   cat > /etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt     # paste the token, then Ctrl-D
    since=$(date '+%Y-%m-%d %H:%M:%S')    # the log check below only counts lines from now on
-   cmk update storagepool id=<poolId> details[0].tokenFile=/etc/cloudstack/management/lightbits-pool-<poolId>.jwt
+   cmk update storagepool id=<poolUuid> details[0].tokenFile=/etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt
    ```
    The plugin reads the file on the next use of the pool (at the latest the next capacity
    poll, about a minute), stores the token encrypted and removes the `tokenFile` detail. No
@@ -57,7 +64,7 @@ unaffected (no JWT on the data path).
    replacement. Earlier rotations of the same pool logged the same line, so count only
    lines written after the update (`$since`, set in the same shell before the `cmk` command):
    ```bash
-   grep -h "the API token of pool <poolId> was replaced and stored encrypted" \
+   grep -h "the API token of pool <poolDbId> was replaced and stored encrypted" \
        /var/log/cloudstack/management/management-server.log* |
        awk -v since="$since" '($1 " " substr($2, 1, 8)) >= since'
    ```
@@ -68,7 +75,7 @@ unaffected (no JWT on the data path).
    (the file or the token in it), then run the `cmk update storagepool` command above again.
    Only after the line is there, delete the file:
    ```bash
-   shred -u /etc/cloudstack/management/lightbits-pool-<poolId>.jwt
+   shred -u /etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt
    ```
    With several management servers, put the file on each of them before the update, since
    any of them may handle the next operation, and after the log line appears (on any of
@@ -127,7 +134,7 @@ The value must be ciphertext, never the `eyJ...` token:
 ```bash
 mysql -u cloud -p cloud -e \
   "SELECT name, LEFT(value,12) FROM storage_pool_details \
-   WHERE pool_id=<poolId> AND name LIKE 'jwt%';"
+   WHERE pool_id=<poolDbId> AND name LIKE 'jwt%';"
 # expect: jwt=<chunk count>, jwt.0/jwt.1/... = base64 ciphertext (not eyJ...)
 ```
 
