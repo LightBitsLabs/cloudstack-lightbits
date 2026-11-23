@@ -88,6 +88,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     private com.cloud.service.dao.ServiceOfferingDetailsDao serviceOfferingDetailsDao;
     @Inject
     private com.cloud.user.dao.AccountDao accountDao;
+    @Inject
+    private com.cloud.storage.dao.VMTemplateDao templateDao;
 
     /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
     public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
@@ -248,6 +250,27 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 unencrypted != null && LightbitsUtil.parseBooleanDetail(UNENCRYPTED_DETAIL, unencrypted));
     }
 
+    /**
+     * Extras for createAsync. A root disk from a (non-ISO) template is created here only as a
+     * placeholder: copyAsync deletes it and clones the template, and the clone keeps the
+     * template's placement and encryption. The placeholder carries the labels only, so an
+     * offering's placement or encryption the cluster would reject for it (a 1-replica
+     * placement under dynamic rebalance, unencrypted on a cluster without hybrid encryption)
+     * does not fail a deployment the setting would not apply to anyway.
+     */
+    private VolumeExtras createExtrasFor(VolumeInfo vol, DataStore store) {
+        VolumeExtras extras = extrasFor(vol, store);
+        return filledFromTemplate(vol) ? extras.labelsOnly() : extras;
+    }
+
+    private boolean filledFromTemplate(VolumeInfo vol) {
+        if (vol.getVolumeType() != com.cloud.storage.Volume.Type.ROOT || vol.getTemplateId() == null) {
+            return false;
+        }
+        com.cloud.storage.VMTemplateVO tmpl = templateDao.findByIdIncludingRemoved(vol.getTemplateId());
+        return tmpl != null && tmpl.getFormat() != com.cloud.storage.Storage.ImageFormat.ISO;
+    }
+
     private String accountUuid(long accountId) {
         try {
             com.cloud.user.Account a = accountDao.findByIdIncludingRemoved(accountId);
@@ -313,7 +336,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                         client.createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), vol.getUuid()),
                                 vol.getSize(), replicasFor(vol, cfg), null, compressionFor(vol, cfg),
-                                checkedQosPolicyNameFor(vol, cfg, client), extrasFor(vol, store));
+                                checkedQosPolicyNameFor(vol, cfg, client), createExtrasFor(vol, store));
                 // path identifies the backing volume; the KVM adaptor resolves the NVMe
                 // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>). The path must be
                 // returned inside a VolumeObjectTO so CloudStack persists it on the volume.

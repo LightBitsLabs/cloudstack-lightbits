@@ -194,7 +194,10 @@ cmk create diskoffering name=lb-rack-a displaytext="Lightbits, rack A" storagety
 A value that is not valid (for example `lightbitsCompression=yes`) fails the volume creation
 with the reason; it is never ignored. As with the replica factor, clones (template-based root
 disks and volumes from a snapshot) share their source's data, so they keep the source's
-placement and encryption; the detail applies to volumes the cluster creates fresh. Failure
+placement and encryption; the detail applies to volumes the cluster creates fresh. For such a
+root disk the offering's placement and encryption are not sent at all, so a setting the
+cluster would reject for a fresh volume (for example a 1-replica placement while dynamic
+rebalance is on) does not fail the deployment. Failure
 domains are the ones configured on the cluster's servers (`lbcli list servers`); a server
 without configured failure domains is its own failure domain, named after the server.
 
