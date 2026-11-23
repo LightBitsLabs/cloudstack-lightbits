@@ -8,7 +8,8 @@ never written in cleartext or logged. Tokens expire, so you will need to roll th
 
 ## How the plugin uses the JWT
 
-- Supplied once at pool registration (`details[0].jwt=...`), encrypted at rest.
+- Supplied at pool registration (`details[0].secretkey=...`), encrypted at rest, and replaced
+  in place from a file on the management server (below).
 - Read (decrypted) by the management-side driver for every control-plane call to the cluster
   (volume create/delete/resize, snapshots, ACL updates, capacity via `GET /api/v2/nodes`).
 - **Not** used on the KVM hosts — the data path is NVMe/TCP and needs no JWT. So rotation is a
@@ -38,27 +39,76 @@ unaffected (no JWT on the data path).
    changes (full flow: "Creating a project-scoped JWT" in [INSTALL.md](../INSTALL.md)).
    Keep the old token valid until step 3 succeeds.
 
-2. **Update the pool credential.** The plugin re-encrypts and re-chunks the JWT into
-   `storage_pool_details`:
+2. **Update the pool credential from a file.** The new token is not passed through the
+   CloudStack API: a pool detail holds 255 characters (less than a token), and CloudStack
+   writes API parameters and responses to its logs. Instead, on the management server:
+   Use one file per pool (the pool ID in its name): the plugin reads the file on the pool's
+   next use, and a shared file could by then hold another pool's token.
+   Two IDs of the pool appear below: `<poolUuid>` is the ID the UI and the API show (the `id`
+   of `cmk list storagepools`), and `<poolDbId>` is the numeric database ID the management
+   server log uses. Read the second one from the first:
    ```bash
-   cmk update storagepool id=<poolId> details[0].jwt="<NEW_JWT>"
+   mysql -u cloud -p cloud -N -e "SELECT id FROM storage_pool WHERE uuid='<poolUuid>'"
    ```
-   > If `updateStoragePool` does not accept a new JWT in your build yet, use the fallback below.
+   Then:
+   ```bash
+   install -o cloud -g cloud -m 600 /dev/null /etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt
+   cat > /etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt     # paste the token, then Ctrl-D
+   since=$(date '+%Y-%m-%d %H:%M:%S')    # the log check below only counts lines from now on
+   cmk update storagepool id=<poolUuid> details[0].tokenFile=/etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt
+   ```
+   The plugin reads the file on the next use of the pool, stores the token encrypted and
+   removes the `tokenFile` detail. No restart is needed. On an idle pool the next use is
+   usually the storage capacity poll (`storage.stats.interval`, a minute by default), but
+   CloudStack does not run it when the interval is 0 or less, and it skips a pool none of
+   whose hosts is enabled and up. If the line below does not appear within a few minutes, use
+   the pool once, for example create a small data volume on it, attach it to a VM, then
+   detach and delete it. The `tokenFile` detail is removed on failure too, so its absence proves
+   nothing: before deleting the file, confirm that the management server logged this
+   replacement. Earlier rotations of the same pool logged the same line, so count only
+   lines written after the update (`$since`, set in the same shell before the `cmk` command):
+   ```bash
+   grep -h "the API token of pool <poolDbId> was replaced and stored encrypted" \
+       /var/log/cloudstack/management/management-server.log* |
+       awk -v since="$since" '($1 " " substr($2, 1, 8)) >= since'
+   ```
+   The management server and the shell must use the same time zone; a line printed means
+   this replacement is done.
+   If the line is not there, look for the reason logged for the pool instead. A failed
+   attempt removes the `tokenFile` detail, so nothing retries on its own: correct the cause
+   (the file or the token in it), then run the `cmk update storagepool` command above again.
+   Only after the line is there, delete the file:
+   ```bash
+   shred -u /etc/cloudstack/management/lightbits-pool-<poolUuid>.jwt
+   ```
+   With several management servers, put the file on each of them before the update, since
+   any of them may handle the next operation, and after the log line appears (on any of
+   them) run the `shred` above on every one of them: each copy is the token in clear text.
 
-   The token on the `cmk` command line is exposed to shell history and process listings —
-   the same caveat (and mitigations) as pool registration; see the `details[0].jwt` note in
-   [INSTALL.md](../INSTALL.md).
+   Pause every other `updateStoragePool` on this pool (any parameter, name and tags
+   included) before the `tokenFile` update, wait for those in progress to finish, and resume
+   only after the log line appears. Each such call reads all pool details and writes them
+   back, without a lock the plugin can take part in: one that overlaps the replacement can
+   put back the previous token, or drop the `tokenFile` detail before the plugin reads it.
+   If neither the log line nor a reason for the pool appears after the pool was used (as
+   described above), the detail was lost that way: run the `cmk update storagepool` command above again.
 
-   **Fallback (until in-place update lands): only safe for a pool with no volumes.**
-   Re-register the pool with the new token — put it in maintenance, delete, and re-create
-   with the same `url` + new `details[0].jwt`. ⚠️ Volume names embed the CloudStack pool id
-   (`cs-<environment>-p<poolId>-<uuid>`), and a re-created pool gets a **new** id: any
-   volumes created under the old pool would become unreachable by name, and pool deletion
-   sweeps the old pool's template caches. CloudStack refuses to delete a pool that still
-   has user volumes, which enforces the empty-pool constraint. For a pool with data, the
-   in-place `updateStoragePool` path is the only rotation route.
+   The file must be a regular file below `/etc/cloudstack/management`, readable by the
+   `cloud` user. If it is missing, unreadable or does not hold a JWT, one operation fails
+   with the reason, the `tokenFile` detail is removed and the previous token stays in use. A
+   JWT the cluster does not accept makes operations on the pool fail with `The cluster
+   rejected the storage pool's API token ...` until a valid one is set; running VMs are not
+   affected.
 
-3. **Verify** the new token works: trigger a control-plane op (e.g. list/refresh the pool, or
+   Do not pass a token as `details[0].jwt` or `details[0].secretkey` to `updateStoragePool`.
+   CloudStack accepts the call and returns success, and stores the value as a pool detail in
+   clear text; the plugin rejects it at the next use of the pool (an operation or the capacity
+   poll), which fails with the reason, removes the value and keeps the previous token. Whatever
+   its length it is never taken in (beyond 255 characters it is also cut), and it is in
+   CloudStack's logs from the moment of the call: treat that token as exposed.
+
+3. **Verify** the new token works (after the log line of step 2, so the check exercises the
+   replacement and not the previous token): trigger a control-plane op (e.g. list/refresh the pool, or
    create+delete a small test volume) and confirm success and that pool capacity still reports.
 
 4. **Retire the old JWT.** LightOS JWTs are stateless bearer tokens validated by signature —
@@ -88,7 +138,7 @@ The value must be ciphertext, never the `eyJ...` token:
 ```bash
 mysql -u cloud -p cloud -e \
   "SELECT name, LEFT(value,12) FROM storage_pool_details \
-   WHERE pool_id=<poolId> AND name LIKE 'jwt%';"
+   WHERE pool_id=<poolDbId> AND name LIKE 'jwt%';"
 # expect: jwt=<chunk count>, jwt.0/jwt.1/... = base64 ciphertext (not eyJ...)
 ```
 

@@ -705,6 +705,15 @@ class LightbitsApiClientTest {
     }
 
     @Test
+    void aRejectedTokenSaysWhatToDo() {
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).willReturn(aResponse().withStatus(401).withBody("{\"message\":\"token is expired\"}")));
+        LightbitsApiException e = assertThrows(LightbitsApiException.class, () -> client.listVolumes());
+        assertEquals(Kind.AUTH, e.getKind());
+        assertTrue(e.getMessage().contains("tokenFile"), e.getMessage());
+        assertFalse(e.getMessage().contains("test-jwt"), "the token must never appear in an error");
+    }
+
+    @Test
     void aPollWithoutARevisionIsNotTakenForAChange() {
         // the rollback is accepted, but the volume then reports no ETag at all: not proof it was applied
         wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID + "/rollback")).willReturn(aResponse().withStatus(200).withBody("{}")));

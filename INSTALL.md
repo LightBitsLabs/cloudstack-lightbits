@@ -100,7 +100,7 @@ API/cmk:
 cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
     zoneid=<zone> podid=<pod> clusterid=<cluster> tags=lightbits \
     url="lightbits://<api-host>/<project>?replicas=3&compression=true&environment=<name>&endpoints=<api-host-2>,<api-host-3>&fingerprint=<SHA-256 fingerprint>" \
-    details[0].jwt="<JWT>"
+    details[0].secretkey="<JWT>"
 ```
 - **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required),
   `&fingerprint=<SHA-256 fingerprint>` (needed for a Lightbits cluster, see
@@ -123,13 +123,17 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
   **Required.** It is embedded in every Lightbits volume name (`cs-<environment>-p<poolId>-<uuid>`) so that
   multiple CloudStacks sharing one cluster never collide and each deployment's volumes are
   easily identifiable in `lbcli`/the cluster UI.
-- **details[0].jwt** — the **project-scoped** JWT for `<project>` (see
-  [Creating a project-scoped JWT](#creating-a-project-scoped-jwt)); stored **encrypted** in
-  `storage_pool_details` (chunked, since it exceeds the 255-char column). It is never written
-  in cleartext or logged by the plugin — but note that passing it as a command-line argument
-  exposes it to shell history and process listings on the machine you run `cmk` from. Prefer
-  the UI form, or mitigate (e.g. `HISTCONTROL=ignorespace` with a leading space, and run it
-  where untrusted users cannot read `/proc`).
+- **details[0].secretkey** — the **project-scoped** JWT for `<project>` (see
+  [Creating a project-scoped JWT](#creating-a-project-scoped-jwt)). It is stored **encrypted**
+  in `storage_pool_details` (chunked, since it exceeds the 255-char column) and is never
+  written in clear text or logged by the plugin. **Use this exact name.** CloudStack removes
+  parameters named `secretkey` from its API and management logs, and writes any other
+  parameter to them in clear text. Earlier versions documented `details[0].jwt`; that name
+  still works, but a token supplied that way is readable in
+  `/var/log/cloudstack/management/apilog.log` and `management-server.log`. Passing the token
+  on a command line also exposes it to shell history and process listings on the machine
+  you run `cmk` from. Prefer the UI form, or mitigate (e.g. `HISTCONTROL=ignorespace` with a
+  leading space, and run it where untrusted users cannot read `/proc`).
 - **discovery** — optional, `&discovery=<host[:port]>,...`: the NVMe discovery endpoints the
   KVM hosts connect through (port 8009 by default). By default the hosts use every API host of
   the pool (the URL host and `endpoints`), which is right when the hosts reach the cluster's
