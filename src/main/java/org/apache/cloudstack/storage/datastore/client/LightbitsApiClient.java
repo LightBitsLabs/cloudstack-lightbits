@@ -714,6 +714,45 @@ public class LightbitsApiClient {
     }
 
     /**
+     * Change a volume's QoS policy by NAME ({@code PUT /projects/{p}/volumes/{uuid}} with
+     * {@code qosPolicyName}, the field lbcli's {@code update volume --qos-policy-name} sends),
+     * conditional on the revision it read, like {@link #resizeVolume}. Waits for the volume to
+     * settle and checks that it reports the new policy.
+     */
+    public void updateVolumeQosPolicy(String uuid, String qosPolicyName) {
+        if (qosPolicyName == null || qosPolicyName.isBlank()) {
+            throw new IllegalArgumentException("a QoS policy name is required");
+        }
+        Volume before = getVolume(uuid).orElseThrow(() -> new LightbitsApiException(Kind.NOT_FOUND, 404,
+                "volume " + uuid + " not found on the cluster"));
+        if (qosPolicyName.equals(before.getQosPolicyName())) {
+            return;
+        }
+        requireRevision(before.getEtag(), "QoS policy change of volume " + uuid);
+        ObjectNode body = mapper.createObjectNode();
+        body.put("qosPolicyName", qosPolicyName);
+        body.put("projectName", project);
+        try {
+            executeConditional("PUT", projectPath("volumes", uuid), body.toString(), before.getEtag());
+        } catch (LightbitsApiException e) {
+            if (e.getKind() != Kind.TRANSIENT) {
+                throw e;
+            }
+            // Sent, not confirmed; not replayed (see resizeVolume). The volume decides.
+            Volume now = getVolume(uuid).orElseThrow(() -> e);
+            if (before.getEtag().equals(now.getEtag()) || !qosPolicyName.equals(now.getQosPolicyName())) {
+                throw e;
+            }
+            LOG.warn("Lightbits: QoS policy change of {} was not confirmed ({}) but the volume shows it applied", uuid, e.getMessage());
+        }
+        Volume after = waitForVolume(uuid, before.getEtag());
+        if (!qosPolicyName.equals(after.getQosPolicyName())) {
+            throw new LightbitsApiException(Kind.UNKNOWN, -1, "volume " + after.getName() + " (" + uuid
+                    + ") reports QoS policy " + after.getQosPolicyName() + " after a change to " + qosPolicyName);
+        }
+    }
+
+    /**
      * Replace a volume's ACL. {@code ifMatchEtag} (the ETag of the volume the caller computed
      * the new ACL from) makes the update conditional: if anything changed the volume in
      * between, the cluster answers 412 ({@link Kind#PRECONDITION}) and the caller must re-read

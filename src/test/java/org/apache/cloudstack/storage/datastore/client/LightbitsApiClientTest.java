@@ -196,6 +196,44 @@ class LightbitsApiClientTest {
         assertThrows(LightbitsApiException.class, () -> client.resizeVolume(VOL_UUID, 8589934592L));
     }
 
+    private static String volumeWithQos(String etag, String policy) {
+        return volumeJson("Available", etag, "4294967296").replace("}}", "},\"qosPolicyName\":\"" + policy + "\"}");
+    }
+
+    private void stubQosChange(String policyAfter) {
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("qos")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody(volumeWithQos("1", "silver"))));
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("qos")
+                .willReturn(aResponse().withStatus(200).withBody("{}")).willSetStateTo("applied"));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + VOL_UUID)).inScenario("qos").whenScenarioStateIs("applied")
+                .willReturn(aResponse().withStatus(200).withBody(volumeWithQos("2", policyAfter))));
+    }
+
+    @Test
+    void qosPolicyChangeSendsTheNameConditionally() {
+        stubQosChange("gold");
+        client.updateVolumeQosPolicy(VOL_UUID, "gold");
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID))
+                .withRequestBody(matchingJsonPath("$.qosPolicyName", equalTo("gold")))
+                .withRequestBody(matchingJsonPath("$.projectName", equalTo(PROJECT)))
+                .withRequestBody(com.github.tomakehurst.wiremock.client.WireMock.notMatching(".*\"size\".*"))
+                .withHeader("If-Match", equalTo("1")));
+    }
+
+    @Test
+    void qosPolicyChangeFailsWhenTheClusterKeepsTheOldPolicy() {
+        stubQosChange("silver");
+        assertThrows(LightbitsApiException.class, () -> client.updateVolumeQosPolicy(VOL_UUID, "gold"));
+    }
+
+    @Test
+    void qosPolicyChangeToTheCurrentPolicySendsNothing() {
+        stubQosChange("silver");
+        client.updateVolumeQosPolicy(VOL_UUID, "silver");
+        wm.verify(0, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID)));
+    }
+
     @Test
     void getVolumeByNameFiltersDeletedStates() {
         // trial finding F3: deleted volumes linger in list responses

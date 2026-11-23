@@ -131,11 +131,51 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      * create (matching lbcli --qos-policy-name and the CSI driver); no UUID resolution.
      */
     private String qosPolicyNameFor(VolumeInfo vol, LightbitsPoolConfig cfg) {
-        String value = offeringDetail(vol, QOS_POLICY_DETAIL);
+        return qosPolicyNameFor(vol.getDiskOfferingId(), cfg);
+    }
+
+    private String qosPolicyNameFor(Long diskOfferingId, LightbitsPoolConfig cfg) {
+        String value = offeringDetail(diskOfferingId, QOS_POLICY_DETAIL);
         if (value == null || value.isBlank()) {
             value = cfg.getQosPolicy(); // pool default (may be null)
         }
-        return (value == null || value.isBlank()) ? null : value;
+        return (value == null || value.isBlank()) ? null : value.trim();
+    }
+
+    /**
+     * {@link #qosPolicyNameFor} for a volume about to be created, with a policy named by the
+     * offering checked first: the pool default was checked at registration, but an offering's
+     * name was not, and the cluster's own error for an unknown name does not say where it came from.
+     */
+    private String checkedQosPolicyNameFor(VolumeInfo vol, LightbitsPoolConfig cfg, LightbitsApiClient client) {
+        String name = qosPolicyNameFor(vol, cfg);
+        String fromOffering = offeringDetail(vol, QOS_POLICY_DETAIL);
+        if (name != null && fromOffering != null && !fromOffering.isBlank() && !client.qosPolicyExists(name)) {
+            throw new CloudRuntimeException("QoS policy '" + name + "' (offering detail " + QOS_POLICY_DETAIL
+                    + ") is not visible to Lightbits project " + client.getProject()
+                    + "; a cluster admin must create it for that project, or correct the offering");
+        }
+        return name;
+    }
+
+    /**
+     * Bring a volume's QoS policy in line with its offering after an offering change. Best
+     * effort: a failure is logged and the next attach or resize tries again. A volume whose
+     * offering and pool name no policy keeps the one it has (the cluster has no "none").
+     */
+    private void reconcileQosPolicy(LightbitsApiClient client, LightbitsPoolConfig cfg, Long diskOfferingId,
+                                    org.apache.cloudstack.storage.datastore.client.model.Volume v) {
+        try {
+            String wanted = qosPolicyNameFor(diskOfferingId, cfg);
+            if (wanted == null || wanted.equals(v.getQosPolicyName())) {
+                return;
+            }
+            client.updateVolumeQosPolicy(v.getUuid(), wanted);
+            LOG.info("Lightbits: volume {} QoS policy changed from {} to {}", v.getName(), v.getQosPolicyName(), wanted);
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not change the QoS policy of volume {} to match its offering ({}); "
+                    + "it is tried again at the next attach or resize", v.getName(), e.getMessage());
+        }
     }
 
     /**
@@ -144,7 +184,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      * details. Null when neither sets it.
      */
     private String offeringDetail(VolumeInfo vol, String key) {
-        Long diskOfferingId = vol.getDiskOfferingId();
+        return offeringDetail(vol.getDiskOfferingId(), key);
+    }
+
+    private String offeringDetail(Long diskOfferingId, String key) {
         if (diskOfferingId == null) {
             return null;
         }
@@ -259,7 +302,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                         client.createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), vol.getUuid()),
                                 vol.getSize(), replicasFor(vol, cfg), null, compressionFor(vol, cfg),
-                                qosPolicyNameFor(vol, cfg), extrasFor(vol, store));
+                                checkedQosPolicyNameFor(vol, cfg, client), extrasFor(vol, store));
                 // path identifies the backing volume; the KVM adaptor resolves the NVMe
                 // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>). The path must be
                 // returned inside a VolumeObjectTO so CloudStack persists it on the volume.
@@ -510,7 +553,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             // A clone shares its source's data: it keeps the source's placement and encryption,
             // and only takes the new volume's labels (see createVolumeFromSnapshot).
             created = client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null,
-                    compressionFor(destVol, cfg), qosPolicyNameFor(destVol, cfg), extrasFor(destVol, store));
+                    compressionFor(destVol, cfg), checkedQosPolicyNameFor(destVol, cfg, client), extrasFor(destVol, store));
         } catch (RuntimeException e) {
             // Do not leave the clone-source snapshot we just took behind a failed clone. A clone
             // this call created has been removed, and that removal waited for, by the client.
@@ -590,6 +633,11 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 client.resizeVolume(v.getUuid(), newSize);
                 LOG.info("Lightbits: resized volume {} from {} to {} bytes", name, v.getSizeBytes(), newSize);
             }
+            // An offering change reaches the driver only through resize (CloudStack calls it
+            // when the size or the IOPS change); the new offering is in the payload.
+            Long offeringId = payload != null && payload.getNewDiskOfferingId() != null
+                    ? payload.getNewDiskOfferingId() : vol.getDiskOfferingId();
+            reconcileQosPolicy(client, cfg, offeringId, v);
         } catch (Exception e) {
             errMsg = e.getMessage();
         }
@@ -630,6 +678,11 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             acl.add(nqn);
             return true;
         });
+        if (dataObject instanceof VolumeInfo) {
+            // An offering change with the same size and IOPS never reaches resize: pick it up here.
+            client.getVolumeByName(name).ifPresent(v ->
+                    reconcileQosPolicy(client, cfg, ((VolumeInfo) dataObject).getDiskOfferingId(), v));
+        }
         return true;
     }
 
