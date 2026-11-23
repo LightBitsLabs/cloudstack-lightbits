@@ -27,8 +27,24 @@ import com.cloud.agent.api.Command;
  */
 public class LightbitsGetHostNqnCommand extends Command {
 
+    /**
+     * The pool's NVMe discovery endpoints (host:port). When set, the agent also reports the
+     * source address it uses to reach each one (the host's data IPs, for volume IP ACLs). An
+     * older agent ignores the field.
+     */
+    private java.util.List<String> endpoints;
+
     public LightbitsGetHostNqnCommand() {
         super();
+    }
+
+    public LightbitsGetHostNqnCommand(java.util.List<String> endpoints) {
+        super();
+        this.endpoints = endpoints == null ? null : new java.util.ArrayList<>(endpoints);
+    }
+
+    public java.util.List<String> getEndpoints() {
+        return endpoints;
     }
 
     @Override

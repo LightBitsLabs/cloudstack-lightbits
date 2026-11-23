@@ -66,6 +66,7 @@ public class LightbitsPoolConfig {
     public static final String KEY_NVME_DISCOVERY = "nvmeDiscovery";
     /** Pick the QoS policy from the offering's max IOPS when the offering names none (opt-in). */
     public static final String KEY_QOS_FROM_IOPS = "qosFromIops";
+    public static final String KEY_IP_ACL = "ipAcl";
     public static final int DISCOVERY_PORT = 8009;
     private static final int MAX_DETAIL_LENGTH = 255;
 
@@ -84,6 +85,7 @@ public class LightbitsPoolConfig {
     private final List<String> fingerprints;   // normalized SHA-256, never null; empty = CA validation
     private List<String> nvmeDiscovery = List.of(); // host:port, empty = the API hosts
     private boolean qosFromIops;
+    private boolean ipAcl;
 
     public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
                                boolean compression, String qosPolicy, String jwt, String environment) {
@@ -172,6 +174,7 @@ public class LightbitsPoolConfig {
                 parseEndpoints(decode(q.get("endpoints")), port), parseFingerprints(decode(q.get("fingerprint"))));
         cfg.nvmeDiscovery = List.copyOf(parseEndpoints(decode(q.get("discovery")), DISCOVERY_PORT));
         cfg.qosFromIops = parseStrictBoolean(KEY_QOS_FROM_IOPS, q.get(KEY_QOS_FROM_IOPS));
+        cfg.ipAcl = parseStrictBoolean(KEY_IP_ACL, q.get(KEY_IP_ACL));
         return cfg;
     }
 
@@ -264,6 +267,7 @@ public class LightbitsPoolConfig {
                 parseFingerprints(details.get(KEY_TLS_FINGERPRINT)));
         cfg.nvmeDiscovery = List.copyOf(parseEndpoints(details.get(KEY_NVME_DISCOVERY), DISCOVERY_PORT));
         cfg.qosFromIops = parseStrictBoolean(KEY_QOS_FROM_IOPS, details.get(KEY_QOS_FROM_IOPS));
+        cfg.ipAcl = parseStrictBoolean(KEY_IP_ACL, details.get(KEY_IP_ACL));
         return cfg;
     }
 
@@ -284,6 +288,9 @@ public class LightbitsPoolConfig {
         }
         if (!fingerprints.isEmpty()) {
             d.put(KEY_TLS_FINGERPRINT, String.join(",", fingerprints));
+        }
+        if (ipAcl) {
+            d.put(KEY_IP_ACL, "true");
         }
         if (qosFromIops) {
             d.put(KEY_QOS_FROM_IOPS, "true");
@@ -403,6 +410,8 @@ public class LightbitsPoolConfig {
     public boolean isCompression() { return compression; }
     public String getQosPolicy() { return qosPolicy; }
     public boolean isQosFromIops() { return qosFromIops; }
+    /** Volume IP ACLs follow the data IPs of the hosts in the volume's NQN ACL. */
+    public boolean isIpAcl() { return ipAcl; }
 
     /** Absent means false; anything but true or false is refused rather than read as false. */
     private static boolean parseStrictBoolean(String key, String value) {

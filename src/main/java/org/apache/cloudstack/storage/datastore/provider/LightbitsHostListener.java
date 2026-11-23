@@ -105,7 +105,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
             LOG.info("Lightbits pool {} registered on host {}", poolId, hostId);
         }
 
-        ensureHostNqnDetail(hostId);
+        ensureHostDetails(hostId, poolId);
         clearRemovingMark(hostId);
         return true;
     }
@@ -133,25 +133,107 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * and persist it, so the driver's grantAccess works with no manual step. A failure is
      * logged but does not fail hostConnect — the pool is registered and usable; only a later
      * volume attach on THIS host would fail, with a pointed error from the driver.
+     *
+     * With the pool option ipAcl the agent is asked on every connect, also for its data IPs
+     * toward the pool's cluster (see {@link #recordDataIps}).
      */
-    private void ensureHostNqnDetail(long hostId) {
+    private void ensureHostDetails(long hostId, long poolId) {
         String key = LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL;
         DetailVO existing = hostDetailsDao.findDetail(hostId, key);
-        if (existing != null && existing.getValue() != null && !existing.getValue().isBlank()) {
+        boolean hasNqn = existing != null && existing.getValue() != null && !existing.getValue().isBlank();
+        org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
+        boolean wantIps = cfg != null && cfg.isIpAcl();
+        if (hasNqn && !wantIps) {
             LOG.debug("Lightbits: host {} already has '{}' = {}", hostId, key, existing.getValue());
             return;
         }
-        Answer answer = agentMgr.easySend(hostId, new LightbitsGetHostNqnCommand());
+        Answer answer = agentMgr.easySend(hostId, wantIps
+                ? new LightbitsGetHostNqnCommand(cfg.discoveryEndpoints()) : new LightbitsGetHostNqnCommand());
         if (answer instanceof LightbitsGetHostNqnAnswer && answer.getResult()
                 && ((LightbitsGetHostNqnAnswer) answer).getHostNqn() != null) {
             String nqn = ((LightbitsGetHostNqnAnswer) answer).getHostNqn();
-            hostDetailsDao.persist(new DetailVO(hostId, key, nqn));
-            LOG.info("Lightbits: host {} '{}' auto-populated: {}", hostId, key, nqn);
+            if (!hasNqn) {
+                hostDetailsDao.persist(new DetailVO(hostId, key, nqn));
+                LOG.info("Lightbits: host {} '{}' auto-populated: {}", hostId, key, nqn);
+            }
+            if (wantIps) {
+                recordDataIps(hostId, poolId, hasNqn ? existing.getValue() : nqn, ((LightbitsGetHostNqnAnswer) answer).getDataIps());
+            }
         } else {
             String detail = answer == null ? "no answer" : answer.getDetails();
-            LOG.warn("Lightbits: could not auto-populate '{}' for host {} ({}); volume attach on this host "
-                    + "will fail until it is set - check nvme-cli on the host, then reconnect it", key, hostId, detail);
+            if (hasNqn) {
+                LOG.warn("Lightbits: could not read the data IPs of host {} for pool {} ({}); its volumes keep the IP"
+                        + " ACLs they have", hostId, poolId, detail);
+            } else {
+                LOG.warn("Lightbits: could not auto-populate '{}' for host {} ({}); volume attach on this host "
+                        + "will fail until it is set - check nvme-cli on the host, then reconnect it", key, hostId, detail);
+            }
         }
+    }
+
+    private org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig poolConfigOrNull(long poolId) {
+        try {
+            return org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig.fromDetails(
+                    storagePoolDetailsDao.listDetailsKeyPairs(poolId), null);
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not read the options of pool {} ({})", poolId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Keep the host's data IPs for the pool (host detail lightbits.dataips.<pool id>) and,
+     * when they are new or changed, bring the IP ACLs of the pool's volumes this host may
+     * use in line. An agent older than this plugin version reports none: the old detail is
+     * kept and the host cannot be granted access to the pool's volumes until it is upgraded.
+     */
+    private void recordDataIps(long hostId, long poolId, String nqn, java.util.List<String> dataIps) {
+        String key = org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.detailKey(poolId);
+        if (dataIps == null) {
+            LOG.warn("Lightbits: the agent of host {} does not report its data IPs (older than this plugin version);"
+                    + " pool {} has ipAcl on, so the host gets no access to its volumes until the agent is upgraded", hostId, poolId);
+            return;
+        }
+        if (dataIps.isEmpty()) {
+            LOG.warn("Lightbits: host {} found no route toward the NVMe endpoints of pool {}; keeping its data IPs as they"
+                    + " were", hostId, poolId);
+            return;
+        }
+        if (dataIps.size() > 1) {
+            LOG.warn("Lightbits: host {} reaches the cluster of pool {} from several addresses {}; all of them are put in"
+                    + " the IP ACLs of its volumes", hostId, poolId, dataIps);
+        }
+        String value = String.join(",", dataIps);
+        DetailVO current = hostDetailsDao.findDetail(hostId, key);
+        if (current != null && value.equals(current.getValue())) {
+            return;
+        }
+        if (current == null) {
+            hostDetailsDao.persist(new DetailVO(hostId, key, value));
+        } else {
+            current.setValue(value);
+            hostDetailsDao.update(current.getId(), current);
+        }
+        LOG.info("Lightbits: host {} data IPs for pool {}: {} (were {})", hostId, poolId, value,
+                current == null ? "unknown" : current.getValue());
+        try {
+            org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
+                    org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
+            java.util.List<String> updated = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.refreshIps(cfg.newClient(),
+                    cfg.getEnvironment(), poolId, nqn, ipResolver(poolId));
+            if (!updated.isEmpty()) {
+                LOG.info("Lightbits: updated the IP ACL of {} volume(s) of pool {} for host {}: {}", updated.size(), poolId,
+                        hostId, updated);
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not update the IP ACLs of the volumes of pool {} for host {}: {}; they are set at"
+                    + " the next attach", poolId, hostId, e.getMessage());
+        }
+    }
+
+    private org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ipResolver(long poolId) {
+        return org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.resolver(hostDetailsDao,
+                LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL, poolId);
     }
 
     /** A host that connects is not being removed (a removal that did not go through). */
@@ -215,7 +297,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                         org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());
                 java.util.List<String> pruned = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(cfg.newClient(),
-                        cfg.getEnvironment(), pool.getId(), nqnValue);
+                        cfg.getEnvironment(), pool.getId(), nqnValue, cfg.isIpAcl() ? ipResolver(pool.getId()) : null);
                 if (!pruned.isEmpty()) {
                     LOG.warn("Lightbits: host {} is being removed and still had access to {} volume(s) of pool {}: removed it"
                             + " from their ACLs {}", hostId, pruned.size(), pool.getName(), pruned);

@@ -61,11 +61,67 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
             if (!nqn.startsWith("nqn.")) {
                 return new LightbitsGetHostNqnAnswer(command, false, "unexpected host NQN '" + nqn + "'");
             }
-            return new LightbitsGetHostNqnAnswer(command, nqn);
+            return new LightbitsGetHostNqnAnswer(command, nqn,
+                    command.getEndpoints() == null ? new java.util.ArrayList<>() : dataIps(command.getEndpoints()));
         } catch (Exception e) {
             LOG.warn("Lightbits: failed to determine host NQN", e);
             return new LightbitsGetHostNqnAnswer(command, false, "failed to determine host NQN: " + e.getMessage());
         }
+    }
+
+    /**
+     * The source address this host uses toward each endpoint (what the cluster sees a
+     * connection come from), without repeats. An endpoint that does not resolve or has no
+     * route is logged and skipped.
+     */
+    java.util.List<String> dataIps(java.util.List<String> endpoints) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String endpoint : endpoints) {
+            String host = hostOf(endpoint);
+            try {
+                String address = resolve(host);
+                String src = routeSource(address);
+                if (src == null) {
+                    LOG.warn("Lightbits: no route source toward {} ({})", endpoint, address);
+                } else if (!out.contains(src)) {
+                    out.add(src);
+                }
+            } catch (Exception e) {
+                LOG.warn("Lightbits: could not find the source address toward {}: {}", endpoint, e.getMessage());
+            }
+        }
+        return out;
+    }
+
+    /** host of host:port, [v6]:port, or a bare host. */
+    static String hostOf(String endpoint) {
+        String e = endpoint.trim();
+        if (e.startsWith("[")) {
+            int close = e.indexOf(']');
+            return close > 0 ? e.substring(1, close) : e;
+        }
+        int colon = e.lastIndexOf(':');
+        return colon > 0 && e.indexOf(':') == colon ? e.substring(0, colon) : e;
+    }
+
+    protected String resolve(String host) throws java.net.UnknownHostException {
+        return java.net.InetAddress.getByName(host).getHostAddress();
+    }
+
+    /** The "src" of {@code ip -o route get <address>}, or null. */
+    protected String routeSource(String address) throws IOException, InterruptedException {
+        Process p = new ProcessBuilder("ip", "-o", "route", "get", address).redirectErrorStream(true).start();
+        String out = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS) || p.exitValue() != 0) {
+            p.destroyForcibly();
+            return null;
+        }
+        return parseRouteSource(out);
+    }
+
+    static String parseRouteSource(String ipRouteGetOutput) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\bsrc\\s+(\\S+)").matcher(ipRouteGetOutput == null ? "" : ipRouteGetOutput);
+        return m.find() ? m.group(1) : null;
     }
 
     private String readTrimmed(Path path) throws IOException {

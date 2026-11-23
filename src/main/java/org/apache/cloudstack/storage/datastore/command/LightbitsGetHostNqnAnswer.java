@@ -21,13 +21,20 @@ import com.cloud.agent.api.Answer;
 public class LightbitsGetHostNqnAnswer extends Answer {
 
     private String hostNqn;
+    /** Source addresses toward the command's endpoints; null from an agent older than the field. */
+    private java.util.List<String> dataIps;
 
     protected LightbitsGetHostNqnAnswer() {
     }
 
     public LightbitsGetHostNqnAnswer(LightbitsGetHostNqnCommand cmd, String hostNqn) {
+        this(cmd, hostNqn, null);
+    }
+
+    public LightbitsGetHostNqnAnswer(LightbitsGetHostNqnCommand cmd, String hostNqn, java.util.List<String> dataIps) {
         super(cmd, true, null);
         this.hostNqn = hostNqn;
+        this.dataIps = dataIps == null ? null : new java.util.ArrayList<>(dataIps);
     }
 
     public LightbitsGetHostNqnAnswer(LightbitsGetHostNqnCommand cmd, boolean result, String details) {
@@ -36,5 +43,9 @@ public class LightbitsGetHostNqnAnswer extends Answer {
 
     public String getHostNqn() {
         return hostNqn;
+    }
+
+    public java.util.List<String> getDataIps() {
+        return dataIps;
     }
 }

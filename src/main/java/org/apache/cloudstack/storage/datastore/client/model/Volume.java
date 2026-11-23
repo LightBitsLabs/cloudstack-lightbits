@@ -30,6 +30,9 @@ public class Volume {
     private int replicaCount;
     private String projectName;
     private Acl acl;
+    /** The IP addresses allowed to connect (ALLOW_ANY or ALLOW_NONE as the marker values). */
+    @JsonProperty("IPAcl")
+    private Acl ipAcl;
     @JsonProperty("ETag")
     private String etag;
     private Statistics statistics;
@@ -104,6 +107,8 @@ public class Volume {
     public void setProjectName(String projectName) { this.projectName = projectName; }
     public Acl getAcl() { return acl; }
     public void setAcl(Acl acl) { this.acl = acl; }
+    public Acl getIpAcl() { return ipAcl; }
+    public void setIpAcl(Acl ipAcl) { this.ipAcl = ipAcl; }
     public Statistics getStatistics() { return statistics; }
     public void setStatistics(Statistics statistics) { this.statistics = statistics; }
     public String getEtag() { return etag; }
