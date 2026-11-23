@@ -571,15 +571,23 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
-        org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
-            if (acl.contains(nqn)) {
-                return false;
-            }
-            acl.add(nqn);
-            return true;
-        });
+        // Under the host's ACL lock, refused while the host is being removed: see LightbitsHostGate.
+        org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.grant(host.getId(),
+                id -> hostDetailsDao.findDetail(id, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL) != null,
+                hostGateLocker,
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
+                    if (acl.contains(nqn)) {
+                        return false;
+                    }
+                    acl.add(nqn);
+                    return true;
+                }));
         return true;
     }
+
+    /** The lock grants and host removal share; tests swap it for an in-process one. */
+    org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.Locker hostGateLocker =
+            org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.GLOBAL;
 
     @Override
     public void revokeAccess(DataObject dataObject, Host host, DataStore dataStore) {
