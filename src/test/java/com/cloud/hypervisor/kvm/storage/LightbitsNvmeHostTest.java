@@ -256,6 +256,23 @@ class LightbitsNvmeHostTest {
         host.warnOnDegradedPaths(3);   // logs; must not throw
     }
 
+    // ---- plugin version ----
+
+    @Test
+    void theBuildKnowsItsVersion() {
+        String v = org.apache.cloudstack.storage.datastore.util.LightbitsVersion.version();
+        assertFalse(v.contains("unknown"), v);
+        assertFalse(v.contains("${"), v);
+        assertTrue(org.apache.cloudstack.storage.datastore.util.LightbitsVersion.describe().contains("against CloudStack 4."));
+    }
+
+    @Test
+    void anAgentOnAnotherBuildThanTheManagementServerIsFlagged() {
+        assertTrue(LightbitsStorageAdaptor.warnOnVersionMismatch("1.0.0+2027-01-01T00:00:00Z", "0.9.0+2026-11-19T00:00:00Z"));
+        assertFalse(LightbitsStorageAdaptor.warnOnVersionMismatch("1.0.0+x", "1.0.0+x"));
+        assertFalse(LightbitsStorageAdaptor.warnOnVersionMismatch(null, "1.0.0+x"));   // older management server
+    }
+
     // ---- lookup before connect (the agent builds a VM's disk definitions before it connects them) ----
 
     /** A cold host: connect-all brings the controller up, and with it the volume's namespace. */

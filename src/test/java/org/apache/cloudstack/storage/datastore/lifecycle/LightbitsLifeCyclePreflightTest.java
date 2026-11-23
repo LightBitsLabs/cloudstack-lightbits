@@ -75,8 +75,10 @@ class LightbitsLifeCyclePreflightTest {
 
     /** Stub the project-scoped access probe: volume list + project object. */
     private void stubProjectAccess() {
-        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/volumes"))
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/volumes")).atPriority(10)
                 .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[]}")));
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/snapshots")).atPriority(10)
+                .willReturn(aResponse().withStatus(200).withBody("{\"snapshots\":[]}")));
         wm.stubFor(get(urlEqualTo("/api/v2/projects/default"))
                 .willReturn(aResponse().withStatus(200).withBody(
                     "{\"UUID\":\"12f11016-15cf-419a-887c-cefc791e52d3\",\"name\":\"default\"}")));
@@ -210,5 +212,64 @@ class LightbitsLifeCyclePreflightTest {
         // no project in URL -> fails at parse, cluster never contacted
         assertThrows(IllegalArgumentException.class,
                 () -> lc.preflight(dsInfos("lightbits://h", "jwt")));
+    }
+
+    // ---- environment name already in use on the cluster ----
+
+    private void stubVolumeNames(String... names) {
+        StringBuilder b = new StringBuilder("{\"volumes\":[");
+        for (int i = 0; i < names.length; i++) {
+            b.append(i == 0 ? "" : ",").append("{\"UUID\":\"u").append(i).append("\",\"name\":\"").append(names[i])
+             .append("\",\"state\":\"Available\",\"size\":\"1\",\"replicaCount\":1}");
+        }
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/volumes")).atPriority(1)
+                .willReturn(aResponse().withStatus(200).withBody(b.append("]}").toString())));
+    }
+
+    @Test
+    void anEnvironmentNameUsedByAnotherCloudStackIsRefused() {
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        // pool 3 with environment cs1 exists on the cluster, but this CloudStack only has pool 1
+        stubVolumeNames("cs-cs1-p3-11111111-2222-3333-4444-555555555555", "cs-cs1-p1-aaaaaaaa-2222-3333-4444-555555555555");
+        lc.setKnownPoolIds(() -> java.util.Set.of(1L));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt")));
+        assertTrue(e.getMessage().contains("already in use"), e.getMessage());
+        assertTrue(e.getMessage().contains("cs-cs1-p3-"), e.getMessage());
+        assertTrue(e.getMessage().contains("[3]"), e.getMessage());
+    }
+
+    @Test
+    void objectsOfOwnPoolsAndOfOtherEnvironmentsDoNotBlockRegistration() {
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        // a sibling pool of this CloudStack, another environment, a longer name with the same start, a foreign volume
+        stubVolumeNames("cs-cs1-p1-aaaaaaaa-2222-3333-4444-555555555555", "cs-prod-p7-bbbbbbbb-2222-3333-4444-555555555555",
+                "cs-cs1x-p9-cccccccc-2222-3333-4444-555555555555", "someone-elses-volume");
+        lc.setKnownPoolIds(() -> java.util.Set.of(1L));
+        lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt"));
+    }
+
+    @Test
+    void anEnvironmentWhoseNameExtendsThisOneWithPDigitsIsNotMistakenForAPool() {
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        // pool 3 of environment "cs1-p7": for environment cs1 it is no pool 7 of its own
+        stubVolumeNames("cs-cs1-p7-p3-eeeeeeee-2222-3333-4444-555555555555");
+        lc.setKnownPoolIds(() -> java.util.Set.of(1L));
+        lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt"));
+    }
+
+    @Test
+    void aLeftoverSnapshotOfAnUnknownPoolBlocksRegistrationToo() {
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        wm.stubFor(get(urlPathEqualTo("/api/v2/projects/default/snapshots")).atPriority(1)
+                .willReturn(aResponse().withStatus(200).withBody(
+                    "{\"snapshots\":[{\"UUID\":\"s1\",\"name\":\"cs-cs1-p4-dddddddd-2222-3333-4444-555555555555-src\",\"state\":\"Available\"}]}")));
+        lc.setKnownPoolIds(java.util.Set::of);
+        assertThrows(IllegalArgumentException.class,
+                () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt")));
     }
 }

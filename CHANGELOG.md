@@ -34,6 +34,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   (at most every 10 seconds) when the device is still missing on a connected host.
 - A pool URL with an IPv6 address as the API host is refused at registration with a clear
   message. It was accepted before, and no volume of such a pool could be attached.
+- The plugin logs its version and build time when it loads on the management server and on
+  every KVM agent, and an agent warns when it runs another build than the management server
+  (the jar was not replaced there, or the agent was not restarted).
+- Pool registration is refused when the cluster already holds objects named for this
+  environment name and a pool id this CloudStack does not have: another CloudStack uses the
+  same name, or a removed pool left objects behind. Deleting a pool removes every object with
+  its prefix, so a shared environment name could destroy the other deployment's volumes.
 
 ### Security
 - **The pool token was written to CloudStack's logs.** The token was supplied as
@@ -59,6 +66,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   with 0.1.0-alpha.1 need their fingerprint set after the upgrade** (see INSTALL.md).
 
 ### Fixed
+- Volume and snapshot lists are read page by page (the cluster returns at most 1000 objects
+  per request). Before, the capacity sum, the environment-name check and the pool-delete sweep
+  saw only the first 1000 objects of the project.
+- Deleting a pool removes only objects named exactly as its own (`cs-<environment>-p<id>-`
+  plus a CloudStack uuid), not every name with that prefix: environment `cs1`, pool 7 no longer
+  matches the objects of an environment named `cs1-p7`. The pool's provisioned-bytes sum uses
+  the same rule.
 - Snapshot revert never reached the plugin: the driver did not advertise the
   `CAN_REVERT_VOLUME_TO_SNAPSHOT` capability, so CloudStack rejected every revert.
 - A failed cluster-side delete was reported to CloudStack as success, orphaning the volume.

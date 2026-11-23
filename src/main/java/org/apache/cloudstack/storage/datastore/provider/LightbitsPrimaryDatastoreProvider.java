@@ -77,6 +77,8 @@ public class LightbitsPrimaryDatastoreProvider implements DataStoreProvider {
         getDataStoreLifeCycle();
         getDataStoreDriver();
         getHostListener();
+        org.apache.logging.log4j.LogManager.getLogger(LightbitsPrimaryDatastoreProvider.class).info("{} loaded on the management server",
+                org.apache.cloudstack.storage.datastore.util.LightbitsVersion.describe());
         return true;
     }
 

@@ -628,11 +628,9 @@ public class LightbitsApiClient {
     public List<Volume> listVolumes() {
         // Project-scoped list route; the flat /api/v2/volumes?project_name= is denied to a
         // project-scoped token (HTTP 403).
-        String resp = execute("GET", projectColl("volumes"), null);
         List<Volume> live = new ArrayList<>();
         try {
-            JsonNode root = mapper.readTree(resp);
-            for (JsonNode n : root.path("volumes")) {
+            for (JsonNode n : listAll("volumes", "volume")) {
                 Volume v = mapper.treeToValue(n, Volume.class);
                 if (!v.isDeletedOrDeleting()) {
                     live.add(v);
@@ -642,6 +640,40 @@ public class LightbitsApiClient {
             throw new LightbitsApiException(Kind.UNKNOWN, "malformed volume list response", e);
         }
         return live;
+    }
+
+    /** Most objects the cluster returns per list request (it refuses a larger limit). */
+    static final int LIST_PAGE = 1000;
+
+    /**
+     * Every entry of a project list, page by page: the cluster returns at most
+     * {@link #LIST_PAGE} entries per request, sorted by UUID, and {@code offsetUUID} continues
+     * after the given UUID. A page shorter than the limit is the last one. A caller that needs
+     * the whole inventory (the capacity sum, the environment check, the pool-delete sweep, the
+     * ACL prune) would otherwise act on the first thousand objects only.
+     */
+    private List<JsonNode> listAll(String kind, String what) throws IOException {
+        List<JsonNode> all = new ArrayList<>();
+        String after = null;
+        while (true) {
+            String resp = execute("GET", projectColl(kind) + "?limit=" + LIST_PAGE
+                    + (after == null ? "" : "&offsetUUID=" + urlenc(after)), null);
+            int n = 0;
+            String last = null;
+            for (JsonNode item : mapper.readTree(resp).path(kind)) {
+                all.add(item);
+                n++;
+                last = item.path("UUID").asText(null);
+            }
+            if (n < LIST_PAGE) {
+                return all;
+            }
+            if (last == null || last.equals(after)) {
+                throw new LightbitsApiException(Kind.UNKNOWN, "the " + what + " list did not advance past "
+                        + (after == null ? "its first page" : after) + "; refusing to act on a partial list", null);
+            }
+            after = last;
+        }
     }
 
 
@@ -789,11 +821,9 @@ public class LightbitsApiClient {
 
     /** All live (not deleted/deleting) snapshots in this client's project. */
     public List<Snapshot> listSnapshots() {
-        String resp = execute("GET", projectColl("snapshots"), null);
         List<Snapshot> live = new ArrayList<>();
         try {
-            JsonNode root = mapper.readTree(resp);
-            for (JsonNode n : root.path("snapshots")) {
+            for (JsonNode n : listAll("snapshots", "snapshot")) {
                 Snapshot s = mapper.treeToValue(n, Snapshot.class);
                 if (!s.isDeletedOrDeleting()) {
                     live.add(s);

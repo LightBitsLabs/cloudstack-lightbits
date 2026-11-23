@@ -109,6 +109,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
 
     private java.util.Map<String, String> discoveryDetails(long poolId) {
         java.util.Map<String, String> out = new java.util.HashMap<>();
+        out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_PLUGIN_VERSION,
+                org.apache.cloudstack.storage.datastore.util.LightbitsVersion.version());
         try {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                     org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig.fromDetails(
