@@ -183,8 +183,8 @@ offering for data disks, `serviceofferingdetails[...]` on a compute offering for
 | Offering detail | Value | Effect |
 |---|---|---|
 | `lightbitsCompression` | `true` or `false` | Overrides the pool's `compression` for the volume |
-| `lightbitsPlacement` | comma-separated failure domains, up to 25 | A 1-replica volume is placed in one of them; for 2 or 3 replicas the primary replica is. See the note below |
-| `lightbitsUnencrypted` | `true` or `false` | `true` creates the volume unencrypted. Only on a cluster that allows unencrypted volumes (hybrid encryption); other clusters reject the create ("UnencryptedVolumesAllowed is not set") |
+| `lightbitsPlacement` | comma-separated failure domains, up to 25 | A 1-replica volume is placed in one of them; for 2 or 3 replicas the primary replica is |
+| `lightbitsUnencrypted` | `true` or `false` | `true` creates the volume unencrypted; only on a cluster in hybrid encryption mode, other clusters reject the create |
 
 ```bash
 cmk create diskoffering name=lb-rack-a displaytext="Lightbits, rack A" storagetype=shared \
@@ -196,13 +196,6 @@ with the reason; it is never ignored. As with the replica factor, clones (templa
 disks and volumes from a snapshot) share their source's data, so they keep the source's
 placement and encryption; the detail applies to volumes the cluster creates fresh. Failure
 domains are the ones configured on the cluster's servers (`lbcli list servers`).
-
-Placement depends on the cluster's setup. The cluster rejects a restriction on a 1-replica
-volume while its dynamic rebalance is on ("unsupported volume affinity requested while
-dynamic rebalance is enabled"). For 2 or 3 replicas, a 3.22.1 cluster whose servers carry no
-failure domains accepted the restriction and dropped it; the plugin then logs "was created
-without the placement restriction". Check a test volume with `lbcli get volume` before
-relying on the detail.
 
 **Labels.** Every volume the plugin creates carries the labels `cloudstack-volume` (the
 CloudStack volume UUID), `cloudstack-account` (the owner account UUID) and `cloudstack-pool`

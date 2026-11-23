@@ -33,16 +33,6 @@ public class Volume {
     @JsonProperty("ETag")
     private String etag;
     private Statistics statistics;
-    private List<com.fasterxml.jackson.databind.JsonNode> placementRestrictions;
-
-    /** True when the cluster recorded a placement restriction on this volume. */
-    public boolean hasPlacementRestrictions() {
-        return placementRestrictions != null && !placementRestrictions.isEmpty();
-    }
-
-    public void setPlacementRestrictions(List<com.fasterxml.jackson.databind.JsonNode> placementRestrictions) {
-        this.placementRestrictions = placementRestrictions;
-    }
 
     /** Space accounting of a volume; the cluster sends the byte counts as decimal strings. */
     @JsonIgnoreProperties(ignoreUnknown = true)
