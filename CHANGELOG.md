@@ -27,6 +27,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   ... from the ACL of volume ...") and the host removal goes on. Check the management server
   log for that warning and remove such entries on the cluster before treating the host's
   access as revoked.
+  Once the removal has started, the host gets no new volume access: a grant for it that
+  overlaps the removal either finishes first and is cleaned up, or is refused. A host that
+  connects again (its removal did not go through) can be granted access again.
 - API failover: `&endpoints=<host[:port]>,...` lists further API endpoints of the cluster.
   Reads fail over on any transient failure; changes fail over only when the request provably
   never reached the endpoint, otherwise the state of the object decides. An endpoint that
