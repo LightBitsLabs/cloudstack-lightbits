@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- QoS follows the offering: a volume moved to an offering with another `lightbitsQosPolicy`
+  is moved to that policy on the cluster. A policy named by an offering is checked when a
+  volume is created, with the offering detail in the error when the project cannot see it.
 - Offering details `lightbitsCompression` (compression per offering), `lightbitsPlacement`
   (failure domains for the volume, or its primary replica) and `lightbitsUnencrypted` (an
   unencrypted volume on a cluster in hybrid encryption mode). Clones keep their source's
@@ -122,6 +125,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   well as 4.22.1.0.
 
 ### Known limitations
+- An offering change that keeps the volume's size and IOPS reaches the plugin only at the
+  volume's next attach, VM start or migration (CloudStack does not call the storage plugin for
+  it), so the new QoS policy applies from then.
 - Volume statistics pause after a failed read. When the plugin cannot read a volume's
   statistics from the cluster (for example, the Lightbits API does not answer), it stops
   asking the cluster about that pool's volumes for 60 seconds. During that minute a volume

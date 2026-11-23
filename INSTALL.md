@@ -212,6 +212,20 @@ CloudStack volume UUID), `cloudstack-account` (the owner account UUID) and `clou
 They let a cluster admin see who owns a volume. Ownership for cleanup is still decided by the
 volume name, never by labels.
 
+**QoS policy.** A volume gets the QoS policy named by its offering's `lightbitsQosPolicy`
+detail, else the pool's `qosPolicy`, else the cluster's default. The plugin cannot create
+policies: a cluster admin creates them and makes them visible to the pool's project, for
+example `lbcli create qos-policy --name=gold --type iops --read-limit 20000 --write-limit 20000
+--projects <project>`. A policy name in an offering that the project cannot see fails the
+volume creation with the offering detail in the reason.
+
+When a volume moves to another offering (`cmk change offeringforvolume`) whose policy is
+different, the plugin moves the volume to that policy. CloudStack hands an offering change to
+the plugin only when the size or the IOPS change too; otherwise the new policy is applied at
+the volume's next attach (or its VM's next start or migration). An offering that names no
+policy leaves the volume on the policy it has. A failed change is logged ("could not change
+the QoS policy of volume ...") and tried again at the next attach or resize.
+
 ## TLS: verifying the cluster certificate
 
 The management server always verifies the certificate of the Lightbits API. There is no
