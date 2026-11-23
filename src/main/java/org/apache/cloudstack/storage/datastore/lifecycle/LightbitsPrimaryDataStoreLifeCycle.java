@@ -478,7 +478,12 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
 
     @Override
     public void updateStoragePool(StoragePool storagePool, Map<String, String> details) {
-        // capacity is refreshed from the cluster via the driver's stats; nothing to do here yet
+        // capacity is refreshed from the cluster via the driver's stats; only the option values are checked
+        try {
+            org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig.validateUpdatedDetails(details);
+        } catch (IllegalArgumentException e) {
+            throw new com.cloud.exception.InvalidParameterValueException("Lightbits pool " + storagePool.getName() + ": " + e.getMessage());
+        }
     }
 
     @Override
