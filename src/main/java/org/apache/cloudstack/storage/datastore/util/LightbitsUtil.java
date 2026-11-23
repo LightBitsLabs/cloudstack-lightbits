@@ -89,4 +89,52 @@ public final class LightbitsUtil {
         }
         return replicas;
     }
+
+    /**
+     * Parse a true/false offering detail. Anything else fails the volume creation: the operator
+     * explicitly asked for something, and a typo must not silently mean "false".
+     */
+    public static boolean parseBooleanDetail(String key, String value) {
+        String v = value == null ? "" : value.trim();
+        if (v.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (v.equalsIgnoreCase("false")) {
+            return false;
+        }
+        throw new IllegalArgumentException("offering detail " + key + " must be true or false (got '" + value + "')");
+    }
+
+    /** The cluster accepts at most 25 failure domains of up to 100 characters each in a placement restriction. */
+    static final int MAX_FAILURE_DOMAINS = 25;
+    static final int MAX_FAILURE_DOMAIN_LENGTH = 100;
+
+    /**
+     * Parse the {@code lightbitsPlacement} offering detail: comma-separated failure-domain names.
+     * Empty entries are dropped and duplicates collapse; an empty list, too many names or an
+     * over-long name fails the volume creation with the cluster's limits in the message.
+     */
+    public static java.util.List<String> parsePlacementDetail(String value) {
+        java.util.LinkedHashSet<String> fds = new java.util.LinkedHashSet<>();
+        for (String part : (value == null ? "" : value).split(",")) {
+            String fd = part.trim();
+            if (fd.isEmpty()) {
+                continue;
+            }
+            if (fd.length() > MAX_FAILURE_DOMAIN_LENGTH) {
+                throw new IllegalArgumentException("offering detail lightbitsPlacement: failure domain '" + fd
+                        + "' is longer than " + MAX_FAILURE_DOMAIN_LENGTH + " characters");
+            }
+            fds.add(fd);
+        }
+        if (fds.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "offering detail lightbitsPlacement must list at least one failure domain (got '" + value + "')");
+        }
+        if (fds.size() > MAX_FAILURE_DOMAINS) {
+            throw new IllegalArgumentException("offering detail lightbitsPlacement lists " + fds.size()
+                    + " failure domains; the cluster accepts at most " + MAX_FAILURE_DOMAINS);
+        }
+        return java.util.List.copyOf(fds);
+    }
 }

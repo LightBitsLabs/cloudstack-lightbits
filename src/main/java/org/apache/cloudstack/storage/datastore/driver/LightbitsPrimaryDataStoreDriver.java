@@ -47,6 +47,7 @@ import org.apache.logging.log4j.Logger;
 import com.cloud.storage.StorageManager;
 import com.cloud.vm.VirtualMachineManager;
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
+import org.apache.cloudstack.storage.datastore.client.VolumeExtras;
 import org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao;
 import org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig;
 import org.apache.cloudstack.storage.datastore.util.LightbitsUtil;
@@ -85,6 +86,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     private com.cloud.service.dao.ServiceOfferingDao serviceOfferingDao;
     @Inject
     private com.cloud.service.dao.ServiceOfferingDetailsDao serviceOfferingDetailsDao;
+    @Inject
+    private com.cloud.user.dao.AccountDao accountDao;
 
     /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
     public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
@@ -103,18 +106,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      * pool default.
      */
     private int replicasFor(VolumeInfo vol, LightbitsPoolConfig cfg) {
-        Long diskOfferingId = vol.getDiskOfferingId();
-        String value = null;
-        if (diskOfferingId != null) {
-            value = diskOfferingDetailsDao.getDetail(diskOfferingId, REPLICAS_DETAIL);
-            if (value == null) {
-                com.cloud.service.ServiceOfferingVO svc =
-                        serviceOfferingDao.findServiceOfferingByComputeOnlyDiskOffering(diskOfferingId, false);
-                if (svc != null) {
-                    value = serviceOfferingDetailsDao.getDetail(svc.getId(), REPLICAS_DETAIL);
-                }
-            }
-        }
+        String value = offeringDetail(vol, REPLICAS_DETAIL);
         if (value == null) {
             return cfg.getReplicaCount();
         }
@@ -139,22 +131,77 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      * create (matching lbcli --qos-policy-name and the CSI driver); no UUID resolution.
      */
     private String qosPolicyNameFor(VolumeInfo vol, LightbitsPoolConfig cfg) {
-        String value = null;
-        Long diskOfferingId = vol.getDiskOfferingId();
-        if (diskOfferingId != null) {
-            value = diskOfferingDetailsDao.getDetail(diskOfferingId, QOS_POLICY_DETAIL);
-            if (value == null) {
-                com.cloud.service.ServiceOfferingVO svc =
-                        serviceOfferingDao.findServiceOfferingByComputeOnlyDiskOffering(diskOfferingId, false);
-                if (svc != null) {
-                    value = serviceOfferingDetailsDao.getDetail(svc.getId(), QOS_POLICY_DETAIL);
-                }
-            }
-        }
+        String value = offeringDetail(vol, QOS_POLICY_DETAIL);
         if (value == null || value.isBlank()) {
             value = cfg.getQosPolicy(); // pool default (may be null)
         }
         return (value == null || value.isBlank()) ? null : value;
+    }
+
+    /**
+     * An offering detail of a volume: the disk offering's detail first; for a root disk the
+     * disk offering is the compute offering's implicit one, so then the compute offering's
+     * details. Null when neither sets it.
+     */
+    private String offeringDetail(VolumeInfo vol, String key) {
+        Long diskOfferingId = vol.getDiskOfferingId();
+        if (diskOfferingId == null) {
+            return null;
+        }
+        String value = diskOfferingDetailsDao.getDetail(diskOfferingId, key);
+        if (value == null) {
+            com.cloud.service.ServiceOfferingVO svc =
+                    serviceOfferingDao.findServiceOfferingByComputeOnlyDiskOffering(diskOfferingId, false);
+            if (svc != null) {
+                value = serviceOfferingDetailsDao.getDetail(svc.getId(), key);
+            }
+        }
+        return value;
+    }
+
+    /** Offering detail turning compression on or off for a volume, overriding the pool's {@code compression}. */
+    public static final String COMPRESSION_DETAIL = "lightbitsCompression";
+    /** Offering detail with comma-separated failure domains the volume (or its primary replica) is placed in. */
+    public static final String PLACEMENT_DETAIL = "lightbitsPlacement";
+    /** Offering detail asking for an unencrypted volume on a cluster in hybrid encryption mode. */
+    public static final String UNENCRYPTED_DETAIL = "lightbitsUnencrypted";
+
+    /** Label keys the plugin sets on every volume it creates. */
+    public static final String LABEL_VOLUME = "cloudstack-volume";
+    public static final String LABEL_TEMPLATE = "cloudstack-template";
+    public static final String LABEL_ACCOUNT = "cloudstack-account";
+    public static final String LABEL_POOL = "cloudstack-pool";
+
+    /** Compression for a volume: the offering's {@link #COMPRESSION_DETAIL}, else the pool's setting. */
+    private boolean compressionFor(VolumeInfo vol, LightbitsPoolConfig cfg) {
+        String value = offeringDetail(vol, COMPRESSION_DETAIL);
+        return value == null ? cfg.isCompression() : LightbitsUtil.parseBooleanDetail(COMPRESSION_DETAIL, value);
+    }
+
+    /** Labels, placement and encryption choice for a new volume. */
+    private VolumeExtras extrasFor(VolumeInfo vol, DataStore store) {
+        java.util.Map<String, String> labels = new java.util.LinkedHashMap<>();
+        labels.put(LABEL_VOLUME, vol.getUuid());
+        String account = accountUuid(vol.getAccountId());
+        if (account != null) {
+            labels.put(LABEL_ACCOUNT, account);
+        }
+        labels.put(LABEL_POOL, store.getUuid());
+        String placement = offeringDetail(vol, PLACEMENT_DETAIL);
+        String unencrypted = offeringDetail(vol, UNENCRYPTED_DETAIL);
+        return new VolumeExtras(labels,
+                placement == null ? List.of() : LightbitsUtil.parsePlacementDetail(placement),
+                unencrypted != null && LightbitsUtil.parseBooleanDetail(UNENCRYPTED_DETAIL, unencrypted));
+    }
+
+    private String accountUuid(long accountId) {
+        try {
+            com.cloud.user.Account a = accountDao.findByIdIncludingRemoved(accountId);
+            return a == null ? null : a.getUuid();
+        } catch (RuntimeException e) {
+            LOG.debug("Lightbits: no account uuid for account {}: {}", accountId, e.getMessage());
+            return null;
+        }
     }
 
     /** Rebuild the validated pool config (incl. environment) from persisted details. */
@@ -211,8 +258,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 org.apache.cloudstack.storage.datastore.client.model.Volume created =
                         client.createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), vol.getUuid()),
-                                vol.getSize(), replicasFor(vol, cfg), null, cfg.isCompression(),
-                                qosPolicyNameFor(vol, cfg));
+                                vol.getSize(), replicasFor(vol, cfg), null, compressionFor(vol, cfg),
+                                qosPolicyNameFor(vol, cfg), extrasFor(vol, store));
                 // path identifies the backing volume; the KVM adaptor resolves the NVMe
                 // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>). The path must be
                 // returned inside a VolumeObjectTO so CloudStack persists it on the volume.
@@ -237,7 +284,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 org.apache.cloudstack.storage.datastore.client.model.Volume created =
                         clientFor(cfg).createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), tmpl.getUuid()),
-                                size, cfg.getReplicaCount(), null, cfg.isCompression(), null);
+                                size, cfg.getReplicaCount(), null, cfg.isCompression(), null,
+                                new VolumeExtras(java.util.Map.of(LABEL_TEMPLATE, tmpl.getUuid(), LABEL_POOL, store.getUuid()),
+                                        List.of(), false));
                 path = created.getUuid();
                 // The managed-template flow calls processEvent(OperationSucceeded) WITHOUT the
                 // answer, so the framework does not persist our path. Set install_path on the
@@ -458,8 +507,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                         + "source's replica factor ({}): the cluster requires clone == source and the count is "
                         + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
             }
+            // A clone shares its source's data: it keeps the source's placement and encryption,
+            // and only takes the new volume's labels (see createVolumeFromSnapshot).
             created = client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null,
-                    cfg.isCompression(), qosPolicyNameFor(destVol, cfg));
+                    compressionFor(destVol, cfg), qosPolicyNameFor(destVol, cfg), extrasFor(destVol, store));
         } catch (RuntimeException e) {
             // Do not leave the clone-source snapshot we just took behind a failed clone. A clone
             // this call created has been removed, and that removal waited for, by the client.

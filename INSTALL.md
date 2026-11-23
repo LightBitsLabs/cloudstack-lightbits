@@ -177,6 +177,32 @@ create-volume-from-snapshot inherits the snapshot's base volume. A differing off
 on those is logged as a warning, not an error. The compute-offering variant
 (`serviceofferingdetails[0].lightbitsReplicas`) is honored only for ISO-based root disks.
 
+**Other per-offering options.** Set them the same way as `lightbitsReplicas` (on a disk
+offering for data disks, `serviceofferingdetails[...]` on a compute offering for root disks):
+
+| Offering detail | Value | Effect |
+|---|---|---|
+| `lightbitsCompression` | `true` or `false` | Overrides the pool's `compression` for the volume |
+| `lightbitsPlacement` | comma-separated failure domains, up to 25 | A 1-replica volume is placed in one of them; for 2 or 3 replicas the primary replica is |
+| `lightbitsUnencrypted` | `true` or `false` | `true` creates the volume unencrypted; only on a cluster in hybrid encryption mode, other clusters reject the create |
+
+```bash
+cmk create diskoffering name=lb-rack-a displaytext="Lightbits, rack A" storagetype=shared \
+    customized=true tags=lightbits details[0].lightbitsReplicas=1 details[1].lightbitsPlacement=fd-rack-a
+```
+
+A value that is not valid (for example `lightbitsCompression=yes`) fails the volume creation
+with the reason; it is never ignored. As with the replica factor, clones (template-based root
+disks and volumes from a snapshot) share their source's data, so they keep the source's
+placement and encryption; the detail applies to volumes the cluster creates fresh. Failure
+domains are the ones configured on the cluster's servers (`lbcli list servers`).
+
+**Labels.** Every volume the plugin creates carries the labels `cloudstack-volume` (the
+CloudStack volume UUID), `cloudstack-account` (the owner account UUID) and `cloudstack-pool`
+(the pool UUID); a cached template volume carries `cloudstack-template` and `cloudstack-pool`.
+They let a cluster admin see who owns a volume. Ownership for cleanup is still decided by the
+volume name, never by labels.
+
 ## TLS: verifying the cluster certificate
 
 The management server always verifies the certificate of the Lightbits API. There is no

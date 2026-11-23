@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- Offering details `lightbitsCompression` (compression per offering), `lightbitsPlacement`
+  (failure domains for the volume, or its primary replica) and `lightbitsUnencrypted` (an
+  unencrypted volume on a cluster in hybrid encryption mode). Clones keep their source's
+  placement and encryption. Every volume carries the labels `cloudstack-volume`,
+  `cloudstack-account` and `cloudstack-pool` (`cloudstack-template` for a cached template).
 - Per-volume statistics: CloudStack shows and meters how much of each Lightbits volume holds
   data (the cluster's logical figure, before compression and replication) next to its size.
   A volume with no figure in one round reports its last one: CloudStack drops the figures of

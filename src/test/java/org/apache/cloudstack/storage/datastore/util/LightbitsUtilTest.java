@@ -70,4 +70,29 @@ class LightbitsUtilTest {
         org.junit.jupiter.api.Assertions.assertFalse(LightbitsUtil.isPoolObject("c.1", 7, "cs-cx1-p7-" + uuid));
         org.junit.jupiter.api.Assertions.assertFalse(LightbitsUtil.isPoolObject("cs1", 7, null));
     }
+
+    @Test
+    void booleanDetailAcceptsOnlyTrueOrFalse() {
+        org.junit.jupiter.api.Assertions.assertTrue(LightbitsUtil.parseBooleanDetail("k", " TRUE "));
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsUtil.parseBooleanDetail("k", "false"));
+        IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> LightbitsUtil.parseBooleanDetail("lightbitsCompression", "yes"));
+        org.junit.jupiter.api.Assertions.assertTrue(e.getMessage().contains("lightbitsCompression"));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> LightbitsUtil.parseBooleanDetail("k", null));
+    }
+
+    @Test
+    void placementDetailIsTrimmedDeduplicatedAndBounded() {
+        assertEquals(java.util.List.of("fd-a", "fd-b"), LightbitsUtil.parsePlacementDetail(" fd-a, ,fd-b,fd-a "));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> LightbitsUtil.parsePlacementDetail(" , "));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> LightbitsUtil.parsePlacementDetail("x".repeat(101)));
+        StringBuilder many = new StringBuilder();
+        for (int i = 0; i < 26; i++) {
+            many.append("fd").append(i).append(',');
+        }
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> LightbitsUtil.parsePlacementDetail(many.toString()));
+        assertEquals(25, LightbitsUtil.parsePlacementDetail(many.substring(0, many.lastIndexOf("fd25"))).size());
+    }
 }
