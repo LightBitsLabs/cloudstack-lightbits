@@ -188,8 +188,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
             boolean locked = org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.removal(hostId,
                     () -> markRemoving(hostId), hostGateLocker, () -> sweepHostFromAcls(hostId, nqn.getValue()));
             if (!locked) {
-                LOG.warn("Lightbits: host {} is being removed but its ACL lock was busy; swept its ACL entries without it."
-                        + " Check the volumes of its pools for its NQN {} once the removal is done", hostId, nqn.getValue());
+                LOG.warn("Lightbits: host {} is being removed but its ACL lock was busy for {} s; swept its ACL entries"
+                        + " without it (a grant still running for it takes its own entry out again)", hostId,
+                        org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVAL_LOCK_SECONDS);
             }
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: ACL cleanup for host {} that is being removed failed: {}", hostId, e.getMessage());

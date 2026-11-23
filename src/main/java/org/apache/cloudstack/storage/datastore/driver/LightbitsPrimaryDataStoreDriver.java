@@ -693,7 +693,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     }
                     acl.add(nqn);
                     return true;
-                }));
+                }),
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn)));
         if (dataObject instanceof VolumeInfo) {
             // An offering change with the same size and IOPS never reaches resize: pick it up here.
             client.getVolumeByName(name).ifPresent(v ->
