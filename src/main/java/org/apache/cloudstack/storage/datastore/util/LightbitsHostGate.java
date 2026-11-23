@@ -26,18 +26,22 @@ import com.cloud.utils.exception.CloudRuntimeException;
  * every ACL (a sweep); a grant for that host that read a volume before the sweep and writes
  * after it would put the host back, and nothing would take it out again once the host is gone.
  *
- * <p>Both run under one lock per host that every management server sees (CloudStack's
- * database-backed GlobalLock). The sweep first marks the host as being removed (host detail
- * {@link #REMOVING_DETAIL}); a grant that gets the lock after that refuses. So a grant either
- * finishes before the sweep starts (and the sweep removes it), or sees the mark and writes
- * nothing. The mark is cleared when the host connects again, in case its removal did not go
- * through.
+ * <p>The removal first marks the host as being removed (host detail {@link #REMOVING_DETAIL}),
+ * then sweeps. A grant refuses when it sees the mark before its write, and takes its own entry
+ * out again when it sees the mark after its write. Because the mark is written before the
+ * sweep, every grant write is covered: one that lands before the sweep reads the volume is
+ * swept, one that lands after it is seen by the grant's own second check. Both also run
+ * under one lock per host that every management server sees (CloudStack's database-backed
+ * GlobalLock), so in the normal case no grant runs during the sweep at all; when the removal
+ * cannot get the lock in time it still sweeps, and the second check covers the grant that
+ * holds the lock. The mark is cleared when the host connects again, in case its removal did
+ * not go through.
  */
 public final class LightbitsHostGate {
     /** Host detail set while the host is being removed from CloudStack. */
     public static final String REMOVING_DETAIL = "lightbits.removing";
     static final int GRANT_LOCK_SECONDS = 120;
-    static final int REMOVAL_LOCK_SECONDS = 600;
+    public static final int REMOVAL_LOCK_SECONDS = 600;
 
     /** Runs work under a named lock; false when the lock was not had within the time. */
     public interface Locker {
@@ -73,14 +77,22 @@ public final class LightbitsHostGate {
         return "lightbits.host.acl." + hostId;
     }
 
-    /** Run a grant's ACL write for the host, unless the host is being removed. */
-    public static void grant(long hostId, RemovingCheck removing, Locker locker, Runnable aclWrite) {
+    /**
+     * Run a grant's ACL write for the host, unless the host is being removed. If the host is
+     * marked once the write is done, {@code aclUndo} takes the entry out again and the grant fails.
+     */
+    public static void grant(long hostId, RemovingCheck removing, Locker locker, Runnable aclWrite, Runnable aclUndo) {
         boolean had = locker.run(lockName(hostId), GRANT_LOCK_SECONDS, () -> {
             if (removing.isRemoving(hostId)) {
                 throw new CloudRuntimeException("host " + hostId + " is being removed from CloudStack;"
                         + " not granting it access to a Lightbits volume");
             }
             aclWrite.run();
+            if (removing.isRemoving(hostId)) {
+                aclUndo.run();
+                throw new CloudRuntimeException("host " + hostId + " started being removed from CloudStack during"
+                        + " the grant; took its access to the Lightbits volume out again");
+            }
         });
         if (!had) {
             throw new CloudRuntimeException("could not get the ACL lock of host " + hostId + " within "
@@ -89,19 +101,17 @@ public final class LightbitsHostGate {
     }
 
     /**
-     * Mark the host as being removed, then sweep it out of the ACLs, under the host's lock.
-     * Without the lock in time the sweep still runs (removal must not be blocked); the caller
-     * logs the returned false.
+     * Mark the host as being removed (always first, outside the lock), then sweep it out of
+     * the ACLs under the host's lock. Without the lock in time the sweep still runs (removal
+     * must not be blocked; a grant still writing undoes itself, see {@link #grant}); the
+     * caller logs the returned false.
      */
     public static boolean removal(long hostId, Runnable markRemoving, Locker locker, Runnable sweep) {
-        Runnable both = () -> {
-            markRemoving.run();
-            sweep.run();
-        };
-        if (locker.run(lockName(hostId), REMOVAL_LOCK_SECONDS, both)) {
+        markRemoving.run();
+        if (locker.run(lockName(hostId), REMOVAL_LOCK_SECONDS, sweep)) {
             return true;
         }
-        both.run();
+        sweep.run();
         return false;
     }
 }

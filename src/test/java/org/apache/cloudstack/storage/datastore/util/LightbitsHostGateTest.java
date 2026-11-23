@@ -81,7 +81,7 @@ class LightbitsHostGateTest {
                         Thread.currentThread().interrupt();
                     }
                     acl.add("nqn-host");
-                });
+                }, () -> acl.remove("nqn-host"));
             } catch (Throwable t) {
                 grantErrors.add(t);
             }
@@ -96,12 +96,14 @@ class LightbitsHostGateTest {
         grant.join(10_000);
         removal.join(10_000);
 
-        assertTrue(grantErrors.isEmpty(), grantErrors.toString());
-        assertFalse(acl.contains("nqn-host"), "the sweep ran after the grant's write");
+        // the mark lands before the grant's write finishes: the grant takes its entry out and fails
+        assertEquals(1, grantErrors.size(), grantErrors.toString());
+        assertTrue(grantErrors.get(0).getMessage().contains("started being removed"));
+        assertFalse(acl.contains("nqn-host"), "no ACL keeps the removed host");
 
         // a grant after the sweep is refused and writes nothing
         CloudRuntimeException e = assertThrows(CloudRuntimeException.class,
-                () -> LightbitsHostGate.grant(HOST, removing::contains, locker, () -> acl.add("nqn-host")));
+                () -> LightbitsHostGate.grant(HOST, removing::contains, locker, () -> acl.add("nqn-host"), () -> acl.remove("nqn-host")));
         assertTrue(e.getMessage().contains("being removed"));
         assertFalse(acl.contains("nqn-host"));
     }
@@ -110,7 +112,7 @@ class LightbitsHostGateTest {
     void aGrantForAnotherHostIsNotHeldUp() {
         Set<Long> removing = new HashSet<>(Set.of(HOST));
         List<String> writes = new CopyOnWriteArrayList<>();
-        LightbitsHostGate.grant(HOST + 1, removing::contains, inProcess(), () -> writes.add("other"));
+        LightbitsHostGate.grant(HOST + 1, removing::contains, inProcess(), () -> writes.add("other"), () -> writes.remove("other"));
         assertEquals(List.of("other"), writes);
     }
 
@@ -118,7 +120,7 @@ class LightbitsHostGateTest {
     void aGrantThatCannotGetTheLockFailsAndWritesNothing() {
         List<String> writes = new CopyOnWriteArrayList<>();
         CloudRuntimeException e = assertThrows(CloudRuntimeException.class,
-                () -> LightbitsHostGate.grant(HOST, id -> false, (n, s, w) -> false, () -> writes.add("x")));
+                () -> LightbitsHostGate.grant(HOST, id -> false, (n, s, w) -> false, () -> writes.add("x"), () -> writes.remove("x")));
         assertTrue(e.getMessage().contains("lock"));
         assertTrue(writes.isEmpty());
     }
@@ -129,5 +131,50 @@ class LightbitsHostGateTest {
         boolean locked = LightbitsHostGate.removal(HOST, () -> steps.add("mark"), (n, s, w) -> false, () -> steps.add("sweep"));
         assertFalse(locked);
         assertEquals(List.of("mark", "sweep"), steps);
+    }
+
+    @Test
+    void whenTheRemovalCannotGetTheLockAGrantStillWritingTakesItsEntryOutAgain() throws Exception {
+        // The grant holds the lock and has passed its first check; the removal times out on
+        // the lock, marks the host and sweeps without it, and only then does the grant write.
+        Set<Long> removing = java.util.Collections.synchronizedSet(new HashSet<>());
+        Set<String> acl = java.util.Collections.synchronizedSet(new HashSet<>());
+        CountDownLatch grantChecked = new CountDownLatch(1);
+        CountDownLatch swept = new CountDownLatch(1);
+        List<Throwable> grantErrors = new CopyOnWriteArrayList<>();
+        LightbitsHostGate.Locker grantHolds = (n, s, w) -> {
+            w.run();
+            return true;
+        };
+        Thread grant = new Thread(() -> {
+            try {
+                LightbitsHostGate.grant(HOST, id -> {
+                    boolean r = removing.contains(id);
+                    grantChecked.countDown();
+                    return r;
+                }, grantHolds, () -> {
+                    try {
+                        swept.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    acl.add("nqn-host");
+                }, () -> acl.remove("nqn-host"));
+            } catch (Throwable t) {
+                grantErrors.add(t);
+            }
+        });
+        grant.start();
+        assertTrue(grantChecked.await(5, TimeUnit.SECONDS));
+        boolean locked = LightbitsHostGate.removal(HOST, () -> removing.add(HOST), (n, s, w) -> false, () -> {
+            acl.remove("nqn-host");
+            swept.countDown();
+        });
+        grant.join(10_000);
+
+        assertFalse(locked);
+        assertFalse(acl.contains("nqn-host"), "the grant's late write was taken out again");
+        assertEquals(1, grantErrors.size());
+        assertTrue(grantErrors.get(0).getMessage().contains("started being removed"));
     }
 }
