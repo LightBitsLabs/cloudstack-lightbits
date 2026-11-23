@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - QoS follows the offering: a volume moved to an offering with another `lightbitsQosPolicy`
   is moved to that policy on the cluster. A policy named by an offering is checked when a
   volume is created, with the offering detail in the error when the project cannot see it.
+- Pool option `qosFromIops=true`: an offering with a max IOPS and no `lightbitsQosPolicy`
+  gets the project's IOPS policy with the lowest limit that still gives that max IOPS.
 - Offering details `lightbitsCompression` (compression per offering), `lightbitsPlacement`
   (failure domains for the volume, or its primary replica) and `lightbitsUnencrypted` (an
   unencrypted volume on a cluster in hybrid encryption mode). Clones keep their source's

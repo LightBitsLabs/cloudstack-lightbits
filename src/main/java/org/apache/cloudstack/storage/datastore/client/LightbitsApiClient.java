@@ -281,6 +281,49 @@ public class LightbitsApiClient {
         }
     }
 
+    /** An IOPS-type QoS policy: its name and per-direction limits (0 means no limit). */
+    public static final class IopsPolicy {
+        public final String name;
+        public final long readIops;
+        public final long writeIops;
+
+        public IopsPolicy(String name, long readIops, long writeIops) {
+            this.name = name;
+            this.readIops = readIops;
+            this.writeIops = writeIops;
+        }
+
+        @Override
+        public String toString() {
+            return name + " (read " + (readIops == 0 ? "unlimited" : readIops) + ", write "
+                    + (writeIops == 0 ? "unlimited" : writeIops) + " IOPS)";
+        }
+    }
+
+    /**
+     * The IOPS-limit QoS policies visible to this project ({@code GET /api/v2/policies}).
+     * Bandwidth and IOPS-per-GB policies are left out: they do not map to an IOPS figure.
+     */
+    public List<IopsPolicy> listIopsPolicies() {
+        Map<String, String> q = new HashMap<>();
+        q.put("projectName", project);
+        String resp = execute("GET", "/api/v2/policies" + query(q), null);
+        try {
+            List<IopsPolicy> out = new ArrayList<>();
+            for (JsonNode p : mapper.readTree(resp).path("policies")) {
+                JsonNode iops = p.path("QoSRateLimitPolicy").path("limitIOPS");
+                String name = p.path("name").asText(null);
+                if (name == null || iops.isMissingNode() || iops.isNull()) {
+                    continue;
+                }
+                out.add(new IopsPolicy(name, iops.path("readIOPSLimit").asLong(0), iops.path("writeIOPSLimit").asLong(0)));
+            }
+            return out;
+        } catch (IOException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "malformed policies list response", e);
+        }
+    }
+
     /**
      * Raw physical capacity aggregated across all cluster nodes, read from
      * {@code GET /api/v2/nodes} (which a project-scoped token is permitted to read, unlike

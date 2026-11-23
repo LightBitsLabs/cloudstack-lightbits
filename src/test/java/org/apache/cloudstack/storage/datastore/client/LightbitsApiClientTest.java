@@ -211,6 +211,18 @@ class LightbitsApiClientTest {
     }
 
     @Test
+    void iopsPoliciesAreListedForTheProjectAndOtherKindsLeftOut() {
+        wm.stubFor(get(urlEqualTo("/api/v2/policies?projectName=" + PROJECT)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"policies\":[{\"name\":\"gold\",\"QoSRateLimitPolicy\":{\"limitIOPS\":{\"readIOPSLimit\":20000,\"writeIOPSLimit\":10000}}},"
+                + "{\"name\":\"bw\",\"QoSRateLimitPolicy\":{\"limitBw\":{\"readBWLimit\":10,\"writeBWLimit\":10}}}]}")));
+        java.util.List<LightbitsApiClient.IopsPolicy> ps = client.listIopsPolicies();
+        assertEquals(1, ps.size());
+        assertEquals("gold", ps.get(0).name);
+        assertEquals(20000, ps.get(0).readIops);
+        assertEquals(10000, ps.get(0).writeIops);
+    }
+
+    @Test
     void qosPolicyChangeSendsTheNameConditionally() {
         stubQosChange("gold");
         client.updateVolumeQosPolicy(VOL_UUID, "gold");

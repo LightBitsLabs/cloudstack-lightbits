@@ -130,32 +130,43 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      * QoS policy — the volume is created without one. The name is passed straight to volume
      * create (matching lbcli --qos-policy-name and the CSI driver); no UUID resolution.
      */
-    private String qosPolicyNameFor(VolumeInfo vol, LightbitsPoolConfig cfg) {
-        return qosPolicyNameFor(vol.getDiskOfferingId(), cfg);
-    }
-
-    private String qosPolicyNameFor(Long diskOfferingId, LightbitsPoolConfig cfg) {
-        String value = offeringDetail(diskOfferingId, QOS_POLICY_DETAIL);
-        if (value == null || value.isBlank()) {
-            value = cfg.getQosPolicy(); // pool default (may be null)
-        }
-        return (value == null || value.isBlank()) ? null : value.trim();
-    }
-
     /**
-     * {@link #qosPolicyNameFor} for a volume about to be created, with a policy named by the
-     * offering checked first: the pool default was checked at registration, but an offering's
-     * name was not, and the cluster's own error for an unknown name does not say where it came from.
+     * The QoS policy for a volume, in this order: the offering's {@link #QOS_POLICY_DETAIL};
+     * with the pool option {@code qosFromIops=true} and a max IOPS on the volume, the IOPS
+     * policy picked by {@link LightbitsUtil#policyForIops}; the pool default. Null: no policy.
+     * A policy named by an offering is checked when {@code checkOfferingName} (the pool
+     * default was checked at registration, an offering's name never was).
      */
-    private String checkedQosPolicyNameFor(VolumeInfo vol, LightbitsPoolConfig cfg, LightbitsApiClient client) {
-        String name = qosPolicyNameFor(vol, cfg);
-        String fromOffering = offeringDetail(vol, QOS_POLICY_DETAIL);
-        if (name != null && fromOffering != null && !fromOffering.isBlank() && !client.qosPolicyExists(name)) {
-            throw new CloudRuntimeException("QoS policy '" + name + "' (offering detail " + QOS_POLICY_DETAIL
-                    + ") is not visible to Lightbits project " + client.getProject()
-                    + "; a cluster admin must create it for that project, or correct the offering");
+    private String qosPolicyNameFor(Long diskOfferingId, Long maxIops, LightbitsPoolConfig cfg,
+                                    LightbitsApiClient client, boolean checkOfferingName) {
+        String fromOffering = offeringDetail(diskOfferingId, QOS_POLICY_DETAIL);
+        if (fromOffering != null && !fromOffering.isBlank()) {
+            String name = fromOffering.trim();
+            if (checkOfferingName && !client.qosPolicyExists(name)) {
+                throw new CloudRuntimeException("QoS policy '" + name + "' (offering detail " + QOS_POLICY_DETAIL
+                        + ") is not visible to Lightbits project " + client.getProject()
+                        + "; a cluster admin must create it for that project, or correct the offering");
+            }
+            return name;
         }
-        return name;
+        if (cfg.isQosFromIops() && maxIops != null && maxIops > 0) {
+            List<LightbitsApiClient.IopsPolicy> policies = client.listIopsPolicies();
+            String name = LightbitsUtil.policyForIops(policies, maxIops);
+            if (name == null) {
+                throw new CloudRuntimeException("no Lightbits QoS policy visible to project " + client.getProject()
+                        + " allows at least " + maxIops + " IOPS for reads and writes (pool option "
+                        + LightbitsPoolConfig.KEY_QOS_FROM_IOPS + "); policies with an IOPS limit: "
+                        + (policies.isEmpty() ? "none" : policies) + ". A cluster admin must create one, "
+                        + "or set " + QOS_POLICY_DETAIL + " on the offering");
+            }
+            return name;
+        }
+        String poolDefault = cfg.getQosPolicy();
+        return (poolDefault == null || poolDefault.isBlank()) ? null : poolDefault.trim();
+    }
+
+    private String checkedQosPolicyNameFor(VolumeInfo vol, LightbitsPoolConfig cfg, LightbitsApiClient client) {
+        return qosPolicyNameFor(vol.getDiskOfferingId(), vol.getMaxIops(), cfg, client, true);
     }
 
     /**
@@ -163,10 +174,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
      * effort: a failure is logged and the next attach or resize tries again. A volume whose
      * offering and pool name no policy keeps the one it has (the cluster has no "none").
      */
-    private void reconcileQosPolicy(LightbitsApiClient client, LightbitsPoolConfig cfg, Long diskOfferingId,
+    private void reconcileQosPolicy(LightbitsApiClient client, LightbitsPoolConfig cfg, Long diskOfferingId, Long maxIops,
                                     org.apache.cloudstack.storage.datastore.client.model.Volume v) {
         try {
-            String wanted = qosPolicyNameFor(diskOfferingId, cfg);
+            String wanted = qosPolicyNameFor(diskOfferingId, maxIops, cfg, client, false);
             if (wanted == null || wanted.equals(v.getQosPolicyName())) {
                 return;
             }
@@ -637,7 +648,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             // when the size or the IOPS change); the new offering is in the payload.
             Long offeringId = payload != null && payload.getNewDiskOfferingId() != null
                     ? payload.getNewDiskOfferingId() : vol.getDiskOfferingId();
-            reconcileQosPolicy(client, cfg, offeringId, v);
+            Long maxIops = payload != null && payload.newMaxIops != null ? payload.newMaxIops : vol.getMaxIops();
+            reconcileQosPolicy(client, cfg, offeringId, maxIops, v);
         } catch (Exception e) {
             errMsg = e.getMessage();
         }
@@ -681,7 +693,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         if (dataObject instanceof VolumeInfo) {
             // An offering change with the same size and IOPS never reaches resize: pick it up here.
             client.getVolumeByName(name).ifPresent(v ->
-                    reconcileQosPolicy(client, cfg, ((VolumeInfo) dataObject).getDiskOfferingId(), v));
+                    reconcileQosPolicy(client, cfg, ((VolumeInfo) dataObject).getDiskOfferingId(),
+                            ((VolumeInfo) dataObject).getMaxIops(), v));
         }
         return true;
     }

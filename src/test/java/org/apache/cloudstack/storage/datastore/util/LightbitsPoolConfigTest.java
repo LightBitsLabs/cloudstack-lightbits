@@ -227,4 +227,21 @@ class LightbitsPoolConfigTest {
                 () -> LightbitsPoolConfig.fromUrl("lightbits://[2001:db8::1]:443/proj?environment=cs1", "jwt"));
         assertTrue(e.getMessage().contains("IPv6") && e.getMessage().contains("[2001:db8::1]"), e.getMessage());
     }
+
+    @Test
+    void qosFromIopsIsOffUnlessSetAndSurvivesTheDetailsRoundTrip() {
+        LightbitsPoolConfig off = LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1", "jwt");
+        org.junit.jupiter.api.Assertions.assertFalse(off.isQosFromIops());
+        org.junit.jupiter.api.Assertions.assertFalse(off.toDetailsWithoutSecret().containsKey(LightbitsPoolConfig.KEY_QOS_FROM_IOPS));
+        LightbitsPoolConfig on = LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&qosFromIops=true", "jwt");
+        assertTrue(on.isQosFromIops());
+        assertTrue(LightbitsPoolConfig.fromDetails(on.toDetailsWithoutSecret(), "jwt").isQosFromIops());
+    }
+
+    @Test
+    void qosFromIopsRefusesAnythingButTrueOrFalse() {
+        IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&qosFromIops=yes", "jwt"));
+        assertTrue(e.getMessage().contains("qosFromIops"));
+    }
 }

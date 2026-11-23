@@ -105,7 +105,7 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
 - **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required),
   `&fingerprint=<SHA-256 fingerprint>` (needed for a Lightbits cluster, see
   [TLS](#tls-verifying-the-cluster-certificate)) and optional
-  `&replicas=1..3&compression=true&qosPolicy=<name>&endpoints=<host[:port]>,...`
+  `&replicas=1..3&compression=true&qosPolicy=<name>&qosFromIops=true&endpoints=<host[:port]>,...`
 - **endpoints** — further API endpoints of the same cluster, comma-separated `host[:port]`
   (the port defaults to the pool's API port). List the other nodes so the storage keeps working
   when the node named in the URL is down. Read calls move to the next endpoint on a connection
@@ -218,6 +218,20 @@ policies: a cluster admin creates them and makes them visible to the pool's proj
 example `lbcli create qos-policy --name=gold --type iops --read-limit 20000 --write-limit 20000
 --projects <project>`. A policy name in an offering that the project cannot see fails the
 volume creation with the offering detail in the reason.
+
+**QoS from IOPS (pool option `qosFromIops=true`, off by default).** With it, an offering
+that sets a max IOPS (fixed, or customized by the user) and names no `lightbitsQosPolicy` gets
+the IOPS policy visible to the project with the lowest limit that still gives at least that max
+IOPS for reads and for writes (equal limits: the first by name). Unlimited policies and
+bandwidth or IOPS-per-GB policies are not candidates. If none fits, the volume creation fails
+and the error lists the IOPS policies the project can see. Min IOPS has no Lightbits
+equivalent and is not used. The cluster admin creates the steps, for example:
+
+```bash
+lbcli create qos-policy --name=iops-1k --type iops --read-limit 1000 --write-limit 1000 --projects <project>
+lbcli create qos-policy --name=iops-5k --type iops --read-limit 5000 --write-limit 5000 --projects <project>
+lbcli create qos-policy --name=iops-20k --type iops --read-limit 20000 --write-limit 20000 --projects <project>
+```
 
 When a volume moves to another offering (`cmk change offeringforvolume`) whose policy is
 different, the plugin moves the volume to that policy. CloudStack hands an offering change to
