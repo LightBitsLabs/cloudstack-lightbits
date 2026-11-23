@@ -109,6 +109,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   than the 255 characters CloudStack can store, is rejected when the pool is registered.
 
 ### Changed
+- `packaging/install.sh` checks before it changes anything (jar is a plugin build for the
+  installed CloudStack line, KVM host prerequisites), installs atomically, and after the restart
+  waits until the service reports loading exactly this build. New options `--check`,
+  `--no-restart`, `--force`, `--wait`. Unknown arguments are an error (exit 2).
+- Messages of the plugin are plain ASCII.
 - Revert is refused when the volume was grown after the snapshot was taken (a rollback would
   shrink it) and when the volume is still exposed to a host.
 - Builds and passes unit tests against CloudStack 4.23.0.0 (`-Dcloudstack.version=4.23.0.0`) as

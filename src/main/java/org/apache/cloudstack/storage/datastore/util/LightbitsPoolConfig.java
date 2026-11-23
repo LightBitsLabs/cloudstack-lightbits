@@ -137,7 +137,7 @@ public class LightbitsPoolConfig {
         if (project.isBlank()) {
             // trial finding F1: projectName is mandatory for every volume op
             throw new IllegalArgumentException("Lightbits pool URL must include a project path segment "
-                    + "(e.g. lightbits://host/my-project) — the cluster requires a project for all volume operations");
+                    + "(e.g. lightbits://host/my-project): the cluster requires a project for all volume operations");
         }
 
         Map<String, String> q = parseQuery(uri.getRawQuery());

@@ -455,7 +455,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             int requested = replicasFor(destVol, cfg);
             if (requested != replicas) {
                 LOG.warn("Lightbits: volume {} requested {} replicas via its offering, but clones inherit their "
-                        + "source's replica factor ({}) — LightOS requires clone == source and the count is "
+                        + "source's replica factor ({}): the cluster requires clone == source and the count is "
                         + "immutable; using {}", destVol.getUuid(), requested, replicas, replicas);
             }
             created = client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null,

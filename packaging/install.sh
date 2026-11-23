@@ -2,53 +2,340 @@
 #
 # Copyright 2026 Lightbits Labs Ltd.  Apache License 2.0.
 #
-# Install the Lightbits CloudStack plugin jar onto a CloudStack node.
-# Detects the role (management server and/or KVM agent) by which packages/lib
-# dirs are present, installs the jar, and restarts the affected service(s).
+# Install the Lightbits CloudStack plugin jar on a CloudStack node.
 #
-# Usage:  sudo ./install.sh [path-to-plugin.jar]
-#         (defaults to the newest cloud-plugin-storage-volume-lightbits-*.jar next to this script)
+# The role of the node (management server, KVM host, or both) is detected from the CloudStack
+# library directories that exist. The jar is checked before anything is changed, installed
+# atomically, the affected service is restarted, and the script then waits until the service
+# reports that it loaded exactly this build.
+#
+# Run it on the management server and on every KVM host, with the same jar.
+
 set -euo pipefail
 
-JAR="${1:-}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
-if [[ -z "$JAR" ]]; then
-    JAR="$(ls -1t "$HERE"/../target/cloud-plugin-storage-volume-lightbits-*.jar "$HERE"/cloud-plugin-storage-volume-lightbits-*.jar 2>/dev/null | head -1 || true)"
-fi
-[[ -n "$JAR" && -f "$JAR" ]] || { echo "ERROR: plugin jar not found; pass it as the first argument"; exit 1; }
-echo ">>> plugin jar: $JAR"
+MGMT_LIB="${LIGHTBITS_MGMT_LIB:-/usr/share/cloudstack-management/lib}"
+AGENT_LIB="${LIGHTBITS_AGENT_LIB:-/usr/share/cloudstack-agent/lib}"
+MGMT_LOG="${LIGHTBITS_MGMT_LOG:-/var/log/cloudstack/management/management-server.log}"
+AGENT_LOG="${LIGHTBITS_AGENT_LOG:-/var/log/cloudstack/agent/agent.log}"
+JAR_GLOB='cloud-plugin-storage-volume-lightbits-*.jar'
+PROPS=lightbits-plugin.properties
 
-MGMT_LIB=/usr/share/cloudstack-management/lib
-AGENT_LIB=/usr/share/cloudstack-agent/lib
-installed_any=0
+RESTART=1
+CHECK_ONLY=0
+FORCE=0
+WAIT_SECS=300
+JAR=""
+errors=0
+warnings=0
 
-install_to() {  # $1=libdir  $2=service
-    local lib="$1" svc="$2"
-    [[ -d "$lib" ]] || return 0
-    echo ">>> installing to $lib (role: $svc)"
-    # remove any older plugin jar to avoid duplicates on the classpath
-    rm -f "$lib"/cloud-plugin-storage-volume-lightbits-*.jar
-    cp "$JAR" "$lib/"
-    echo ">>> restarting $svc"
-    systemctl restart "$svc"
-    installed_any=1
+usage() {
+    cat <<'EOF'
+Usage: sudo ./install.sh [options] [path-to-plugin.jar]
+
+Without a jar path, the newest cloud-plugin-storage-volume-lightbits-*.jar next to this script
+(or in ../target) is used.
+
+Options:
+  --check        Check this node and the jar, change nothing.
+  --no-restart   Install the jar but do not restart CloudStack services. The new build is
+                 not active until cloudstack-management / cloudstack-agent are restarted.
+  --force        Install even if the jar was built for another CloudStack version or its
+                 build information cannot be read.
+  --wait SECS    How long to wait for a restarted service to load the plugin (default 300).
+  -h, --help     Show this help.
+
+Exit status: 0 success, 1 a check or a step failed, 2 wrong usage.
+EOF
 }
 
-install_to "$MGMT_LIB" cloudstack-management
-install_to "$AGENT_LIB" cloudstack-agent
+say()  { echo ">>> $*"; }
+warn() { echo "WARNING: $*" >&2; warnings=$((warnings + 1)); }
+fail() { echo "ERROR: $*" >&2; errors=$((errors + 1)); }
+die()  { echo "ERROR: $*" >&2; exit 1; }
+bad_usage() { echo "ERROR: $*" >&2; usage >&2; exit 2; }
+with_warnings() { if [[ $warnings -gt 0 ]]; then echo " with $warnings warning(s)"; fi; }
 
-if [[ "$installed_any" -eq 0 ]]; then
-    echo "ERROR: neither $MGMT_LIB nor $AGENT_LIB found — is CloudStack installed on this node?"
-    exit 1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check) CHECK_ONLY=1 ;;
+        --no-restart) RESTART=0 ;;
+        --force) FORCE=1 ;;
+        --wait)
+            [[ $# -ge 2 && "$2" =~ ^[0-9]+$ ]] || bad_usage "--wait needs a number of seconds"
+            WAIT_SECS=$((10#$2)); shift ;;   # base 10: "08" is eight seconds, not an octal error
+        -h|--help) usage; exit 0 ;;
+        -*) bad_usage "unknown option '$1'" ;;
+        *)
+            [[ -z "$JAR" ]] || bad_usage "more than one jar given ('$JAR' and '$1')"
+            JAR="$1" ;;
+    esac
+    shift
+done
+
+# ---- the node ----
+
+has_mgmt=0; has_agent=0
+[[ -d "$MGMT_LIB" ]] && has_mgmt=1
+[[ -d "$AGENT_LIB" ]] && has_agent=1
+if [[ $has_mgmt -eq 0 && $has_agent -eq 0 ]]; then
+    die "neither $MGMT_LIB nor $AGENT_LIB exists: CloudStack is not installed on this node"
+fi
+if [[ $CHECK_ONLY -eq 0 && $EUID -ne 0 ]]; then
+    die "run as root (sudo): installing the jar and restarting services needs it"
 fi
 
-if [[ -d "$AGENT_LIB" ]]; then
-    echo ">>> checking KVM host NVMe/TCP prerequisites"
-    command -v nvme >/dev/null || echo "WARN: nvme-cli not found; install it (dnf/apt install nvme-cli)"
-    modprobe nvme-tcp 2>/dev/null && echo "nvme_tcp: loaded" || echo "WARN: could not load nvme_tcp module"
-    [[ -f /etc/nvme/hostnqn ]] || { nvme gen-hostnqn > /etc/nvme/hostnqn 2>/dev/null && echo "generated /etc/nvme/hostnqn"; }
-    echo "    host NQN: $(cat /etc/nvme/hostnqn 2>/dev/null || echo '(unavailable)')"
-    echo "    (auto-registered as the 'nvme.hostnqn' host detail on host connect)"
+# The CloudStack version a library directory belongs to, from the name of its main jar.
+cloudstack_version() {  # $1=libdir
+    local f name
+    for f in "$1"/cloudstack-[0-9]*.jar "$1"/cloud-agent-[0-9]*.jar "$1"/cloud-api-[0-9]*.jar; do
+        [[ -e "$f" ]] || continue
+        name="$(basename "$f" .jar)"
+        # the first dotted number after a dash: cloud-api-4.23.0.0.jar and cloud-api-4.23.0.0-SNAPSHOT.jar
+        if [[ "$name" =~ -([0-9]+(\.[0-9]+)+)(-|$) ]]; then
+            echo "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# ---- the jar ----
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+if [[ -z "$JAR" ]]; then
+    # shellcheck disable=SC2086,SC2012
+    JAR="$(ls -1t "$HERE"/$JAR_GLOB "$HERE"/../target/$JAR_GLOB 2>/dev/null | head -1 || true)"
+    [[ -n "$JAR" ]] || bad_usage "no plugin jar found next to this script; pass its path"
+fi
+[[ -f "$JAR" && -r "$JAR" ]] || die "plugin jar '$JAR' does not exist or cannot be read"
+jar_name="$(basename "$JAR")"
+# shellcheck disable=SC2254
+case "$jar_name" in
+    $JAR_GLOB) ;;
+    *) die "'$jar_name' is not a Lightbits plugin jar (expected a name like $JAR_GLOB)" ;;
+esac
+
+can_inspect=1
+read_props() {  # prints the properties file inside the jar, or nothing
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -p "$JAR" "$PROPS" 2>/dev/null || true
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys, zipfile; sys.stdout.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]).decode())' "$JAR" "$PROPS" 2>/dev/null || true
+    else
+        can_inspect=0
+    fi
+}
+command -v unzip >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || can_inspect=0
+props="$(read_props)"
+prop() { echo "$props" | sed -n "s/^$1=//p" | head -1 | tr -d '\r'; }
+jar_version="$(prop version)"
+jar_built="$(prop built)"
+jar_cloudstack="$(prop cloudstack)"
+say "plugin jar: $JAR"
+if [[ -n "$jar_version" && -n "$jar_built" && -n "$jar_cloudstack" ]]; then
+    say "  plugin $jar_version, built $jar_built for CloudStack $jar_cloudstack"
+elif [[ $can_inspect -eq 0 && $FORCE -eq 1 ]]; then
+    warn "neither unzip nor python3 is installed: the jar cannot be inspected, so its version and its target CloudStack version are not checked; continuing because of --force"
+elif [[ $can_inspect -eq 0 ]]; then
+    fail "neither unzip nor python3 is installed, so the jar cannot be inspected and cannot be matched to this CloudStack. Install one of them, or use --force only if you know this jar is right."
+elif [[ $FORCE -eq 1 ]]; then
+    warn "'$jar_name' carries no build information ($PROPS); continuing because of --force"
+else
+    fail "'$jar_name' is damaged or its build information ($PROPS) is incomplete (it needs the plugin version, the build time and the target CloudStack version), so it cannot be matched to this CloudStack. Use --force only if you know this jar is right."
 fi
 
-echo ">>> done. Register a pool with provider=Lightbits (see INSTALL.md)."
+same_line() {  # true if two versions share major.minor (4.23.0.0 and 4.23.1.0)
+    [[ "$(echo "$1" | cut -d. -f1,2)" == "$(echo "$2" | cut -d. -f1,2)" ]]
+}
+check_target() {  # $1=libdir $2=role
+    local installed
+    installed="$(cloudstack_version "$1")"
+    if [[ -z "$installed" ]]; then
+        if [[ $FORCE -eq 1 ]]; then
+            warn "could not tell the CloudStack version of the $2 from $1 (continuing because of --force)"
+        else
+            fail "could not tell the CloudStack version of the $2 from $1, so the jar cannot be matched to it. Use --force only if you know this jar is built for the CloudStack release installed here."
+        fi
+        return 0
+    fi
+    say "  $2: CloudStack $installed"
+    [[ -n "$jar_cloudstack" ]] || return 0
+    if ! same_line "$installed" "$jar_cloudstack"; then
+        if [[ $FORCE -eq 1 ]]; then
+            warn "the jar was built for CloudStack $jar_cloudstack but the $2 runs $installed (continuing because of --force)"
+        else
+            fail "the jar was built for CloudStack $jar_cloudstack but the $2 runs $installed. CloudStack changes its storage plugin interfaces between releases: use the jar built for $(echo "$installed" | cut -d. -f1,2), or --force to install anyway."
+        fi
+    fi
+}
+if [[ $has_mgmt -eq 1 ]]; then check_target "$MGMT_LIB" "management server"; fi
+if [[ $has_agent -eq 1 ]]; then check_target "$AGENT_LIB" "KVM agent"; fi
+
+# Stop on a wrong jar before anything on the host is touched (--check goes on, to list every problem).
+if [[ $errors -gt 0 && $CHECK_ONLY -eq 0 ]]; then
+    die "$errors check(s) failed, nothing was changed"
+fi
+# One install at a time, from host preparation on: two runs could both generate a host NQN, or
+# publish different builds and each prune the other's jar. --check changes nothing and takes no lock.
+if [[ $CHECK_ONLY -eq 0 ]] && command -v flock >/dev/null 2>&1; then
+    exec 9>"${LIGHTBITS_LOCK:-/run/lock/cloudstack-lightbits-install.lock}"
+    flock -n 9 || die "another run of this installer is in progress; wait for it to finish, nothing was changed"
+fi
+changed=()   # what the host preparation below changed, for an accurate message if a later check fails
+
+# ---- KVM host prerequisites ----
+
+if [[ $has_agent -eq 1 ]]; then
+    say "checking the NVMe/TCP prerequisites of this KVM host"
+    if ! command -v nvme >/dev/null 2>&1; then
+        fail "nvme-cli is not installed (dnf install nvme-cli / apt install nvme-cli): the host cannot attach Lightbits volumes without it"
+    fi
+    if [[ -d /sys/module/nvme_tcp ]]; then
+        say "  nvme_tcp kernel module: loaded"
+    elif [[ $CHECK_ONLY -eq 1 ]]; then
+        if modinfo nvme_tcp >/dev/null 2>&1 || modinfo nvme-tcp >/dev/null 2>&1; then
+            say "  nvme_tcp kernel module: available, not loaded (the plugin loads it on the first attach)"
+        else
+            fail "the nvme_tcp kernel module is not available for the running kernel $(uname -r)"
+        fi
+    elif modprobe nvme-tcp 2>/dev/null; then
+        say "  nvme_tcp kernel module: loaded now"
+        changed+=("loaded the nvme_tcp kernel module")
+    else
+        fail "the nvme_tcp kernel module could not be loaded for the running kernel $(uname -r)"
+    fi
+    if [[ ! -s /etc/nvme/hostnqn ]]; then
+        nvme_dir_existed=0; [[ -d /etc/nvme ]] && nvme_dir_existed=1
+        if [[ $CHECK_ONLY -eq 1 ]]; then
+            warn "/etc/nvme/hostnqn is missing or empty; install.sh without --check generates it"
+        elif command -v nvme >/dev/null 2>&1 && mkdir -p /etc/nvme && nvme gen-hostnqn > /etc/nvme/hostnqn.new 2>/dev/null \
+                && [[ -s /etc/nvme/hostnqn.new ]] && mv -f /etc/nvme/hostnqn.new /etc/nvme/hostnqn; then
+            say "  generated /etc/nvme/hostnqn"
+            changed+=("generated /etc/nvme/hostnqn")
+        else
+            rm -f /etc/nvme/hostnqn.new
+            # leave no trace of the attempt: remove /etc/nvme again if this run created it (and it is empty)
+            if [[ $nvme_dir_existed -eq 0 && -d /etc/nvme ]] && ! rmdir /etc/nvme 2>/dev/null; then
+                changed+=("created /etc/nvme")
+            fi
+            fail "/etc/nvme/hostnqn is missing and could not be generated"
+        fi
+    fi
+    if [[ -s /etc/nvme/hostnqn ]]; then
+        nqn="$(head -1 /etc/nvme/hostnqn | tr -d '[:space:]')"
+        if [[ "$nqn" =~ ^nqn\.[0-9]{4}-[0-9]{2}\.[A-Za-z0-9.:_-]+$ ]]; then
+            say "  host NQN: $nqn"
+            say "  (every host needs its own NQN: a host cloned from an image must get a new one with 'nvme gen-hostnqn')"
+        else
+            fail "/etc/nvme/hostnqn does not hold a valid NQN: '$nqn'"
+        fi
+    fi
+fi
+
+if [[ $errors -gt 0 ]]; then
+    if [[ ${#changed[@]} -gt 0 ]]; then
+        done_list="$(printf '%s; ' "${changed[@]}")"
+        die "$errors check(s) failed; the plugin was not installed. Host preparation done before the failure: ${done_list%; }"
+    fi
+    die "$errors check(s) failed, nothing was changed"
+fi
+if [[ $CHECK_ONLY -eq 1 ]]; then
+    say "checks passed$(with_warnings); nothing was changed (--check)"
+    exit 0
+fi
+
+# ---- install ----
+
+install_to() {  # $1=libdir
+    local lib="$1" tmp old
+    tmp="$lib/.${jar_name}.installing"
+    cp -f -- "$JAR" "$tmp"
+    chmod 644 "$tmp"
+    # publish first: if this fails, the previous build is still in place
+    mv -f -- "$tmp" "$lib/$jar_name"
+    # one plugin jar only: two builds on the class path load in an undefined order
+    for old in "$lib"/$JAR_GLOB; do
+        [[ -e "$old" && "$(basename "$old")" != "$jar_name" ]] || continue
+        say "  removing the previous build $(basename "$old")"
+        rm -f -- "$old"
+    done
+    [[ -f "$lib/$jar_name" ]] || die "$lib/$jar_name is gone after the previous builds were removed (another install ran at the same time?); run the installer again"
+    say "installed $lib/$jar_name"
+}
+
+# "<size> <device:inode>" of the file the log path leads to (-L: through a symbolic link), from one
+# stat call so that the size and the identity always belong to the same file; "0 " when there is none
+log_meta() { if [[ -f "$1" ]]; then stat -L -c '%s %d:%i' "$1" 2>/dev/null || echo "0 "; else echo "0 "; fi; }
+
+# Lines the service wrote after the restart that say this build was loaded.
+loaded_lines() {  # $1=log $2=offset $3=where
+    local want="Lightbits storage plugin"
+    [[ -z "$jar_built" ]] || want="built $jar_built"
+    tail -c "+$(($2 + 1))" "$1" 2>/dev/null | grep -F "loaded on $3" | grep -F -- "$want" || true
+}
+
+# Wait until the service is active and its log, after the restart, shows this build loaded.
+wait_loaded() {  # $1=service $2=log $3=offset $4=where $5=identity of the log at the restart
+    local svc="$1" log="$2" offset="$3" where="$4" id="$5" waited=0 line state size cur nap
+    while :; do
+        state="$(systemctl is-active "$svc" 2>/dev/null || true)"
+        if [[ "$state" == failed ]]; then
+            fail "$svc failed to start; see 'journalctl -u $svc' and $log"
+            return 0
+        fi
+        if [[ -f "$log" ]]; then
+            # a log replaced since the restart (rotated, recreated) is read from its start
+            read -r size cur < <(log_meta "$log")
+            if [[ "$cur" != "$id" || "$size" -lt "$offset" ]]; then
+                offset=0; id="$cur"
+            fi
+            line="$(loaded_lines "$log" "$offset" "$where" | tail -1)"
+            # success needs both: this build's load line and a service that is still running
+            if [[ -n "$line" && "$state" == active ]]; then
+                say "$svc loaded the plugin: Lightbits storage plugin${line##*Lightbits storage plugin}"
+                return 0
+            fi
+        fi
+        # one last look at the deadline, and no sleep past it
+        if [[ $waited -ge $WAIT_SECS ]]; then break; fi
+        nap=$((WAIT_SECS - waited)); if [[ $nap -gt 5 ]]; then nap=5; fi
+        sleep "$nap"; waited=$((waited + nap))
+    done
+    fail "$svc did not report loading this build within ${WAIT_SECS}s (state: $(systemctl is-active "$svc" 2>/dev/null || true)); look for 'Lightbits storage plugin' in $log"
+}
+
+restart_and_verify() {  # $1=service $2=log $3=where
+    local offset id
+    read -r offset id < <(log_meta "$2")
+    say "restarting $1"
+    if ! systemctl restart "$1"; then
+        fail "'systemctl restart $1' failed; see 'journalctl -u $1'"
+        return 0
+    fi
+    wait_loaded "$1" "$2" "$offset" "$3" "$id"
+}
+
+if [[ $has_mgmt -eq 1 ]]; then install_to "$MGMT_LIB"; fi
+if [[ $has_agent -eq 1 ]]; then install_to "$AGENT_LIB"; fi
+
+if [[ $RESTART -eq 0 ]]; then
+    say "services were NOT restarted (--no-restart). The new build becomes active after:"
+    if [[ $has_mgmt -eq 1 ]]; then echo "      systemctl restart cloudstack-management"; fi
+    if [[ $has_agent -eq 1 ]]; then echo "      systemctl restart cloudstack-agent"; fi
+    exit 0
+fi
+
+# The agent first: running VMs are not affected by an agent restart, and on a node with both
+# roles the agent reconnects by itself once the management server is back.
+if [[ $has_agent -eq 1 ]]; then restart_and_verify cloudstack-agent "$AGENT_LOG" "this KVM agent"; fi
+if [[ $has_mgmt -eq 1 ]]; then
+    say "the management server restart interrupts the CloudStack API and UI for a few minutes; running VMs are not affected"
+    restart_and_verify cloudstack-management "$MGMT_LOG" "the management server"
+fi
+
+if [[ $errors -gt 0 ]]; then
+    die "the jar is installed but $errors step(s) failed, see above"
+fi
+say "done$(with_warnings). Install the same jar on the management server and on every KVM host."
+if [[ $has_mgmt -eq 1 ]]; then say "Register a storage pool with provider=Lightbits (see INSTALL.md)."; fi
+exit 0
