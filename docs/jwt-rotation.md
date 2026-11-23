@@ -42,8 +42,8 @@ unaffected (no JWT on the data path).
 2. **Update the pool credential from a file.** The new token is not passed through the
    CloudStack API: a pool detail holds 255 characters (less than a token), and CloudStack
    writes API parameters and responses to its logs. Instead, on the management server:
-   Use one file per pool (the pool ID in its name): the plugin reads the file up to about a
-   minute after the update, and a shared file could by then hold another pool's token.
+   Use one file per pool (the pool ID in its name): the plugin reads the file on the pool's
+   next use, and a shared file could by then hold another pool's token.
    Two IDs of the pool appear below: `<poolUuid>` is the ID the UI and the API show (the `id`
    of `cmk list storagepools`), and `<poolDbId>` is the numeric database ID the management
    server log uses. Read the second one from the first:
@@ -90,8 +90,8 @@ unaffected (no JWT on the data path).
    only after the log line appears. Each such call reads all pool details and writes them
    back, without a lock the plugin can take part in: one that overlaps the replacement can
    put back the previous token, or drop the `tokenFile` detail before the plugin reads it.
-   If neither the log line nor a reason for the pool appears within a few minutes, the
-   detail was lost that way: run the `cmk update storagepool` command above again.
+   If neither the log line nor a reason for the pool appears after the pool was used (as
+   described above), the detail was lost that way: run the `cmk update storagepool` command above again.
 
    The file must be a regular file below `/etc/cloudstack/management`, readable by the
    `cloud` user. If it is missing, unreadable or does not hold a JWT, one operation fails
