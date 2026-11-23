@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -80,9 +81,55 @@ class LightbitsStorageAdaptorTest {
         poolB = pool(POOL_B, "10.0.1.1");
     }
 
+    // The adaptor's pool registry is static (one per agent JVM): leave it empty for the other test classes.
+    @AfterEach
+    void tearDown() {
+        adaptor.deleteStoragePool(POOL_A);
+        adaptor.deleteStoragePool(POOL_B);
+    }
+
     private KVMStoragePool pool(String uuid, String discovery) {
         return adaptor.createStoragePool(uuid, discovery, 443, "/proj", null, StoragePoolType.IscsiLUN,
                 Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, discovery), true);
+    }
+
+    @Test
+    void aPoolRegisteredAgainWithoutDetailsAfterMaintenanceKeepsItsDiscoveryEndpoints() {
+        // the Lightbits host-connect path sends the plugin version and the discovery endpoints
+        adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_PLUGIN_VERSION, "test",
+                        LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.9.1:8009,10.0.9.2:8009"), true);
+        List<String> before = LightbitsStorageAdaptor.discoveryEndpoints(adaptor.getStoragePool(POOL_A));
+        adaptor.deleteStoragePool(POOL_A, null);   // maintenance withdraws the pool from the host first
+        // cancelling it registers the pool through CloudStack's generic path: no details from the management
+        // server, only the agent's own default (LibvirtModifyStoragePoolCommandWrapper, 4.23.0.0)
+        KVMStoragePool again = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                new java.util.HashMap<>(Map.of("clvmsecurezerofill", "false")), true);
+        assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(again));
+        assertEquals("false", again.getDetails().get("clvmsecurezerofill"));
+        // a null map too
+        again = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN, null, true);
+        assertEquals(before, LightbitsStorageAdaptor.discoveryEndpoints(again));
+        // the next host connect replaces them
+        KVMStoragePool fresh = adaptor.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_PLUGIN_VERSION, "test", LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.8.1:8009"), true);
+        assertEquals(LightbitsNvmeHost.discoveryEndpoints("10.0.8.1:8009", "10.0.0.1"), LightbitsStorageAdaptor.discoveryEndpoints(fresh));
+    }
+
+    @Test
+    void deletingAPoolMaintenanceAlreadyWithdrewDropsTheSubsystemsThatBecameIdle() {
+        String subsys = "/sys/class/nvme-subsystem/nvme-subsys3/";
+        sys.files.put(subsys + "subsysnqn", NQN);
+        sys.files.put(subsys + "nvme3/uevent", "");
+        adaptor.deleteStoragePool("cccccccc-0000-0000-0000-000000000003");   // unknown pool, A and B still there
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+        sys.files.put(subsys + "nvme3n2/uevent", "");   // a VM still uses a volume
+        adaptor.deleteStoragePool(POOL_B);
+        adaptor.deleteStoragePool(POOL_A, null);         // maintenance withdraws the pool before it stops the VMs
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+        sys.files.remove(subsys + "nvme3n2/uevent");     // the VM stopped
+        adaptor.deleteStoragePool(POOL_A);               // the pool is deleted, though no longer registered
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN), sys.commands.toString());
     }
 
     private void noEndpointAnswers() {

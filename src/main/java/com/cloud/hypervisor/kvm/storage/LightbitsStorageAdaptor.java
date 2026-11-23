@@ -43,6 +43,8 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     private static final Logger LOG = LogManager.getLogger(LightbitsStorageAdaptor.class);
 
     private static final Map<String, KVMStoragePool> POOLS = new ConcurrentHashMap<>();
+    /** The details each pool was last registered with, kept after the pool is removed (see createStoragePool). */
+    private static final Map<String, Map<String, String>> LAST_DETAILS = new ConcurrentHashMap<>();
     private static final int DEFAULT_WAIT_SECS = 60;
     private static final Object CONNECT_LOCK = new Object();
     private static final Object RESCAN_LOCK = new Object();
@@ -96,6 +98,26 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     @Override
     public KVMStoragePool createStoragePool(String uuid, String host, int port, String path, String userInfo,
                                             StoragePoolType type, Map<String, String> details, boolean isPrimaryStorage) {
+        if (details != null && details.containsKey(DETAIL_PLUGIN_VERSION)) {
+            // the Lightbits host-connect path, which always sends the plugin version: remember its details
+            LAST_DETAILS.put(uuid, java.util.Collections.unmodifiableMap(new java.util.HashMap<>(details)));
+        } else {
+            // CloudStack's generic paths register a pool without the Lightbits details: maintenance removes
+            // the pool from the host, and cancelling it sends ModifyStoragePoolCommand(add) with none, which
+            // the agent turns into a map with only its own defaults (seen in 4.23.0.0). Lay those over what
+            // the host-connect path last sent, or the pool loses its NVMe discovery endpoints until the next
+            // host connect.
+            Map<String, String> last = LAST_DETAILS.get(uuid);
+            if (last != null) {
+                Map<String, String> merged = new java.util.HashMap<>(last);
+                if (details != null) {
+                    merged.putAll(details);
+                }
+                details = merged;
+                LOG.info("Lightbits createStoragePool: pool {} registered without its Lightbits details, keeping its"
+                        + " discovery endpoints {}", uuid, details.get(DETAIL_NVME_DISCOVERY));
+            }
+        }
         LightbitsStoragePool pool = new LightbitsStoragePool(uuid, host, port, getStoragePoolType(), this, details);
         POOLS.put(uuid, pool);
         warnOnVersionMismatch(details == null ? null : details.get(DETAIL_PLUGIN_VERSION),
@@ -295,12 +317,40 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         synchronized (CONNECT_LOCK) {
             lookupConnects.remove(uuid);
         }
+        if (!POOLS.isEmpty()) {
+            return true;
+        }
+        // No Lightbits pool is left on this host (deleted, or put in maintenance): drop the NVMe/TCP
+        // connections nothing uses any more. The next attach connects again. This also runs when the
+        // pool was already withdrawn: maintenance withdraws it before it stops the VMs, so a subsystem
+        // that still had a namespace then is only idle when the pool is finally deleted.
+        synchronized (CONNECT_LOCK) {
+            if (!POOLS.isEmpty()) {
+                return true;
+            }
+            try {
+                nvme.disconnectIdleSubsystems();
+                lookupConnects.clear();
+            } catch (RuntimeException e) {
+                LOG.warn("Lightbits: could not clean up NVMe/TCP connections after pool {} was removed: {}", uuid, e.toString());
+            }
+        }
         return true;
     }
 
     @Override
     public boolean deleteStoragePool(KVMStoragePool pool) {
         return deleteStoragePool(pool.getUuid());
+    }
+
+    /**
+     * The agent takes this entry when the management server withdraws a pool from the host
+     * (ModifyStoragePoolCommand with add=false, sent for pool maintenance). The interface default
+     * returns true without doing anything, which left the pool registered and the host connected.
+     */
+    @Override
+    public boolean deleteStoragePool(String uuid, Map<String, String> details) {
+        return deleteStoragePool(uuid);
     }
 
     @Override

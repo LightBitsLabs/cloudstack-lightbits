@@ -55,6 +55,10 @@ class LightbitsNvmeHost {
     private static final Pattern UUID = Pattern.compile("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}");
     private static final Pattern ENDPOINT = Pattern.compile("[A-Za-z0-9]([A-Za-z0-9.-]{0,252})(:[0-9]{1,5})?");
     private static final long CONNECT_TIMEOUT_MS = 60_000;
+    private static final Pattern SUBSYS_NQN = Pattern.compile("nqn\\.2016-01\\.com\\.lightbitslabs:[A-Za-z0-9:._-]{1,200}");
+    private static final Pattern NAMESPACE_ENTRY = Pattern.compile("nvme[0-9]+(c[0-9]+)?n[0-9]+");
+    private static final Pattern CONTROLLER_ENTRY = Pattern.compile("nvme[0-9]+");
+    private static final String SUBSYSTEMS = "/sys/class/nvme-subsystem";
     private static final AtomicInteger ROTATION = new AtomicInteger();
 
     /** The host, as far as this class needs it. Replaced by a fake in unit tests. */
@@ -67,6 +71,10 @@ class LightbitsNvmeHost {
         String canonical(String path);
         /** Names in a directory, empty if it does not exist. */
         List<String> list(String dir);
+        /** Names in a directory, or null if it cannot be read (gone, or an I/O error). */
+        default List<String> listOrNull(String dir) {
+            return list(dir);
+        }
         void sleep(long millis);
     }
 
@@ -209,6 +217,86 @@ class LightbitsNvmeHost {
         LOG.warn("Lightbits: 'nvme connect-all' failed for every discovery endpoint {}; continuing on the {} live"
                 + " path(s) this host already has", failures, live.size());
         return false;
+    }
+
+    /**
+     * Disconnect this host from every Lightbits subsystem that exposes no namespace to it, and
+     * return their NQNs. Called when the host's last Lightbits pool is removed: without it the
+     * NVMe/TCP connections (and their reconnect attempts, once the cluster is gone) stay on the
+     * host until it reboots.
+     *
+     * A subsystem with a namespace is never touched: a namespace means a volume is still
+     * granted to this host, by CloudStack or by anything else on the host that uses the same
+     * cluster. Each subsystem is checked right before its own disconnect; a namespace the
+     * kernel adds in the moment between the two cannot be excluded, since nothing lets a
+     * process hold off namespace changes. A failed disconnect is logged and does not fail
+     * the caller; a disconnect counts as done only when no controller of the subsystem is
+     * left in sysfs, since some nvme-cli builds return 0 when a controller deletion fails.
+     */
+    List<String> disconnectIdleSubsystems() {
+        List<String> disconnected = new ArrayList<>();
+        for (String subsys : sys.list(SUBSYSTEMS)) {
+            String dir = SUBSYSTEMS + "/" + subsys;
+            String nqn = sys.read(dir + "/subsysnqn");
+            if (nqn == null || !SUBSYS_NQN.matcher(nqn).matches()) {
+                continue;
+            }
+            // With native NVMe multipath a namespace shows directly under the subsystem
+            // (nvme3n1); without it (nvme_core.multipath=N) it shows under a controller
+            // (nvme3/nvme3n1). Either counts.
+            // A directory that cannot be read proves nothing: the subsystem is kept.
+            List<String> namespaces = new ArrayList<>();
+            String unreadable = null;
+            List<String> entries = sys.listOrNull(dir);
+            if (entries == null) {
+                unreadable = dir;
+                entries = new ArrayList<>();
+            }
+            for (String entry : entries) {
+                if (NAMESPACE_ENTRY.matcher(entry).matches()) {
+                    namespaces.add(entry);
+                } else if (CONTROLLER_ENTRY.matcher(entry).matches()) {
+                    List<String> below = sys.listOrNull(dir + "/" + entry);
+                    if (below == null) {
+                        unreadable = dir + "/" + entry;
+                        continue;
+                    }
+                    for (String sub : below) {
+                        if (NAMESPACE_ENTRY.matcher(sub).matches()) {
+                            namespaces.add(entry + "/" + sub);
+                        }
+                    }
+                }
+            }
+            if (unreadable != null && namespaces.isEmpty()) {
+                LOG.warn("Lightbits: keeping the NVMe/TCP connection to {}: could not read {} to check for namespaces",
+                        nqn, unreadable);
+                continue;
+            }
+            if (!namespaces.isEmpty()) {
+                LOG.info("Lightbits: keeping the NVMe/TCP connection to {}: {} namespace(s) still present on this host {}",
+                        nqn, namespaces.size(), namespaces);
+                continue;
+            }
+            Result r = sys.run(30_000, "nvme", "disconnect", "-n", nqn);
+            List<String> left = new ArrayList<>();
+            for (String entry : sys.list(dir)) {
+                if (CONTROLLER_ENTRY.matcher(entry).matches()) {
+                    left.add(entry);
+                }
+            }
+            if (r.ok() && left.isEmpty()) {
+                LOG.info("Lightbits: disconnected this host from {} (no Lightbits pool left, no namespace present)", nqn);
+                disconnected.add(nqn);
+            } else if (r.ok()) {
+                LOG.warn("Lightbits: 'nvme disconnect -n {}' returned 0 but controller(s) {} are still there. The"
+                        + " connection stays until it is disconnected by hand or the host reboots.", nqn, left);
+            } else {
+                LOG.warn("Lightbits: 'nvme disconnect -n {}' failed (exit {}): {}. The connection stays until it is"
+                        + " disconnected by hand or the host reboots.", nqn, r.exit, r.output);
+            }
+        }
+        return disconnected;
     }
 
     /** Every controller of a Lightbits subsystem on this host, from sysfs. */
@@ -446,6 +534,12 @@ class LightbitsNvmeHost {
         public List<String> list(String dir) {
             String[] names = new File(dir).list();
             return names == null ? new ArrayList<>() : new ArrayList<>(Arrays.asList(names));
+        }
+
+        @Override
+        public List<String> listOrNull(String dir) {
+            String[] names = new File(dir).list();
+            return names == null ? null : new ArrayList<>(Arrays.asList(names));
         }
 
         @Override

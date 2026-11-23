@@ -272,4 +272,50 @@ class LightbitsLifeCyclePreflightTest {
         assertThrows(IllegalArgumentException.class,
                 () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1", "jwt")));
     }
+
+    @Test
+    void everyHostIsToldAboutThePoolRemovalAndAFailingHostDoesNotStopTheOthers() {
+        java.util.List<Long> asked = new java.util.ArrayList<>();
+        java.util.List<Long> unconfirmed = LightbitsPrimaryDataStoreLifeCycle.releaseHosts("pool", java.util.List.of(1L, 2L, 3L, 4L), hostId -> {
+            asked.add(hostId);
+            if (hostId == 2L) {
+                return null;                                            // host down
+            }
+            if (hostId == 3L) {
+                throw new com.cloud.utils.exception.CloudRuntimeException("agent busy");
+            }
+            return new com.cloud.agent.api.Answer(null, hostId != 4L, "refused");
+        });
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(1L, 2L, 3L, 4L), asked);
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(2L, 3L, 4L), unconfirmed);
+    }
+
+    @Test
+    void aRefusalWithNoDetailsIsStillCountedAsUnconfirmed() {
+        java.util.List<Long> unconfirmed = LightbitsPrimaryDataStoreLifeCycle.releaseHosts("pool", java.util.List.of(1L, 2L),
+                hostId -> new com.cloud.agent.api.Answer(null, hostId == 1L, null));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(2L), unconfirmed);
+    }
+
+    @Test
+    void cancellingMaintenanceBringsThePoolUpBeforeTheVmsAreRestarted() {
+        java.util.List<String> calls = new java.util.ArrayList<>();
+        lc.dataStoreHelper = new org.apache.cloudstack.storage.volume.datastore.PrimaryDataStoreHelper() {
+            @Override
+            public boolean cancelMaintain(org.apache.cloudstack.engine.subsystem.api.storage.DataStore store) {
+                calls.add("pool up");
+                return true;
+            }
+        };
+        lc.storagePoolAutomation = (com.cloud.storage.StoragePoolAutomation) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {com.cloud.storage.StoragePoolAutomation.class}, (proxy, m, args) -> {
+                    if (m.getName().equals("cancelMaintain")) {
+                        calls.add("restart VMs");
+                        throw new com.cloud.utils.exception.CloudRuntimeException("no capacity for a restart");
+                    }
+                    return m.getReturnType() == boolean.class ? Boolean.TRUE : null;
+                });
+        org.junit.jupiter.api.Assertions.assertThrows(com.cloud.utils.exception.CloudRuntimeException.class, () -> lc.cancelMaintain(null));
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("pool up", "restart VMs"), calls);
+    }
 }

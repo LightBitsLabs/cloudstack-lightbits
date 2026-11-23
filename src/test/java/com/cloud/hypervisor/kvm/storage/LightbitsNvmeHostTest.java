@@ -48,6 +48,8 @@ class LightbitsNvmeHostTest {
         final Map<String, LightbitsNvmeHost.Result> results = new HashMap<>();
         Runnable onRescan = () -> { };
         Runnable onConnect = () -> { };
+        boolean disconnectRemoves = true;
+        final java.util.Set<String> unreadable = new java.util.HashSet<>();
         int slept;
 
         @Override
@@ -59,6 +61,18 @@ class LightbitsNvmeHostTest {
             }
             if (cmd.startsWith("nvme connect-all")) {
                 onConnect.run();
+            }
+            if (cmd.startsWith("nvme disconnect -n ") && disconnectRemoves) {
+                // like the kernel: a subsystem goes away with its last controller
+                String nqn = cmd.substring("nvme disconnect -n ".length());
+                List<String> gone = new ArrayList<>();
+                for (Map.Entry<String, String> f : files.entrySet()) {
+                    if (f.getKey().startsWith("/sys/class/nvme-subsystem/") && f.getKey().endsWith("/subsysnqn")
+                            && nqn.equals(f.getValue())) {
+                        gone.add(f.getKey().substring(0, f.getKey().length() - "subsysnqn".length()));
+                    }
+                }
+                files.keySet().removeIf(k -> gone.stream().anyMatch(k::startsWith));
             }
             for (Map.Entry<String, LightbitsNvmeHost.Result> e : results.entrySet()) {
                 if (cmd.contains(e.getKey())) {
@@ -72,6 +86,11 @@ class LightbitsNvmeHostTest {
         @Override public String read(String path) { return files.get(path); }
         @Override public String canonical(String path) { return links.get(path); }
         @Override public void sleep(long millis) { slept++; }
+
+        @Override
+        public List<String> listOrNull(String dir) {
+            return unreadable.contains(dir) ? null : list(dir);
+        }
 
         @Override
         public List<String> list(String dir) {
@@ -315,5 +334,104 @@ class LightbitsNvmeHostTest {
         LightbitsStorageAdaptor adaptor = new LightbitsStorageAdaptor(host);
         CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> adaptor.getPhysicalDisk(VOL, pool()));
         assertTrue(e.getMessage().contains("could not connect this host"), e.getMessage());
+    }
+
+    // ---- disconnect when the last pool is removed ----
+
+    private static final String SUBSYS = "/sys/class/nvme-subsystem/";
+
+    private void subsystem(String name, String nqn, String... entries) {
+        sys.files.put(SUBSYS + name + "/subsysnqn", nqn);
+        for (String e : entries) {
+            sys.files.put(SUBSYS + name + "/" + e + "/uevent", "");
+        }
+    }
+
+    @Test
+    void anIdleLightbitsSubsystemIsDisconnected() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme4", "nvme5");
+        assertEquals(List.of(NQN), host.disconnectIdleSubsystems());
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
+    }
+
+    @Test
+    void aSubsystemWithANamespaceIsNeverDisconnected() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme3n2", "ng3n2");
+        subsystem("nvme-subsys4", NQN + "-b", "nvme6", "nvme6c6n1");
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+    }
+
+    @Test
+    void aNamespaceBelowAControllerKeepsTheSubsystemWhenNativeMultipathIsOff() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme4", "nvme3/nvme3n1");
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+    }
+
+    @Test
+    void controllersWithNoNamespaceBelowThemAreStillIdle() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme3/device", "nvme4/state");
+        assertEquals(List.of(NQN), host.disconnectIdleSubsystems());
+    }
+
+    @Test
+    void subsystemsOfOtherVendorsAndOddNqnsAreLeftAlone() {
+        subsystem("nvme-subsys0", "nqn.2014-08.org.nvmexpress:uuid:local-disk", "nvme0");
+        subsystem("nvme-subsys1", "nqn.2016-01.com.lightbitslabs:uuid:x; rm -rf /", "nvme1");
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+        assertTrue(sys.commands.isEmpty(), sys.commands.toString());
+    }
+
+    @Test
+    void aFailedDisconnectIsNotReportedAsDone() {
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        sys.results.put("nvme disconnect", new LightbitsNvmeHost.Result(1, "busy"));
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+    }
+
+    @Test
+    void aSubsystemWhoseNamespacesCannotBeReadIsKept() {
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme3n1");              // a namespace is there
+        subsystem("nvme-subsys4", NQN + "-b", "nvme4", "nvme4/nvme4n1");  // one below a controller
+        subsystem("nvme-subsys5", NQN + "-c", "nvme5");                  // really idle
+        sys.unreadable.add(SUBSYS + "nvme-subsys3");
+        sys.unreadable.add(SUBSYS + "nvme-subsys4/nvme4");
+        assertEquals(List.of(NQN + "-c"), host.disconnectIdleSubsystems());
+        assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -n " + NQN)
+                || c.equals("nvme disconnect -n " + NQN + "-b")), sys.commands.toString());
+    }
+
+    @Test
+    void aDisconnectThatLeavesAControllerIsNotReportedAsDone() {
+        // nvme-cli 2.8 returns 0 from 'disconnect -n' when a controller deletion fails
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme4");
+        sys.disconnectRemoves = false;
+        assertTrue(host.disconnectIdleSubsystems().isEmpty());
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
+    }
+
+    @Test
+    void removingTheLastPoolDisconnectsAndRemovingOneOfTwoDoesNot() {
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        LightbitsStorageAdaptor adaptor = new LightbitsStorageAdaptor(host);
+        adaptor.createStoragePool("pool-a", "10.0.0.1", 443, null, null, com.cloud.storage.Storage.StoragePoolType.IscsiLUN, null, true);
+        adaptor.createStoragePool("pool-b", "10.0.0.1", 443, null, null, com.cloud.storage.Storage.StoragePoolType.IscsiLUN, null, true);
+        assertTrue(adaptor.deleteStoragePool("pool-a"));
+        assertTrue(adaptor.deleteStoragePool("never-registered"));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme disconnect")), sys.commands.toString());
+        assertTrue(adaptor.deleteStoragePool("pool-b"));
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
+    }
+
+    @Test
+    void aPoolWithdrawnForMaintenanceDisconnectsToo() {
+        // KVMStoragePoolManager calls the (uuid, details) form for ModifyStoragePoolCommand add=false
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        LightbitsStorageAdaptor adaptor = new LightbitsStorageAdaptor(host);
+        adaptor.createStoragePool("pool-a", "10.0.0.1", 443, null, null, com.cloud.storage.Storage.StoragePoolType.IscsiLUN, null, true);
+        assertTrue(adaptor.deleteStoragePool("pool-a", new java.util.HashMap<>()));
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN), sys.commands.toString());
+        assertTrue(adaptor.deleteStoragePool("pool-a", null));
     }
 }
