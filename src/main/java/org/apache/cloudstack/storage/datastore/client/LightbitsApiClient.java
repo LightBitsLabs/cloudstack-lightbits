@@ -421,7 +421,14 @@ public class LightbitsApiClient {
                 throw e;
             }
         }
-        return settleNewVolume(created, createdHere);
+        Volume settled = settleNewVolume(created, createdHere);
+        if (extras != null && !extras.getFailureDomains().isEmpty() && !settled.hasPlacementRestrictions()) {
+            // Seen on 3.22.1: a PrimaryFD restriction naming failure domains no server carries is
+            // accepted and dropped. Say so instead of leaving the operator to assume it applies.
+            LOG.warn("Lightbits: volume {} was created without the placement restriction {} the offering asked for; "
+                    + "check that the cluster's servers carry these failure domains", name, extras.getFailureDomains());
+        }
+        return settled;
     }
 
     /**
