@@ -257,13 +257,4 @@ class LightbitsPoolConfigTest {
                 () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&ipAcl=1", "jwt"));
         assertTrue(e.getMessage().contains("ipAcl"));
     }
-
-    @Test
-    void updatedDetailsAreCheckedForTheBooleanOptions() {
-        LightbitsPoolConfig.validateUpdatedDetails(java.util.Map.of("ipAcl", "true", "qosFromIops", "false", "other", "x"));
-        LightbitsPoolConfig.validateUpdatedDetails(null);
-        IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
-                () -> LightbitsPoolConfig.validateUpdatedDetails(java.util.Map.of("ipAcl", "yes")));
-        assertTrue(e.getMessage().contains("ipAcl"));
-    }
 }

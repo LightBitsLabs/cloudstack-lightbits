@@ -414,21 +414,6 @@ public class LightbitsPoolConfig {
     public boolean isIpAcl() { return ipAcl; }
 
     /** Absent means false; anything but true or false is refused rather than read as false. */
-    /**
-     * Check the pool options among details given to updateStoragePool, so a bad value is
-     * refused there instead of breaking every later read of the pool's settings.
-     */
-    public static void validateUpdatedDetails(Map<String, String> details) {
-        if (details == null) {
-            return;
-        }
-        for (String key : List.of(KEY_QOS_FROM_IOPS, KEY_IP_ACL)) {
-            if (details.containsKey(key)) {
-                parseStrictBoolean(key, details.get(key));
-            }
-        }
-    }
-
     private static boolean parseStrictBoolean(String key, String value) {
         if (value == null || value.isBlank()) {
             return false;

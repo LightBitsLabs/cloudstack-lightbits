@@ -142,6 +142,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Turning `ipAcl` off leaves the volumes' IP ACLs as they are (the plugin no longer changes
   them), so a volume then attached on another host is refused by the cluster. Before turning
   it off, have the cluster admin set `--ip-acl ALLOW_ANY` on the pool's volumes.
+- CloudStack stores `cmk update storagepool details[0].<option>=...` without asking the
+  plugin, so a value other than `true` or `false` for `ipAcl` or `qosFromIops` is not refused
+  there. The pool's volume operations then fail, with the option named in the error, until
+  the value is corrected.
 - With `ipAcl=true`, a volume whose NQN ACL holds a host the plugin has no data IP for (a
   host added by hand on the cluster, or one that has not reconnected since the option was
   turned on) keeps its IP ACL as it is, and the management log says so.

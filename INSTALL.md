@@ -283,7 +283,9 @@ Turn it on for a new pool in the URL (`&ipAcl=true`) or on an existing one:
 ```bash
 cmk update storagepool id=<pool-id> details[0].ipAcl=true
 ```
-then reconnect every host (`cmk reconnect host id=<host-id>`). Each reconnect records the
+then reconnect every host (`cmk reconnect host id=<host-id>`). CloudStack stores the value
+without asking the plugin: anything but `true` or `false` makes the pool's volume operations
+fail, naming the option, until it is corrected. Each reconnect records the
 host's data IP and sets the IP ACL of the volumes it has. Upgrade the agent on every host
 first: an older agent reports no data IP, and its host is refused access to the pool's
 volumes with an error naming the host. Check a host with
