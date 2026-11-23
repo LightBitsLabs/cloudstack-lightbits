@@ -243,6 +243,18 @@ the volume's next attach (or its VM's next start or migration). An offering that
 policy leaves the volume on the policy it has. A failed change is logged ("could not change
 the QoS policy of volume ...") and tried again at the next attach or resize.
 
+**Operators: an offering change can leave the old limit in place.** Until one of the events
+above, the volume keeps running with its old QoS policy while CloudStack already shows the
+new offering. This matters most when moving a volume to a lower tier: it keeps the higher
+limit. To apply the new policy at once, use one of these:
+- detach the volume and attach it again (a data disk), or stop and start the VM (a root disk);
+- migrate the VM to another host;
+- change the offering together with a size increase (detached volume, since attached
+  volumes cannot be resized online).
+
+Check the policy the cluster applies with `lbcli get volume` (`qosPolicyName`) or in the
+management server log ("QoS policy changed from ... to ...").
+
 ## TLS: verifying the cluster certificate
 
 The management server always verifies the certificate of the Lightbits API. There is no
