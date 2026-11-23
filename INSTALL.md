@@ -183,8 +183,8 @@ offering for data disks, `serviceofferingdetails[...]` on a compute offering for
 | Offering detail | Value | Effect |
 |---|---|---|
 | `lightbitsCompression` | `true` or `false` | Overrides the pool's `compression` for the volume |
-| `lightbitsPlacement` | comma-separated failure domains, up to 25 | A 1-replica volume is placed in one of them; for 2 or 3 replicas the primary replica is |
-| `lightbitsUnencrypted` | `true` or `false` | `true` creates the volume unencrypted; only on a cluster in hybrid encryption mode, other clusters reject the create |
+| `lightbitsPlacement` | comma-separated failure domains, up to 25 | A 1-replica volume is placed in one of them; for 2 or 3 replicas the primary replica is. See the note below |
+| `lightbitsUnencrypted` | `true` or `false` | `true` creates the volume unencrypted. Only on a cluster that allows unencrypted volumes (hybrid encryption); other clusters reject the create ("UnencryptedVolumesAllowed is not set") |
 
 ```bash
 cmk create diskoffering name=lb-rack-a displaytext="Lightbits, rack A" storagetype=shared \
@@ -195,7 +195,16 @@ A value that is not valid (for example `lightbitsCompression=yes`) fails the vol
 with the reason; it is never ignored. As with the replica factor, clones (template-based root
 disks and volumes from a snapshot) share their source's data, so they keep the source's
 placement and encryption; the detail applies to volumes the cluster creates fresh. Failure
-domains are the ones configured on the cluster's servers (`lbcli list servers`).
+domains are the ones configured on the cluster's servers (`lbcli list servers`); a server
+without configured failure domains is its own failure domain, named after the server.
+
+Placement depends on the cluster's setup:
+- For 2 or 3 replicas the restriction applies to the primary replica. A failure domain no
+  server is in fails the create ("failed to find a primary node that matches").
+- For 1 replica the cluster rejects a restriction while its dynamic rebalance is on
+  ("unsupported volume affinity requested while dynamic rebalance is enabled").
+- The cluster applies the restriction but does not show it on the volume (`lbcli get volume`
+  lists no placement restrictions). Check the volume's primary node instead.
 
 **Labels.** Every volume the plugin creates carries the labels `cloudstack-volume` (the
 CloudStack volume UUID), `cloudstack-account` (the owner account UUID) and `cloudstack-pool`
