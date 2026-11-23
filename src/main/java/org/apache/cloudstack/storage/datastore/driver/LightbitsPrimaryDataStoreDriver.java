@@ -574,7 +574,10 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
         // Under the host's ACL lock, refused while the host is being removed: see LightbitsHostGate.
         org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.grant(host.getId(),
-                id -> hostDetailsDao.findDetail(id, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL) != null,
+                // Being removed: the mark is set, or the host's details are already gone (CloudStack
+                // deletes them, the mark included, once the removal listeners have run).
+                id -> hostDetailsDao.findDetail(id, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL) != null
+                        || hostDetailsDao.findDetail(id, HOST_NQN_DETAIL) == null,
                 hostGateLocker,
                 () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
                     if (acl.contains(nqn)) {

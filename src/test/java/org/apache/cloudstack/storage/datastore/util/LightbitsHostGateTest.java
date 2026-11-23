@@ -177,4 +177,46 @@ class LightbitsHostGateTest {
         assertEquals(1, grantErrors.size());
         assertTrue(grantErrors.get(0).getMessage().contains("started being removed"));
     }
+
+    @Test
+    void aGrantThatWritesAfterTheHostsDetailsAreDeletedStillTakesItsEntryOut() throws Exception {
+        // As whenTheRemovalCannotGetTheLock..., but the removal finishes and CloudStack deletes
+        // the host's details (the mark and the NQN) before the grant writes.
+        Set<String> details = java.util.Collections.synchronizedSet(new HashSet<>(Set.of("nqn")));
+        Set<String> acl = java.util.Collections.synchronizedSet(new HashSet<>());
+        LightbitsHostGate.RemovingCheck check = id -> details.contains("removing") || !details.contains("nqn");
+        CountDownLatch grantChecked = new CountDownLatch(1);
+        CountDownLatch hostGone = new CountDownLatch(1);
+        List<Throwable> grantErrors = new CopyOnWriteArrayList<>();
+        Thread grant = new Thread(() -> {
+            try {
+                LightbitsHostGate.grant(HOST, id -> {
+                    boolean r = check.isRemoving(id);
+                    grantChecked.countDown();
+                    return r;
+                }, (n, s, w) -> {
+                    w.run();
+                    return true;
+                }, () -> {
+                    try {
+                        hostGone.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    acl.add("nqn-host");
+                }, () -> acl.remove("nqn-host"));
+            } catch (Throwable t) {
+                grantErrors.add(t);
+            }
+        });
+        grant.start();
+        assertTrue(grantChecked.await(5, TimeUnit.SECONDS));
+        LightbitsHostGate.removal(HOST, () -> details.add("removing"), (n, s, w) -> false, () -> acl.remove("nqn-host"));
+        details.clear();   // CloudStack deletes the host's details after the listeners
+        hostGone.countDown();
+        grant.join(10_000);
+
+        assertFalse(acl.contains("nqn-host"), "the grant's write after the host was gone was taken out again");
+        assertEquals(1, grantErrors.size());
+    }
 }
