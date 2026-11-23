@@ -32,6 +32,34 @@ public class Volume {
     private Acl acl;
     @JsonProperty("ETag")
     private String etag;
+    private Statistics statistics;
+
+    /** Space accounting of a volume; the cluster sends the byte counts as decimal strings. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Statistics {
+        private String logicalUsedStorage;
+        private String physicalUsedStorage;
+
+        public String getLogicalUsedStorage() { return logicalUsedStorage; }
+        public void setLogicalUsedStorage(String logicalUsedStorage) { this.logicalUsedStorage = logicalUsedStorage; }
+        public String getPhysicalUsedStorage() { return physicalUsedStorage; }
+        public void setPhysicalUsedStorage(String physicalUsedStorage) { this.physicalUsedStorage = physicalUsedStorage; }
+    }
+
+    /**
+     * Bytes of the volume that hold data, before compression and replication (what the guest
+     * has written and not trimmed), or -1 when the cluster does not report it.
+     */
+    public long getLogicalUsedBytes() {
+        if (statistics == null || statistics.getLogicalUsedStorage() == null) {
+            return -1L;
+        }
+        try {
+            return Long.parseLong(statistics.getLogicalUsedStorage().trim());
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
+    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Acl {
@@ -73,6 +101,8 @@ public class Volume {
     public void setProjectName(String projectName) { this.projectName = projectName; }
     public Acl getAcl() { return acl; }
     public void setAcl(Acl acl) { this.acl = acl; }
+    public Statistics getStatistics() { return statistics; }
+    public void setStatistics(Statistics statistics) { this.statistics = statistics; }
     public String getEtag() { return etag; }
     public void setEtag(String etag) { this.etag = etag; }
 }

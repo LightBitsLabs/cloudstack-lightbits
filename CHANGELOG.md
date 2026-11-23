@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- Per-volume statistics: CloudStack shows and meters how much of each Lightbits volume holds
+  data (the cluster's logical figure, before compression and replication) next to its size.
+  A volume with no figure in one round reports its last one: CloudStack drops the figures of
+  every volume of a host in a round where one is missing. After a failed read, the volumes of
+  the pool report their last figure without asking the cluster for one minute, so a stalled
+  API endpoint does not hold up a whole statistics round.
 - Host cleanup. When the last Lightbits pool of a KVM host is deleted or put in maintenance,
   the host disconnects from the cluster's NVMe subsystems, but only from a subsystem that
   shows no namespace on that host: a connection with a volume on it is never touched. The next
@@ -107,6 +113,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   shrink it) and when the volume is still exposed to a host.
 - Builds and passes unit tests against CloudStack 4.23.0.0 (`-Dcloudstack.version=4.23.0.0`) as
   well as 4.22.1.0.
+
+### Known limitations
+- Volume statistics pause after a failed read. When the plugin cannot read a volume's
+  statistics from the cluster (for example, the Lightbits API does not answer), it stops
+  asking the cluster about that pool's volumes for 60 seconds. During that minute a volume
+  with an earlier figure reports the last one read, which is older than the round when the
+  outage lasts longer. A volume with no earlier figure (such as one created during the
+  outage) gets an error, and CloudStack then does not update the figures of any volume on
+  that host in that round (it keeps their previous ones). Reads resume on their own after
+  the minute. Running VMs and volume I/O are not affected.
 
 ## [0.1.0-alpha.1] - 2026-10-18
 

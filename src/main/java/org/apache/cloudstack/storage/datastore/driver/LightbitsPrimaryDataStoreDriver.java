@@ -293,6 +293,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     }
                     // the clone-source snapshot can only go once its clone is really gone
                     client.waitForVolumeGone(lbVol.get().getUuid());
+                    LAST_STATS.remove(lbVol.get().getUuid());
                 }
                 // Not found is success (idempotent teardown: a retried delete converges). The
                 // plugin's own clone-source snapshot goes with the volume. Snapshots the USER
@@ -799,12 +800,129 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
 
     @Override
     public boolean canProvideVolumeStats() {
-        return false;
+        // The cluster knows how much of each volume holds data; a KVM host would only see a
+        // raw block device of the full size.
+        return true;
     }
 
     @Override
     public Pair<Long, Long> getVolumeStats(StoragePool storagePool, String volumeId) {
-        throw new UnsupportedOperationException("Lightbits plugin: not implemented yet");
+        StatsBackoff backoff = STATS_BACKOFF.computeIfAbsent(storagePool.getId(), id -> new StatsBackoff(System::currentTimeMillis));
+        return volumeStats(clientForPool(storagePool.getId()), volumeId, LAST_STATS, backoff);
+    }
+
+    /** How long after a failed statistics read of a pool its volumes are not read again. */
+    static final long STATS_RETRY_MILLIS = 60_000L;
+
+    /**
+     * When a statistics read of a pool last failed. CloudStack asks for each volume in turn,
+     * without a timeout, and a stalled endpoint makes a read take about 90 s (three attempts):
+     * without this, every volume of the pool would repeat that read in the same pass. For
+     * {@link #STATS_RETRY_MILLIS} after a failure the volumes of the pool get their last sample
+     * without a read; then reads start again, so collection recovers on its own.
+     */
+    static final class StatsBackoff {
+        private final java.util.function.LongSupplier clock;
+        private volatile long failedAt;
+        private volatile boolean failed;
+
+        StatsBackoff(java.util.function.LongSupplier clock) {
+            this.clock = clock;
+        }
+
+        boolean active() {
+            return failed && clock.getAsLong() - failedAt < STATS_RETRY_MILLIS;
+        }
+
+        void failed() {
+            failedAt = clock.getAsLong();
+            failed = true;
+        }
+
+        void succeeded() {
+            failed = false;
+        }
+    }
+
+    private static final Map<Long, StatsBackoff> STATS_BACKOFF = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Last sample of each volume, by Lightbits UUID. CloudStack asks for the volumes of one host
+     * in one request and, at the first volume with no sample, drops the whole request
+     * (StorageManagerImpl.getVolumeStats in 4.22 and 4.23 returns an answer with no statistics
+     * at all). It keeps the previous sample of every volume it gets no new one for, so
+     * answering with the last sample of a volume that has none this round is what CloudStack
+     * would show anyway, and the other volumes of the request are updated. Entries go when the
+     * volume is deleted or found gone.
+     */
+    private static final Map<String, Pair<Long, Long>> LAST_STATS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Pair of (bytes holding data, provisioned size) for a volume addressed by its Lightbits
+     * UUID, which is what CloudStack stores as the volume's path. "Holding data" is the
+     * logical figure, before compression and replication, capped at the size: it is what the
+     * owner of the volume consumed, independent of how the cluster stores it.
+     *
+     * Returns null when the volume is not on the cluster or the cluster does not report its
+     * usage, which CloudStack treats as "no statistics for this round"; a failure to reach the
+     * cluster propagates. A made-up zero would be shown and metered as a real value.
+     */
+    static Pair<Long, Long> volumeStats(LightbitsApiClient client, String volumeId) {
+        return volumeStats(client, volumeId, new HashMap<>(), new StatsBackoff(System::currentTimeMillis));
+    }
+
+    static Pair<Long, Long> volumeStats(LightbitsApiClient client, String volumeId, Map<String, Pair<Long, Long>> last,
+                                        StatsBackoff backoff) {
+        if (volumeId == null || !volumeId.matches("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")) {
+            return null;   // not a volume this plugin created; never put a foreign value into a request path
+        }
+        if (backoff.active()) {
+            Pair<Long, Long> previous = last.get(volumeId);
+            if (previous == null) {
+                throw new com.cloud.utils.exception.CloudRuntimeException("Lightbits: no statistics for volume " + volumeId
+                        + ": a statistics read of its pool failed less than " + STATS_RETRY_MILLIS / 1000
+                        + " s ago, so the cluster is not asked again yet");
+            }
+            LOG.debug("Lightbits: a statistics read of the pool failed less than {} s ago; reporting the last sample of"
+                    + " volume {} without a read", STATS_RETRY_MILLIS / 1000, volumeId);
+            return previous;
+        }
+        java.util.Optional<org.apache.cloudstack.storage.datastore.client.model.Volume> found;
+        try {
+            found = client.getVolume(volumeId);
+            backoff.succeeded();
+        } catch (RuntimeException e) {
+            backoff.failed();
+            Pair<Long, Long> previous = last.get(volumeId);
+            if (previous == null) {
+                throw e;
+            }
+            LOG.debug("Lightbits: no statistics for volume {} this round ({}); reporting its last sample", volumeId, e.getMessage());
+            return previous;
+        }
+        if (found.isEmpty() || found.get().isDeletedOrDeleting()) {
+            return missing(volumeId, last.remove(volumeId), "is not on the cluster or is being deleted");
+        }
+        long size = found.get().getSizeBytes();
+        long used = found.get().getLogicalUsedBytes();
+        if (used < 0) {
+            return missing(volumeId, last.get(volumeId), "has no usage statistics on the cluster");
+        }
+        Pair<Long, Long> sample = new Pair<>(Math.min(used, size), size);
+        last.put(volumeId, sample);
+        return sample;
+    }
+
+    /** The answer for a volume with no sample this round: its last one, else nothing. */
+    private static Pair<Long, Long> missing(String volumeId, Pair<Long, Long> previous, String why) {
+        if (previous != null) {
+            LOG.debug("Lightbits: volume {} {}; reporting its last sample", volumeId, why);
+            return previous;
+        }
+        LOG.warn("Lightbits: volume {} {} and has no earlier sample. CloudStack drops the statistics of every volume in the"
+                + " same request this round when one has none (StorageManagerImpl.getVolumeStats); they are updated in a"
+                + " later round", volumeId, why);
+        return null;
     }
 
     @Override
