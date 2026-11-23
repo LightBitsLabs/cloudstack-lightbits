@@ -225,7 +225,10 @@ the IOPS policy visible to the project with the lowest limit that still gives at
 IOPS for reads and for writes (equal limits: the first by name). Unlimited policies and
 bandwidth or IOPS-per-GB policies are not candidates. If none fits, the volume creation fails
 and the error lists the IOPS policies the project can see. Min IOPS has no Lightbits
-equivalent and is not used. The cluster admin creates the steps, for example:
+equivalent and is not used. CloudStack keeps an offering's IOPS only when it is created
+with `customizediops=false miniops=<n> maxiops=<n>` (or `customizediops=true` for user-set
+IOPS). The cluster may round a policy's limits (on 3.22.1, 1000 was stored as 1024); the
+plugin compares against the stored limits. The cluster admin creates the steps, for example:
 
 ```bash
 lbcli create qos-policy --name=iops-1k --type iops --read-limit 1000 --write-limit 1000 --projects <project>
