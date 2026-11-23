@@ -633,7 +633,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     }
                     acl.add(nqn);
                     return true;
-                }));
+                }),
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn)));
         return true;
     }
 
