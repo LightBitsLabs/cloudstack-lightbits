@@ -47,17 +47,22 @@ unaffected (no JWT on the data path).
    ```bash
    install -o cloud -g cloud -m 600 /dev/null /etc/cloudstack/management/lightbits-pool-<poolId>.jwt
    cat > /etc/cloudstack/management/lightbits-pool-<poolId>.jwt     # paste the token, then Ctrl-D
+   since=$(date '+%Y-%m-%d %H:%M:%S')    # the log check below only counts lines from now on
    cmk update storagepool id=<poolId> details[0].tokenFile=/etc/cloudstack/management/lightbits-pool-<poolId>.jwt
    ```
    The plugin reads the file on the next use of the pool (at the latest the next capacity
    poll, about a minute), stores the token encrypted and removes the `tokenFile` detail. No
    restart is needed. The `tokenFile` detail is removed on failure too, so its absence proves
-   nothing: before deleting the file, confirm that the management server logged the
-   replacement:
+   nothing: before deleting the file, confirm that the management server logged this
+   replacement. Earlier rotations of the same pool logged the same line, so count only
+   lines written after the update (`$since`, set in the same shell before the `cmk` command):
    ```bash
-   grep "the API token of pool <poolId> was replaced and stored encrypted" \
-       /var/log/cloudstack/management/management-server.log
+   grep -h "the API token of pool <poolId> was replaced and stored encrypted" \
+       /var/log/cloudstack/management/management-server.log* |
+       awk -v since="$since" '($1 " " substr($2, 1, 8)) >= since'
    ```
+   The management server and the shell must use the same time zone; a line printed means
+   this replacement is done.
    If the line is not there, look for the reason logged for the pool instead. A failed
    attempt removes the `tokenFile` detail, so nothing retries on its own: correct the cause
    (the file or the token in it), then run the `cmk update storagepool` command above again.
