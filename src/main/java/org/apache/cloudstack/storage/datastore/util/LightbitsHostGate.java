@@ -34,8 +34,11 @@ import com.cloud.utils.exception.CloudRuntimeException;
  * under one lock per host that every management server sees (CloudStack's database-backed
  * GlobalLock), so in the normal case no grant runs during the sweep at all; when the removal
  * cannot get the lock in time it still sweeps, and the second check covers the grant that
- * holds the lock. The mark is cleared when the host connects again, in case its removal did
- * not go through.
+ * holds the lock. The removal can finish while such a grant still runs, and CloudStack then
+ * deletes the host's details, the mark with them: the caller's {@link RemovingCheck} must
+ * also report a host whose details are gone (no NQN detail) as being removed, so the grant's
+ * second check still sees it. The mark is cleared when the host connects again, in case its
+ * removal did not go through.
  */
 public final class LightbitsHostGate {
     /** Host detail set while the host is being removed from CloudStack. */
@@ -65,7 +68,7 @@ public final class LightbitsHostGate {
         }
     };
 
-    /** Called with the host id; true while the host is marked as being removed. */
+    /** Called with the host id; true while the host is marked as being removed or already gone. */
     public interface RemovingCheck {
         boolean isRemoving(long hostId);
     }
