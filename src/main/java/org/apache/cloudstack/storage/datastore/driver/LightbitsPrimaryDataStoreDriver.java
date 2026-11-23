@@ -723,9 +723,17 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn)));
         if (dataObject instanceof VolumeInfo) {
             // An offering change with the same size and IOPS never reaches resize: pick it up here.
-            client.getVolumeByName(name).ifPresent(v ->
-                    reconcileQosPolicy(client, cfg, ((VolumeInfo) dataObject).getDiskOfferingId(),
-                            ((VolumeInfo) dataObject).getMaxIops(), v));
+            // Best effort like the change itself: a failed lookup must not fail the granted attach.
+            java.util.Optional<org.apache.cloudstack.storage.datastore.client.model.Volume> vol;
+            try {
+                vol = client.getVolumeByName(name);
+            } catch (RuntimeException e) {
+                LOG.warn("Lightbits: could not read volume {} to check its QoS policy against its offering ({});"
+                        + " it is checked again at the next attach or resize", name, e.getMessage());
+                vol = java.util.Optional.empty();
+            }
+            vol.ifPresent(v -> reconcileQosPolicy(client, cfg, ((VolumeInfo) dataObject).getDiskOfferingId(),
+                    ((VolumeInfo) dataObject).getMaxIops(), v));
         }
         return true;
     }

@@ -243,7 +243,9 @@ When a volume moves to another offering (`cmk change offeringforvolume`) whose p
 different, the plugin moves the volume to that policy. CloudStack hands an offering change to
 the plugin only when the size or the IOPS change too; otherwise the new policy is applied at
 the volume's next attach (or its VM's next start or migration). An offering that names no
-policy leaves the volume on the policy it has. A failed change is logged ("could not change
+policy, with no IOPS policy picked for it and no pool default (`qosPolicy`), leaves the
+volume on the policy it has; otherwise the volume moves to the policy those resolve to (for
+example, to the pool default). A failed change is logged ("could not change
 the QoS policy of volume ...") and tried again at the next attach or resize.
 
 **Operators: an offering change can leave the old limit in place.** Until one of the events

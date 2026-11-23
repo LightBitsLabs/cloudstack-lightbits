@@ -132,7 +132,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Known limitations
 - An offering change that keeps the volume's size and IOPS reaches the plugin only at the
   volume's next attach, VM start or migration (CloudStack does not call the storage plugin for
-  it), so the new QoS policy applies from then. Until that, the volume keeps its old limit
+  it), so the plugin tries the new QoS policy then; a failed change is logged and tried again
+  at a later attach or resize. Until that, the volume keeps its old limit
   while CloudStack shows the new offering. To apply it at once, detach and attach the
   volume, stop and start (or migrate) the VM, or change the offering together with a size
   increase. INSTALL.md ("QoS policy") has the details.

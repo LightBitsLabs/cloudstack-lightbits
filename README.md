@@ -37,7 +37,8 @@ Working today (KVM):
   registration), with a per-offering QoS override via the `lightbitsQosPolicy` offering detail
   or, with the pool option `qosFromIops=true`, a policy picked from the offering's max IOPS.
   A changed offering moves the volume to its policy at the next resize, attach, VM start or
-  migration (see INSTALL.md, "QoS policy": until then the old limit applies)
+  migration; a failed change is logged and tried again at a later one (see INSTALL.md,
+  "QoS policy": until then the old limit applies)
 - Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and
   cluster-side cleanup only ever touches the pool's own objects. Several pools can share one
   Lightbits project **operationally** (a per-pool volume-name prefix keeps names, stats, and
