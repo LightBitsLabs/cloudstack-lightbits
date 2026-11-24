@@ -162,27 +162,43 @@ public final class LightbitsRevocations {
      * removed) has again was added back on purpose: its record is dropped, not revoked.
      */
     public static void retry(StoragePoolDetailsDao poolDetails, HostDetailsDao hostDetails, String nqnDetail, long poolId,
-                             LightbitsPoolConfig cfg, LightbitsApiClient client) {
+                             LightbitsPoolConfig cfg, LightbitsApiClient client, LightbitsHostGate.Locker locker) {
         List<String> pending = pending(poolDetails, poolId);
         if (pending.isEmpty()) {
             return;
         }
-        LightbitsHostGate.RemovingCheck removing = LightbitsHostGate.removingCheck(hostDetails, nqnDetail);
         for (String nqn : pending) {
-            boolean readded = false;
-            for (DetailVO d : hostDetails.findByName(nqnDetail)) {
-                if (d.getValue() != null && nqn.equals(d.getValue().trim()) && !removing.isRemoving(d.getHostId())) {
-                    readded = true;
-                    break;
-                }
+            // Under the NQN's lock, which a host takes to record this NQN as its own: a host added
+            // back with it either is seen here (and the record dropped) or records it after the
+            // revocation is done, so its own registration and grants come after and stay.
+            if (!locker.run(nqnLockName(nqn), NQN_LOCK_SECONDS,
+                    () -> retryOne(poolDetails, hostDetails, nqnDetail, poolId, cfg, client, nqn))) {
+                LOG.info("Lightbits: the lock of host NQN {} was busy; its pending revocation on pool {} is retried later", nqn, poolId);
             }
-            if (readded) {
+        }
+    }
+
+    /** Seconds a revocation retry or a host recording its NQN waits for the NQN's lock. */
+    public static final int NQN_LOCK_SECONDS = 60;
+
+    /** The lock a revocation retry and a host recording this NQN as its own share. */
+    public static String nqnLockName(String nqn) {
+        return "lightbits.nqn." + detailKey(nqn).substring(DETAIL_PREFIX.length());
+    }
+
+    private static void retryOne(StoragePoolDetailsDao poolDetails, HostDetailsDao hostDetails, String nqnDetail, long poolId,
+                                 LightbitsPoolConfig cfg, LightbitsApiClient client, String nqn) {
+        LightbitsHostGate.RemovingCheck removing = LightbitsHostGate.removingCheck(hostDetails, nqnDetail);
+        for (DetailVO d : hostDetails.findByName(nqnDetail)) {
+            if (d.getValue() != null && nqn.equals(d.getValue().trim()) && !removing.isRemoving(d.getHostId())) {
                 clear(poolDetails, poolId, nqn);
                 LOG.info("Lightbits: host NQN {} belongs to a CloudStack host again; dropped its pending revocation on pool {}",
                         nqn, poolId);
-            } else if (revokeOrKeep(poolDetails, client, cfg, poolId, nqn)) {
-                LOG.info("Lightbits: completed the pending revocation of removed host {} on pool {}", nqn, poolId);
+                return;
             }
+        }
+        if (revokeOrKeep(poolDetails, client, cfg, poolId, nqn)) {
+            LOG.info("Lightbits: completed the pending revocation of removed host {} on pool {}", nqn, poolId);
         }
     }
 }

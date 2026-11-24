@@ -100,6 +100,8 @@ class LightbitsHostListenerTest {
     private final List<Command> sent = new ArrayList<>();
     private Function<Command, Answer> agent;
     private boolean reportLockBusy;
+    private boolean nqnLockBusy;
+    private final List<String> lockNames = new ArrayList<>();
 
     @SuppressWarnings("unchecked")
     private static <T> T fake(Class<T> type, Function<java.lang.reflect.Method, Function<Object[], Object>> handler) {
@@ -254,7 +256,11 @@ class LightbitsHostListenerTest {
         listener.clients = cfg -> new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default",
                 java.net.http.HttpClient.newHttpClient(), 1);
         listener.hostGateLocker = (name, seconds, work) -> {
+            lockNames.add(name);
             if (reportLockBusy && name.startsWith("lightbits.host.report.")) {
+                return false;
+            }
+            if (nqnLockBusy && name.startsWith("lightbits.nqn.")) {
                 return false;
             }
             work.run();
@@ -603,8 +609,11 @@ class LightbitsHostListenerTest {
                         default: return null;
                     }
                 }), "nvme.hostnqn", POOL, LightbitsPoolConfig.fromDetails(new HashMap<>(poolDetails), "jwt"),
-                new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default", java.net.http.HttpClient.newHttpClient(), 1));
+                new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default", java.net.http.HttpClient.newHttpClient(), 1),
+                listener.hostGateLocker);
         assertFalse(poolDetails.containsValue(NQN), "dropped, not revoked");
+        assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)),
+                "checked and decided under the NQN's lock");
         wm.verify(0, putRequestedFor(urlPathEqualTo(P + "/volumes/u1")));
     }
 
@@ -623,5 +632,26 @@ class LightbitsHostListenerTest {
         wm.resetRequests();
         listener.hostConnect(HOST, POOL);
         wm.verify(0, getRequestedFor(urlEqualTo("/api/v2/clusterinfo")));
+    }
+
+    @Test
+    void aRetryWaitsWhenTheNqnIsBeingRecordedAndAHostRecordsItsNqnUnderTheSameLock() throws Exception {
+        poolDetails.put("lightbits.revoke.x", NQN);
+        nqnLockBusy = true;
+        org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.retry(
+                fake(StoragePoolDetailsDao.class, m -> m.getName().equals("listDetailsKeyPairs") ? a -> new HashMap<>(poolDetails) : null),
+                fake(HostDetailsDao.class, m -> m.getName().equals("findByName") ? a -> new ArrayList<>(details.values()) : null),
+                "nvme.hostnqn", POOL, LightbitsPoolConfig.fromDetails(new HashMap<>(poolDetails), "jwt"),
+                new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default", java.net.http.HttpClient.newHttpClient(), 1),
+                listener.hostGateLocker);
+        assertTrue(poolDetails.containsValue(NQN), "kept for a later retry");
+        wm.verify(0, getRequestedFor(urlPathEqualTo(P + "/volumes")));
+
+        nqnLockBusy = false;
+        lockNames.clear();
+        listener.hostConnect(HOST, POOL);
+        assertEquals(NQN, detail("nvme.hostnqn"));
+        assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)),
+                "a host records its NQN under the NQN's lock");
     }
 }

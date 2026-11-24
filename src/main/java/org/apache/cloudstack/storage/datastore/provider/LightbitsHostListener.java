@@ -218,7 +218,17 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 && ((LightbitsGetHostNqnAnswer) answer).getHostNqn() != null) {
             String nqn = ((LightbitsGetHostNqnAnswer) answer).getHostNqn();
             if (!hasNqn) {
-                hostDetailsDao.persist(new DetailVO(hostId, key, nqn));
+                // under the NQN's lock: a pending revocation of a removed host with this NQN is
+                // then either finished before, or sees this host and is dropped
+                Runnable record = () -> hostDetailsDao.persist(new DetailVO(hostId, key, nqn));
+                if (!hostGateLocker.run(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(nqn),
+                        org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.NQN_LOCK_SECONDS, record)) {
+                    LOG.warn("Lightbits: the lock of host NQN {} was busy for {} s; recording it for host {} without it (a pending"
+                            + " revocation of a removed host with this NQN may still remove it from volume ACLs; it is added back"
+                            + " at the next attach or host connect)", nqn,
+                            org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.NQN_LOCK_SECONDS, hostId);
+                    record.run();
+                }
                 LOG.info("Lightbits: host {} '{}' auto-populated: {}", hostId, key, nqn);
             }
             if (wantIps) {
@@ -820,7 +830,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
             }
             LightbitsPoolConfig cfg = poolSecrets.apply(poolId);
             org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.retry(storagePoolDetailsDao, hostDetailsDao,
-                    LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL, poolId, cfg, clients.apply(cfg));
+                    LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL, poolId, cfg, clients.apply(cfg), hostGateLocker);
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: could not retry the pending revocations of pool {}: {}", poolId, e.getMessage());
         }
