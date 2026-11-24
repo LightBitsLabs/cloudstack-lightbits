@@ -17,8 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   key. Each host connect logs whether every host of the pool is registered and connects with
   its key. Enforcement is cluster-wide, so the cluster admin turns it on only when every pool
   on the cluster logs that its hosts are ready and every client outside CloudStack has its
-  own key. Removing a host
-  deletes the trusted host the plugin made. Pool creation with the option fails, with the
+  own key; a pool whose hosts are trusted hosts of another project cannot log ready for
+  them, and the cluster admin checks that project's trusted hosts instead (INSTALL.md, step
+  5). Removing a host deletes the trusted host the plugin made, best effort: if the cluster
+  call fails, the removal still completes and the log asks to delete it by hand. Pool creation with the option fails, with the
   `lbcli` command to run, when the cluster's InBandAuthentication feature flag is off.
 - Pool option `ipAcl=true`: each volume's IP ACL holds the data IPs of the hosts in its NQN
   ACL, so a connection to the volume must come from one of those addresses (the union over
@@ -164,6 +166,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on pools of different projects of the same cluster, the first pool to register a host owns
   its trusted host; the others cannot change it and log that the host is registered
   elsewhere. Their volumes still work, because every pool registers the same per-host key.
+  Such a pool reports those hosts NOT ready; before enforcement the cluster admin checks the
+  other project's trusted hosts as INSTALL.md, step 5, describes.
+- A host connect within 30 minutes of a removal of that host that did not go through keeps
+  the removal mark: the host's grants and in-band registration stay refused until a connect
+  after the mark expires.
 - With `inbandAuth=true`, a host whose agent is older than this plugin version reports no key
   and is not registered; the management log names it. Upgrade the agent on every host first.
 - With `inbandAuth=true`, a host that was already a trusted host of the project with

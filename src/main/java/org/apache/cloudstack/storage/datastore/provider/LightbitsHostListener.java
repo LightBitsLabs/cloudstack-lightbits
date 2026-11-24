@@ -108,8 +108,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
             LOG.info("Lightbits pool {} registered on host {}", poolId, hostId);
         }
 
-        ensureHostDetails(hostId, poolId);
+        // An expired mark (a removal that did not go through) is cleared before registration, so
+        // the post-registration removal check does not undo this connect's registration; a mark of
+        // an active removal is kept and that check still applies.
         clearRemovingMark(hostId);
+        ensureHostDetails(hostId, poolId);
         return true;
     }
 
@@ -397,6 +400,20 @@ public class LightbitsHostListener implements HypervisorHostListener {
             setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
             LOG.warn("Lightbits: could not register host {} as a trusted host for pool {}: {}; retried at its next connect"
                     + " (the cluster's InBandAuthentication feature flag must be on)", hostId, poolId, e.getMessage());
+            // A failed write may still have been applied (a timeout or 5xx after the request was sent).
+            // If the host is being removed, delete what this connect may have created, as on success.
+            if (removing(hostId)) {
+                try {
+                    LightbitsPoolConfig cfg = LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
+                    LightbitsTrustedHosts.unregister(cfg.newClient(), cfg.getEnvironment(), nqn, new java.util.ArrayList<>());
+                    LOG.warn("Lightbits: host {} is being removed; deleted any trusted host the failed registration for pool {}"
+                            + " may have created", hostId, poolId);
+                } catch (RuntimeException e2) {
+                    LOG.warn("Lightbits: host {} is being removed and its registration for pool {} failed; could not check for"
+                            + " a trusted host it may have created ({}): delete it by hand (lbcli delete trusted-host)", hostId,
+                            poolId, e2.getMessage());
+                }
+            }
         }
         reportInbandReadiness(poolId);
     }
@@ -490,12 +507,23 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL).isRemoving(hostId);
     }
 
-    /** A host that connects is not being removed (a removal that did not go through). */
+    /**
+     * A host that connects after its removal mark has expired is not being removed (a removal that
+     * did not go through): clear the mark. A younger mark is kept, so a connect during an active
+     * removal cannot clear it under the removal's feet (see LightbitsHostGate.MARK_HOLD_MILLIS).
+     */
     private void clearRemovingMark(long hostId) {
         DetailVO mark = hostDetailsDao.findDetail(hostId, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL);
-        if (mark != null) {
+        if (mark == null) {
+            return;
+        }
+        if (org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.markClearable(mark.getValue(), System.currentTimeMillis())) {
             hostDetailsDao.remove(mark.getId());
             LOG.info("Lightbits: host {} connected again; cleared its removal mark", hostId);
+        } else {
+            LOG.warn("Lightbits: host {} connected while its removal began less than {} min ago; its removal mark is kept"
+                    + " (grants and in-band registration stay refused until it expires)", hostId,
+                    org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.MARK_HOLD_MILLIS / 60000);
         }
     }
 
@@ -538,10 +566,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
     org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.Locker hostGateLocker =
             org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.GLOBAL;
 
+    /** Mark the host as being removed, with the time, renewed by each removal attempt. */
     private void markRemoving(long hostId) {
-        if (hostDetailsDao.findDetail(hostId, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL) == null) {
-            hostDetailsDao.persist(new DetailVO(hostId, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL, "true"));
-        }
+        setHostDetail(hostId, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL,
+                org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.markValue(System.currentTimeMillis()));
     }
 
     private void sweepHostFromAcls(long hostId, String nqnValue) {

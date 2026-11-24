@@ -221,6 +221,18 @@ class LightbitsHostGateTest {
     }
 
     @Test
+    void aConnectDuringAnActiveRemovalCannotClearItsMark() {
+        long start = 1_000_000_000L;
+        String mark = LightbitsHostGate.markValue(start);
+        assertFalse(LightbitsHostGate.markClearable(mark, start), "a connect while the removal runs keeps the mark");
+        assertFalse(LightbitsHostGate.markClearable(mark, start + LightbitsHostGate.REMOVAL_LOCK_SECONDS * 1000L + 60_000),
+                "still kept after the removal's longest lock wait");
+        assertTrue(LightbitsHostGate.markClearable(mark, start + LightbitsHostGate.MARK_HOLD_MILLIS),
+                "the mark of a removal that did not go through is cleared at a later connect");
+        assertTrue(LightbitsHostGate.markClearable("true", start), "a mark from an earlier version is cleared as before");
+    }
+
+    @Test
     void aRegistrationThatFinishesAfterTheRemovalAndTheDetailDeletionSeesTheHostRemoved() throws Exception {
         long host = 4;
         java.util.Map<String, String> details = new java.util.concurrent.ConcurrentHashMap<>(java.util.Map.of("nvme.hostnqn", "nqn.h"));

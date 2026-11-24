@@ -327,7 +327,10 @@ the host side:
   host secret. It keeps only a fingerprint (host detail `lightbits.inband.<pool id>`) and
   never logs the key. A host that is already a trusted host of the project under another
   name gets its key set there.
-- Removing a host from CloudStack deletes the trusted host the plugin made for it.
+- Removing a host from CloudStack deletes the trusted host the plugin made for it, best
+  effort: if the cluster call fails, the removal still completes and the management log asks
+  to delete it by hand (`lbcli delete trusted-host`); until then a machine holding the key
+  can still authenticate.
 - The discovery service (port 8009) does not authenticate, so discovery is unchanged. The
   authentication is one-way: the host does not check the cluster.
 
@@ -367,8 +370,12 @@ this order:
    Before the cluster admin turns it on, every host and client that uses the cluster must be
    ready: the hosts of every CloudStack pool on the cluster (each pool logs its own line,
    including pools of other projects and other CloudStack environments), and every client
-   outside CloudStack, which needs its own trusted host and key. Then the cluster admin turns
-   enforcement on: `lbcli enable in-band-auth`.
+   outside CloudStack, which needs its own trusted host and key. A pool whose hosts are
+   already trusted hosts of another project cannot register them and reports them NOT
+   ready; for those hosts the cluster admin checks the other project's trusted hosts
+   (`lbcli list trusted-hosts --project-name=<other project>`): each must hold the host's
+   current key (the key in `/etc/nvme/lightbits/dhchap-key` on the host) and have
+   `authRequired=true`. Then the cluster admin turns enforcement on: `lbcli enable in-band-auth`.
 
 A path that fails authentication shows in the host's kernel log, and nvme-cli reports
 "could not add new controller: pre-shared TLS key is missing" for a host with no key (the

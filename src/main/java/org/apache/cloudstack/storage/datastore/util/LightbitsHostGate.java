@@ -45,6 +45,12 @@ public final class LightbitsHostGate {
     public static final String REMOVING_DETAIL = "lightbits.removing";
     static final int GRANT_LOCK_SECONDS = 120;
     public static final int REMOVAL_LOCK_SECONDS = 600;
+    /**
+     * How long a removal mark stays in force against a host connect: longer than a removal can
+     * take (its lock wait plus the sweep), so a connect during an active removal cannot clear it,
+     * while the mark of a removal that did not go through is cleared at a later connect.
+     */
+    public static final long MARK_HOLD_MILLIS = 30L * 60 * 1000;
 
     /** Runs work under a named lock; false when the lock was not had within the time. */
     public interface Locker {
@@ -80,6 +86,26 @@ public final class LightbitsHostGate {
      */
     public static RemovingCheck removingCheck(com.cloud.host.dao.HostDetailsDao dao, String nqnDetail) {
         return hostId -> dao.findDetail(hostId, REMOVING_DETAIL) != null || dao.findDetail(hostId, nqnDetail) == null;
+    }
+
+    /** The removal mark's value: when the removal began (epoch milliseconds). */
+    public static String markValue(long nowMillis) {
+        return String.valueOf(nowMillis);
+    }
+
+    /**
+     * Whether a host connect may clear a removal mark: only once it is older than
+     * {@link #MARK_HOLD_MILLIS}. A mark from an earlier version ("true") has no time and may be
+     * cleared, as before.
+     */
+    public static boolean markClearable(String value, long nowMillis) {
+        long since;
+        try {
+            since = Long.parseLong(value == null ? "" : value.trim());
+        } catch (NumberFormatException e) {
+            return true;
+        }
+        return nowMillis - since >= MARK_HOLD_MILLIS;
     }
 
     private LightbitsHostGate() {
