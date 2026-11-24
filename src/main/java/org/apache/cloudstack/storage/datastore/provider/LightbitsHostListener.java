@@ -554,6 +554,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
     private void sweepHostFromAcls(long hostId, String nqnValue) {
         for (org.apache.cloudstack.storage.datastore.db.StoragePoolVO pool : primaryDataStoreDao.findPoolsByProvider(
                 org.apache.cloudstack.storage.datastore.util.LightbitsUtil.PROVIDER_NAME)) {
+            // Renew the removal mark for each pool: the sweep has no overall deadline (a lock wait per
+            // pool, cluster calls), so the mark is kept fresh for as long as the removal runs.
+            markRemoving(hostId);
             try {
                 org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                         org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());

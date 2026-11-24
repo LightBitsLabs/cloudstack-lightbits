@@ -46,9 +46,10 @@ public final class LightbitsHostGate {
     static final int GRANT_LOCK_SECONDS = 120;
     public static final int REMOVAL_LOCK_SECONDS = 600;
     /**
-     * How long a removal mark counts: longer than a removal can take (its lock wait plus the
-     * sweep), so it holds for the whole of an active removal, while the mark of a removal that
-     * did not go through stops counting on its own.
+     * How long a removal mark counts after it was last renewed: longer than the removal's lock
+     * wait plus one pool of its sweep (the sweep renews the mark for each pool), so it holds for
+     * the whole of an active removal, while the mark of a removal that did not go through stops
+     * counting on its own.
      */
     public static final long MARK_HOLD_MILLIS = 30L * 60 * 1000;
 
