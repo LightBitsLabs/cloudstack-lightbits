@@ -287,6 +287,22 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     }
 
     /** Rebuild the validated pool config (incl. environment) from persisted details. */
+    /**
+     * The storage statistics poll also retries the pool's pending revocations of removed hosts
+     * (see LightbitsRevocations): a periodic task that already reaches the cluster. A failure
+     * here never costs the statistics.
+     */
+    private void retryRevocations(long poolId, LightbitsPoolConfig cfg) {
+        try {
+            if (!org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.pending(storagePoolDetailsDao, poolId).isEmpty()) {
+                org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.retry(storagePoolDetailsDao, hostDetailsDao,
+                        HOST_NQN_DETAIL, poolId, cfg, clientFor(cfg));
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not retry the pending revocations of pool {}: {}", poolId, e.getMessage());
+        }
+    }
+
     LightbitsPoolConfig configForPool(long poolId) {
         return org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
     }
@@ -971,6 +987,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             long replicas = Math.max(1, cfg.getReplicaCount());
             long capacity = nc.effectivePhysicalBytes / replicas;
             long used = Math.max(0L, nc.effectivePhysicalBytes - nc.freePhysicalBytes) / replicas;
+            retryRevocations(poolId, cfg);
             return new Pair<>(capacity, used);
         } catch (Exception e) {
             // The stats path must degrade gracefully and never wedge the collector; null is

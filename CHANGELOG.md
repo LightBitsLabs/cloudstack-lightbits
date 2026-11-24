@@ -5,6 +5,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+- Removing a host no longer forgets a revocation the cluster could not take: each pool records
+  it as pending before it removes the host from the volume ACLs and deletes its trusted host,
+  and clears it only when the cluster confirms both. Pending revocations are retried at the
+  storage statistics poll and at host connects, and logged until they complete; one for a
+  machine added back to CloudStack is dropped.
+
 ## [0.1.0-rc.1] - 2026-11-24
 
 Release candidate for 0.1.0: feature-complete and validated in the lab; for evaluation and
