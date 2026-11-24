@@ -138,11 +138,34 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * toward the pool's cluster (see {@link #recordDataIps}).
      */
     private void ensureHostDetails(long hostId, long poolId) {
+        org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
+        if (cfg == null || !cfg.isIpAcl()) {
+            ensureHostDetails(hostId, poolId, cfg, false);
+            return;
+        }
+        // The agent's data IP report and what is done with it (stored IPs and IP ACLs) run under
+        // the host's report lock, held across management servers: of two overlapping connects of
+        // one host, the one that asked last also commits last, so an older report cannot overwrite
+        // a newer one. Without the lock in time this connect only records the host NQN, and the
+        // next connect reports again.
+        if (!hostGateLocker.run(reportLockName(hostId), REPORT_LOCK_SECONDS, () -> ensureHostDetails(hostId, poolId, cfg, true))) {
+            LOG.warn("Lightbits: the report lock of host {} was busy for {} s; its data IPs for pool {} are recorded at its"
+                    + " next connect", hostId, REPORT_LOCK_SECONDS, poolId);
+            ensureHostDetails(hostId, poolId, cfg, false);
+        }
+    }
+
+    static final int REPORT_LOCK_SECONDS = 120;
+
+    static String reportLockName(long hostId) {
+        return "lightbits.host.report." + hostId;
+    }
+
+    private void ensureHostDetails(long hostId, long poolId, org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg,
+                                   boolean wantIps) {
         String key = LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL;
         DetailVO existing = hostDetailsDao.findDetail(hostId, key);
         boolean hasNqn = existing != null && existing.getValue() != null && !existing.getValue().isBlank();
-        org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
-        boolean wantIps = cfg != null && cfg.isIpAcl();
         if (hasNqn && !wantIps) {
             LOG.debug("Lightbits: host {} already has '{}' = {}", hostId, key, existing.getValue());
             return;
@@ -258,7 +281,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                     org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
             java.util.List<String> updated = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.refreshIps(cfg.newClient(),
-                    cfg.getEnvironment(), poolId, nqn, ipResolver(poolId));
+                    cfg.getEnvironment(), poolId, nqn, ipResolver(poolId), ips);
             if (!updated.isEmpty()) {
                 LOG.info("Lightbits: updated the IP ACL of {} volume(s) of pool {} for host {}: {}", updated.size(), poolId,
                         hostId, updated);

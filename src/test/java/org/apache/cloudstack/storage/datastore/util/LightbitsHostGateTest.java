@@ -221,6 +221,42 @@ class LightbitsHostGateTest {
     }
 
     @Test
+    void aGrantReadsItsHostsIpsUnderTheLocksSoItsOwnRefreshCannotLeaveItOut() throws Exception {
+        // Host B is granted while its own refresh moves it from 10.0.0.1 to 10.0.0.2, and host A
+        // on the volume has no known IPs (union unknown: each writer only adds its host's IPs).
+        // The grant reads B's IPs inside the host and pool locks the refresh also takes, and the
+        // refresh adds B's new IPs: whichever runs first, the volume ends with B's current IP.
+        for (boolean grantFirst : new boolean[] {true, false}) {
+            long pool = 3;
+            long hostB = 2;
+            LightbitsHostGate.Locker locker = inProcess();
+            java.util.Map<Long, String> detail = new java.util.concurrent.ConcurrentHashMap<>(java.util.Map.of(hostB, "10.0.0.1"));
+            java.util.concurrent.atomic.AtomicReference<List<String>> volumeIps = new java.util.concurrent.atomic.AtomicReference<>(
+                    List.of("ALLOW_NONE"));
+            CountDownLatch first = new CountDownLatch(1);
+            Runnable grantWrite = () -> LightbitsHostGate.grant(hostB, id -> false, locker,
+                    () -> LightbitsHostGate.underPoolIpAclLock(locker, pool, true, () -> {
+                        List<String> own = List.of(detail.get(hostB));   // read under the locks
+                        volumeIps.set(LightbitsAcl.withAdded(volumeIps.get(), own));
+                    }), () -> { });
+            Runnable refresh = () -> locker.run(LightbitsHostGate.lockName(hostB), 5,
+                    () -> locker.run(LightbitsHostGate.poolIpAclLockName(pool), 5, () -> {
+                        detail.put(hostB, "10.0.0.2");
+                        volumeIps.set(LightbitsAcl.withAdded(volumeIps.get(), List.of("10.0.0.2")));
+                    }));
+            Thread a = new Thread(() -> {
+                (grantFirst ? grantWrite : refresh).run();
+                first.countDown();
+            });
+            a.start();
+            assertTrue(first.await(5, TimeUnit.SECONDS));
+            (grantFirst ? refresh : grantWrite).run();
+            a.join(5000);
+            assertTrue(volumeIps.get().contains("10.0.0.2"), "grantFirst=" + grantFirst + ": " + volumeIps.get());
+        }
+    }
+
+    @Test
     void aGrantForAnotherHostCannotWriteStaleIpsAfterTheRefresh() throws Exception {
         // Host A is in the volume and moves from 10.0.0.1 to 10.0.0.2; a grant for host B resolves
         // the IPs while A's refresh runs. Every writer holds the pool's IP ACL lock while it
