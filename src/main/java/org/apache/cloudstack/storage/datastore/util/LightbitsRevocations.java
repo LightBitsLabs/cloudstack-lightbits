@@ -263,25 +263,38 @@ public final class LightbitsRevocations {
         if (pending.isEmpty()) {
             return;
         }
-        // one pass waits at most RETRY_BUDGET_SECONDS for locks in all: the statistics poll and
-        // host connects run it, and records left over stay for the next pass
-        long deadline = System.currentTimeMillis() + RETRY_BUDGET_SECONDS * 1000L;
-        for (String nqn : pending) {
-            long left = (deadline - System.currentTimeMillis()) / 1000L;
+        // One pass waits at most RETRY_BUDGET_SECONDS for busy locks in all (the statistics poll
+        // and host connects run it); the revocation work itself does not count. The pass starts
+        // one record further each time, so a record that is slow or busy does not keep the ones
+        // after it waiting pass after pass.
+        int start = Math.floorMod(PASS.merge(poolId, 1, Integer::sum), pending.size());
+        long waitedMillis = 0;
+        for (int i = 0; i < pending.size(); i++) {
+            String nqn = pending.get((start + i) % pending.size());
+            long left = RETRY_BUDGET_SECONDS - waitedMillis / 1000L;
             if (left <= 0) {
-                LOG.info("Lightbits: pending revocations on pool {} left for the next retry (this pass used its {} s)", poolId,
-                        RETRY_BUDGET_SECONDS);
+                LOG.info("Lightbits: pending revocations on pool {} left for the next retry (this pass waited {} s for locks)",
+                        poolId, RETRY_BUDGET_SECONDS);
                 return;
             }
+            long asked = System.currentTimeMillis();
+            long[] started = {0};
             // Under the NQN's lock, which a host takes to record this NQN as its own: a host added
             // back with it either is seen here (and the record dropped) or records it after the
             // revocation is done, so its own registration and grants come after and stay.
-            if (!locker.run(nqnLockName(nqn), (int) Math.min(NQN_LOCK_SECONDS, left),
-                    () -> retryOne(poolDetails, hostDetails, nqnDetail, poolId, cfg, client, nqn))) {
+            boolean ran = locker.run(nqnLockName(nqn), (int) Math.min(NQN_LOCK_SECONDS, left), () -> {
+                started[0] = System.currentTimeMillis();
+                retryOne(poolDetails, hostDetails, nqnDetail, poolId, cfg, client, nqn);
+            });
+            waitedMillis += (ran ? started[0] : System.currentTimeMillis()) - asked;
+            if (!ran) {
                 LOG.info("Lightbits: the lock of host NQN {} was busy; its pending revocation on pool {} is retried later", nqn, poolId);
             }
         }
     }
+
+    /** Pass counter per pool, for the rotating start. */
+    private static final Map<Long, Integer> PASS = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Seconds one retry pass of a pool may spend waiting for NQN locks, all records together. */
     static final int RETRY_BUDGET_SECONDS = 60;
