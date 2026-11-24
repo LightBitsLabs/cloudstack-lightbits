@@ -346,7 +346,10 @@ the host side:
   cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way
   pool keeps a target secret a two-way pool set. Readiness for a two-way pool also needs the
   current controller key registered and on every path; move hosts onto new paths as in step
-  4 after turning the option on.
+  4 after turning the option on. Until a host is moved, the agent refuses to hand a volume of
+  the pool to a VM on it (attach, VM start, migration onto it) while any path of the pool's
+  subsystem lacks the host's current controller key, with a message saying how to move it;
+  VMs already running keep working. So cycle the hosts promptly after turning two-way on.
 
 **Warning: turning enforcement on too early can freeze a host.** Once the cluster admin runs
 `lbcli enable in-band-auth`, any NVMe/TCP path that does not hold the host's current key

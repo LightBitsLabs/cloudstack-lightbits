@@ -622,4 +622,49 @@ class LightbitsNvmeHostTest {
         assertEquals(5000, real.run(10_000, "sh", "-c", "head -c 5000 /dev/zero | tr '\\0' a").output.length());
         assertEquals(LightbitsNvmeHost.MAX_MESSAGE_OUTPUT, real.run(10_000, "sh", "-c", "head -c 5000 /dev/zero | tr '\\0' a; exit 3").output.length());
     }
+
+    @Test
+    void twoWayHandoffNeedsTheControllerKeyOnEveryPathOfTheSubsystem() {
+        String ctrl = "DHHC-1:00:ctrl:";
+        sys.files.put("/sys/block/nvme3n1/device/subsysnqn", NQN);
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.controller("nvme2", "traddr=10.0.0.2,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme1/dhchap_ctrl_secret", ctrl);
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", ctrl + "\n");
+        sys.files.put("/sys/class/nvme/nvme9/subsysnqn", "nqn.2016-01.com.lightbitslabs:uuid:another-cluster");
+        sys.files.put("/sys/class/nvme/nvme9/dhchap_ctrl_secret", "none");
+        host.requireTwoWayPaths("nvme3n1", ctrl);   // a path of another subsystem does not count
+
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", "none");
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> host.requireTwoWayPaths("nvme3n1", ctrl));
+        assertTrue(e.getMessage().contains("nvme2") && !e.getMessage().contains("nvme1 ") && e.getMessage().contains("not handed over"),
+                e.getMessage());
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", "DHHC-1:00:old:");
+        assertThrows(CloudRuntimeException.class, () -> host.requireTwoWayPaths("nvme3n1", ctrl), "an old controller key");
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", ctrl);
+
+        sys.unreadable.add("/sys/class/nvme/nvme2/subsysnqn");
+        assertThrows(CloudRuntimeException.class, () -> host.requireTwoWayPaths("nvme3n1", ctrl), "unreadable: refused");
+        sys.unreadable.clear();
+        sys.unreadable.add("/sys/block/nvme3n1/device/subsysnqn");
+        assertThrows(CloudRuntimeException.class, () -> host.requireTwoWayPaths("nvme3n1", ctrl));
+    }
+
+    @Test
+    void aRejectedPathThatCouldNotBeDisconnectedBlocksTheHandoff() {
+        String ctrl = "DHHC-1:00:ctrl:";
+        sys.files.put("/sys/block/nvme3n1/device/subsysnqn", NQN);
+        java.util.Set<String> before = host.pathNames();
+        sys.controller("nvme4", "traddr=10.0.0.4,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", "none");
+        sys.results.put("nvme disconnect -d nvme4", new LightbitsNvmeHost.Result(1, "failed"));
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        // even if the path later shows the key, it was rejected and stays so until it is gone
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", ctrl);
+        assertThrows(CloudRuntimeException.class, () -> host.requireTwoWayPaths("nvme3n1", ctrl));
+        // once the path is gone the rejection is forgotten (the static set does not leak into other tests)
+        sys.files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme4/"));
+        host.dropNewPathsWithoutCtrlKey(java.util.Set.of(), ctrl);
+        host.requireTwoWayPaths("nvme3n1", ctrl);
+    }
 }

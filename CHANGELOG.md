@@ -5,6 +5,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+- Two-way in-band authentication: the agent hands a volume to a VM (attach, VM start, migration
+  onto the host) only when every path of the volume's subsystem holds the host's current
+  controller key and none is a path it rejected but could not disconnect; otherwise it
+  refuses with how to move the host onto two-way paths. Running VMs are not affected.
+
 ## [0.1.0-rc.1] - 2026-11-24
 
 Release candidate for 0.1.0: feature-complete and validated in the lab; for evaluation and
