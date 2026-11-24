@@ -112,7 +112,10 @@ class LightbitsHostListenerTest {
             if (r == boolean.class) {
                 return false;
             }
-            if (r == long.class || r == int.class) {
+            if (r == long.class) {
+                return 0L;
+            }
+            if (r == int.class) {
                 return 0;
             }
             if (List.class.isAssignableFrom(r)) {
