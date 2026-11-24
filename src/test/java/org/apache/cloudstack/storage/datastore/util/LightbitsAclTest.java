@@ -28,6 +28,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.cloudstack.storage.datastore.client.LightbitsApiClient;
@@ -100,6 +101,32 @@ class LightbitsAclTest {
         wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u-clean")));
         wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u-other")));
         wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u-env")));
+    }
+
+    @Test
+    void aSlowSweepRenewsBeforeEveryVolumeSoTheMarkNeverExpiresMidway() {
+        // Each volume update takes 20 min of a fake clock; the mark lasts 30 min from its last
+        // renewal. Renewing before each volume keeps it counting for the whole sweep.
+        String second = "cs-cs1-p2-bbbbbbbb-2222-3333-4444-555555555555";
+        String third = "cs-cs1-p2-cccccccc-2222-3333-4444-555555555555";
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).atPriority(5).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":["
+                + volIps("u1", NAME, "1", List.of(GONE), List.of("ALLOW_ANY")) + ","
+                + volIps("u2", second, "1", List.of(GONE), List.of("ALLOW_ANY")) + ","
+                + volIps("u3", third, "1", List.of(GONE), List.of("ALLOW_ANY")) + "]}")));
+        stubOne("u1", NAME, List.of(GONE), List.of("ALLOW_ANY"));
+        stubOne("u2", second, List.of(GONE), List.of("ALLOW_ANY"));
+        stubOne("u3", third, List.of(GONE), List.of("ALLOW_ANY"));
+        long[] now = {0};
+        long[] renewed = {0};
+        List<Boolean> markCountedAtEachUpdate = new ArrayList<>();
+        List<String> pruned = LightbitsAcl.pruneHost(client, "cs1", 2, GONE, null, () -> {
+            markCountedAtEachUpdate.add(!LightbitsHostGate.markExpired(LightbitsHostGate.markValue(renewed[0]), now[0]));
+            renewed[0] = now[0];
+            now[0] += 20 * 60 * 1000L;   // this volume's update takes 20 min
+        });
+        assertEquals(3, pruned.size());
+        assertEquals(List.of(true, true, true, true), markCountedAtEachUpdate, "the mark counted before the listing and every volume");
+        org.junit.jupiter.api.Assertions.assertTrue(now[0] > LightbitsHostGate.MARK_HOLD_MILLIS, "the sweep outlasted one mark period");
     }
 
     @Test

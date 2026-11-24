@@ -61,16 +61,55 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
             if (!nqn.startsWith("nqn.")) {
                 return new LightbitsGetHostNqnAnswer(command, false, "unexpected host NQN '" + nqn + "'");
             }
+            LightbitsGetHostNqnAnswer answer;
             if (command.getEndpoints() == null) {
-                return new LightbitsGetHostNqnAnswer(command, nqn, new java.util.ArrayList<>());
+                answer = new LightbitsGetHostNqnAnswer(command, nqn, new java.util.ArrayList<>());
+            } else {
+                java.util.List<String> failed = new java.util.ArrayList<>();
+                java.util.List<String> ips = dataIps(command.getEndpoints(), failed);
+                answer = new LightbitsGetHostNqnAnswer(command, nqn, ips).withDataIpsPartial(!failed.isEmpty());
             }
-            java.util.List<String> failed = new java.util.ArrayList<>();
-            java.util.List<String> ips = dataIps(command.getEndpoints(), failed);
-            return new LightbitsGetHostNqnAnswer(command, nqn, ips).withDataIpsPartial(!failed.isEmpty());
+            if (command.isInbandAuth()) {
+                inbandAuth(answer);
+            }
+            return answer;
         } catch (Exception e) {
             LOG.warn("Lightbits: failed to determine host NQN", e);
             return new LightbitsGetHostNqnAnswer(command, false, "failed to determine host NQN: " + e.getMessage());
         }
+    }
+
+    /**
+     * This host's in-band authentication key (made if missing) and how many of its Lightbits
+     * paths do not hold that key (none, or an old one). A failure is reported in the answer, not as a failed command: the
+     * NQN and data IPs are still good.
+     */
+    void inbandAuth(LightbitsGetHostNqnAnswer answer) {
+        String key;
+        try {
+            key = hostKey().ensure();
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not prepare this host's in-band authentication key: {}", e.getMessage());
+            answer.withInbandAuth(null, null, e.getMessage());
+            return;
+        }
+        Integer keyless;
+        try {
+            keyless = pathsWithoutKey(key);
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not count this host's NVMe/TCP paths without its current key: {}", e.getMessage());
+            keyless = null;
+        }
+        answer.withInbandAuth(key, keyless, null);
+    }
+
+    protected com.cloud.hypervisor.kvm.storage.LightbitsHostKey hostKey() {
+        return new com.cloud.hypervisor.kvm.storage.LightbitsHostKey();
+    }
+
+    /** Paths that hold no key or an old one; reported in the answer's keylessPaths field. */
+    protected int pathsWithoutKey(String currentKey) {
+        return com.cloud.hypervisor.kvm.storage.LightbitsHostKey.pathsWithoutKey(currentKey);
     }
 
     /**

@@ -172,11 +172,23 @@ public final class LightbitsAcl {
     /** {@link #pruneHost(LightbitsApiClient, String, long, String)}, setting the IP ACLs with {@code ips}. */
     public static List<String> pruneHost(LightbitsApiClient client, String environment, long poolId, String hostNqn,
                                          IpResolver ips) {
+        return pruneHost(client, environment, poolId, hostNqn, ips, () -> { });
+    }
+
+    /**
+     * {@link #pruneHost(LightbitsApiClient, String, long, String, IpResolver)}, running
+     * {@code beforeEach} before each volume it updates (the removal renews its mark there, so
+     * the mark stays fresh however long the sweep takes).
+     */
+    public static List<String> pruneHost(LightbitsApiClient client, String environment, long poolId, String hostNqn,
+                                         IpResolver ips, Runnable beforeEach) {
         List<String> pruned = new ArrayList<>();
+        beforeEach.run();   // also before the listing
         for (Volume v : client.listVolumes()) {
             if (v.getName() == null || !LightbitsUtil.isPoolObject(environment, poolId, v.getName()) || !hosts(v).contains(hostNqn)) {
                 continue;
             }
+            beforeEach.run();
             try {
                 update(client, v.getName(), false, acl -> acl.remove(hostNqn), ips);
                 pruned.add(v.getName());

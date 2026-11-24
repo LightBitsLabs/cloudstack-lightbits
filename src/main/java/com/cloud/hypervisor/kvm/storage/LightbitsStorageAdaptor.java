@@ -78,15 +78,23 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     public static final String DETAIL_NVME_DISCOVERY = "nvmeDiscovery";
     /** Pool detail carrying the plugin version of the management server, for the mismatch warning. */
     public static final String DETAIL_PLUGIN_VERSION = "pluginVersion";
+    /** Pool detail, "true" when the pool's hosts connect with their in-band authentication key. */
+    public static final String DETAIL_INBAND_AUTH = "inbandAuth";
 
     private final LightbitsNvmeHost nvme;
+    private final LightbitsHostKey hostKey;
 
     public LightbitsStorageAdaptor() {
-        this(new LightbitsNvmeHost());
+        this(new LightbitsNvmeHost(), new LightbitsHostKey());
     }
 
     LightbitsStorageAdaptor(LightbitsNvmeHost nvme) {
+        this(nvme, new LightbitsHostKey());
+    }
+
+    LightbitsStorageAdaptor(LightbitsNvmeHost nvme, LightbitsHostKey hostKey) {
         this.nvme = nvme;
+        this.hostKey = hostKey;
         LOG.info("{} loaded on this KVM agent", org.apache.cloudstack.storage.datastore.util.LightbitsVersion.describe());
     }
 
@@ -161,10 +169,11 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         }
         String uuid = LightbitsNvmeHost.requireVolumeUuid(volumePath);
         List<String> endpoints = discoveryEndpoints(pool);
+        java.nio.file.Path authConfig = authConfig(pool);
         // One connect at a time on this host: parallel VM starts would otherwise race each
         // other's connect-all against the same subsystem.
         synchronized (CONNECT_LOCK) {
-            nvme.connect(endpoints);
+            nvme.connect(endpoints, LightbitsNvmeHost.CONNECT_TIMEOUT_MS, authConfig);
             // the host is connected: a failure an earlier lookup remembered for this pool is history
             lookupConnects.remove(pool.getUuid());
         }
@@ -210,7 +219,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             boolean answered;
             List<String> endpoints = discoveryEndpoints(pool);
             try {
-                answered = nvme.connect(endpoints, LOOKUP_CONNECT_TIMEOUT_MILLIS);
+                answered = nvme.connect(endpoints, LOOKUP_CONNECT_TIMEOUT_MILLIS, authConfig(pool));
             } catch (CloudRuntimeException e) {
                 state.lastFailure = e.getMessage();
                 backOff(state);
@@ -250,6 +259,20 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             lookupRescanNotBefore = clock.getAsLong() + LOOKUP_RESCAN_INTERVAL_MILLIS;
             return true;
         }
+    }
+
+    /**
+     * The nvme-cli configuration file with this host's in-band authentication key, for a pool
+     * whose management server sent {@link #DETAIL_INBAND_AUTH}; null for any other pool. The key
+     * is made on first use. A key that cannot be prepared fails the connect: without it the
+     * host loses its paths once the cluster turns in-band authentication on.
+     */
+    java.nio.file.Path authConfig(KVMStoragePool pool) {
+        Map<String, String> details = pool.getDetails();
+        if (details == null || !"true".equals(details.get(DETAIL_INBAND_AUTH))) {
+            return null;
+        }
+        return hostKey.ensureConfig();
     }
 
     /**

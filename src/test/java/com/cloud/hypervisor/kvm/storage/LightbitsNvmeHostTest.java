@@ -83,7 +83,7 @@ class LightbitsNvmeHostTest {
         }
 
         @Override public boolean exists(String path) { return links.containsKey(path) || files.containsKey(path); }
-        @Override public String read(String path) { return files.get(path); }
+        @Override public String read(String path) { return unreadable.contains(path) ? null : files.get(path); }
         @Override public String canonical(String path) { return links.get(path); }
         @Override public void sleep(long millis) { slept++; }
 
@@ -433,5 +433,41 @@ class LightbitsNvmeHostTest {
         assertTrue(adaptor.deleteStoragePool("pool-a", new java.util.HashMap<>()));
         assertTrue(sys.commands.contains("nvme disconnect -n " + NQN), sys.commands.toString());
         assertTrue(adaptor.deleteStoragePool("pool-a", null));
+    }
+
+    // ---- in-band authentication ----
+
+    @Test
+    void aConnectWithAKeyPassesTheConfigFileAndNoKey() {
+        host.connect(List.of("10.0.0.1:8009"), 1000, java.nio.file.Path.of("/etc/nvme/lightbits/auth.json"));
+        assertTrue(sys.commands.contains("nvme connect-all -t tcp -a 10.0.0.1 -s 8009 --config=/etc/nvme/lightbits/auth.json"),
+                sys.commands.toString());
+        assertFalse(sys.commands.stream().anyMatch(c -> c.contains("DHHC-1")), "the key never reaches a command line");
+    }
+
+    @Test
+    void pathsWithoutTheCurrentKeyAreCounted() {
+        String current = "DHHC-1:00:current:";
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.controller("nvme2", "traddr=10.0.0.2,trsvcid=4420", "live");
+        sys.controller("nvme3", "traddr=10.0.0.3,trsvcid=4420", "connecting");
+        sys.controller("nvme4", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme1/dhchap_secret", "none");
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_secret", current + "\n");
+        // nvme3: a kernel without the attribute counts as keyless
+        // nvme4: a key from before the key file was replaced (rotation, or the file deleted)
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_secret", "DHHC-1:00:old:");
+        sys.files.put("/sys/class/nvme/nvme9/subsysnqn", "nqn.2014-08.org.example:other");
+        assertEquals(3, host.pathsWithoutKey(current));
+
+        sys.unreadable.add("/sys/class/nvme");
+        assertThrows(CloudRuntimeException.class, () -> host.pathsWithoutKey(current),
+                "an unreadable controller list is an unknown count, not zero");
+
+        sys.unreadable.remove("/sys/class/nvme");
+        sys.unreadable.add("/sys/class/nvme/nvme2/subsysnqn");
+        assertThrows(CloudRuntimeException.class, () -> host.pathsWithoutKey(current),
+                "a listed controller whose NQN cannot be read is an unknown count, not skipped");
+        assertEquals(2, host.livePaths().size(), "paths() still skips it for its other callers (nvme1, nvme4)");
     }
 }

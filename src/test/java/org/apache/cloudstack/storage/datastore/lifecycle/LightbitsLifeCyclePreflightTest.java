@@ -318,4 +318,19 @@ class LightbitsLifeCyclePreflightTest {
         org.junit.jupiter.api.Assertions.assertThrows(com.cloud.utils.exception.CloudRuntimeException.class, () -> lc.cancelMaintain(null));
         org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of("pool up", "restart VMs"), calls);
     }
+
+    @Test
+    void inbandAuthNeedsTheClustersTrustedHostApi() {
+        stubProjectAccess();
+        stubNodes(3, 30_000_000_000L, 20_000_000_000L);
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/trustedHosts")).willReturn(aResponse().withStatus(501).withBody(
+                "{\"code\":12,\"message\":\"In-Band authentication and its related APIs are disabled\"}")));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1&inbandAuth=true", "jwt")));
+        assertTrue(e.getMessage().contains("InBandAuthentication feature flag"), e.getMessage());
+
+        wm.stubFor(get(urlEqualTo("/api/v2/projects/default/trustedHosts")).willReturn(aResponse().withStatus(200)
+                .withBody("{\"hosts\":[],\"nextOffset\":\"\"}")));
+        assertTrue(lc.preflight(dsInfos("lightbits://h/default?replicas=3&environment=cs1&inbandAuth=true", "jwt")).config.isInbandAuth());
+    }
 }

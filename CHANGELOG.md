@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- Pool option `inbandAuth=true`: NVMe in-band authentication (DH-HMAC-CHAP, host to cluster).
+  **Read INSTALL.md ("In-band authentication") before enabling enforcement on the cluster:
+  enabling it while a host has paths without its current key can freeze that host's VMs
+  and take the host Down.**
+  Each KVM host makes its own key (root-only, under `/etc/nvme/lightbits/`) and connects to
+  the pool's cluster with it through an nvme-cli configuration file, so the key never appears
+  on a command line. On host connect the management server registers the host as a trusted
+  host of the pool's project with that key; it keeps only a fingerprint and never logs the
+  key. Each host connect logs whether every host of the pool is registered and connects with
+  its key. Enforcement is cluster-wide, so the cluster admin turns it on only when every pool
+  on the cluster logs that its hosts are ready and every client outside CloudStack has its
+  own key; a pool whose hosts are trusted hosts of another project cannot log ready for
+  them, and the cluster admin checks that project's trusted hosts instead (INSTALL.md, step
+  5). Removing a host deletes the trusted host the plugin made, best effort: if the cluster
+  call fails, the removal still completes and the log asks to delete it by hand. Pool creation with the option fails, with the
+  `lbcli` command to run, when the cluster's InBandAuthentication feature flag is off.
 - Pool option `ipAcl=true`: each volume's IP ACL holds the data IPs of the hosts in its NQN
   ACL, so a connection to the volume must come from one of those addresses (the union over
   the volume's hosts; the cluster does not tie each NQN to its own address). The agent reports the
@@ -137,6 +153,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   well as 4.22.1.0.
 
 ### Known limitations
+- `inbandAuth` is one-way: the cluster checks the host, the host does not check the cluster
+  (no target secret). nvme-cli `connect-all` cannot take a controller key on its command line,
+  and the configuration file needs one entry per cluster port for it.
+- With `inbandAuth=true`, NVMe/TCP paths a host made before the option was on hold no key,
+  and paths made before its key was replaced hold the old one. They keep working until they
+  reconnect, and once the cluster admin turns in-band authentication on, that reconnect fails
+  (a volume with no other path then stops). The management log lists such hosts on each host
+  connect; put each one in maintenance and reconnect it (INSTALL.md, "In-band
+  authentication") before in-band authentication is turned on.
+- A host NQN can be a trusted host in only one project of a cluster. With `inbandAuth=true`
+  on pools of different projects of the same cluster, the first pool to register a host owns
+  its trusted host; the others cannot change it and log that the host is registered
+  elsewhere. Their volumes still work, because every pool registers the same per-host key.
+  Such a pool reports those hosts NOT ready; before enforcement the cluster admin checks the
+  other project's trusted hosts as INSTALL.md, step 5, describes.
+- After a removal of a host that did not go through, the host's grants and in-band
+  registration stay refused for 30 minutes from the removal mark's last renewal (the
+  removal renews it as it sweeps each volume, so count from when the removal stopped, as
+  the management log shows); a host connect after that registers it again. The mark is
+  renewed before each pool's volume listing and before each volume update; a single listing
+  of one pool's volumes that took more than 30 minutes would let it lapse, and a connect in
+  that window could register the host again in a pool already swept.
+- With `inbandAuth=true`, a host whose agent is older than this plugin version reports no key
+  and is not registered; the management log names it. Upgrade the agent on every host first.
+- With `inbandAuth=true`, a host that was already a trusted host of the project with
+  `authRequired=false` keeps that setting: the plugin sets its key but does not change it, so
+  the host may still connect without a key while enforcement is on. The management log names
+  such hosts; the cluster admin sets `--auth-required=true` when the staged rollout is done.
+- With `inbandAuth=true`, a host whose `/etc/nvme/hostnqn` no longer matches the NQN
+  CloudStack keeps for it is not registered (the volume ACLs name the kept NQN); the
+  management log names both and the pool is reported NOT ready until they are reconciled.
+- The agent refuses a key directory (`/etc/nvme/lightbits`) not owned by root, and replaces a
+  key or `auth.json` owned by another user, or a symbolic link, with a new key; the host is
+  then reported NOT ready for its pools until it reconnects and the new key is registered.
+  After a key change, a pool whose registration still holds the earlier key is reported NOT
+  ready for that host.
+- With `inbandAuth=true`, a host connect that waits more than 120 s for the host's in-band
+  lock (another connect of the same host holds it) leaves the key registration to the next
+  connect; the management log says so.
+- A trusted host whose `authRequired` the cluster does not report is listed as "authRequired
+  not reported" in the readiness log, as it may allow connections without a key.
+- Turning `inbandAuth` off leaves the trusted hosts on the cluster and the key on the hosts;
+  the cluster admin turns in-band authentication off first, or hosts keep needing their keys.
 - With `ipAcl=true`, a host whose agent is older than this plugin version does not report its
   data IP and is refused access to the pool's volumes (the attach fails and names the
   host). Upgrade the agent on every host before turning the option on.
@@ -148,7 +207,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   them), so a volume then attached on another host is refused by the cluster. Before turning
   it off, have the cluster admin set `--ip-acl ALLOW_ANY` on the pool's volumes.
 - CloudStack stores `cmk update storagepool details[0].<option>=...` without asking the
-  plugin, so a value other than `true` or `false` for `ipAcl` or `qosFromIops` is not refused
+  plugin, so a value other than `true` or `false` for `ipAcl`, `inbandAuth` or `qosFromIops` is not refused
   there. The pool's volume operations then fail, with the option named in the error, until
   the value is corrected.
 - With `ipAcl=true`, a volume whose NQN ACL holds a host the plugin has no data IP for (a

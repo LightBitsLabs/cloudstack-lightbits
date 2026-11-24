@@ -200,6 +200,20 @@ public class LightbitsPrimaryDataStoreLifeCycle implements PrimaryDataStoreLifeC
             LOG.info("Lightbits: pool default QoS policy '{}' validated for project '{}'", qosName, cfg.getProject());
         }
 
+        // inbandAuth registers every host as a trusted host of the project; the cluster refuses
+        // the trusted-host routes until its InBandAuthentication feature flag is on, so check
+        // now rather than warn at every host connect.
+        if (cfg.isInbandAuth()) {
+            try {
+                client.listTrustedHosts();
+            } catch (RuntimeException e) {
+                throw new IllegalArgumentException("inbandAuth=true needs the cluster's trusted-host API, which project '"
+                        + cfg.getProject() + "' cannot use at " + cfg.apiEndpoint() + ": " + e.getMessage()
+                        + ": a cluster admin must turn on the InBandAuthentication feature flag first"
+                        + " (lbcli enable feature-flag in-band-authentication)");
+            }
+        }
+
         // Node list (GET /api/v2/nodes) is readable by a project-scoped token and is this
         // pool's capacity source — the initial capacity here and every runtime stats cycle
         // (driver getStorageStats). It also feeds the replica-vs-node check. If it cannot be

@@ -1109,6 +1109,122 @@ public class LightbitsApiClient {
         return out;
     }
 
+    // ---------------- trusted hosts (in-band authentication) ----------------
+
+    /** A trusted host of this client's project: its name and host NQN. */
+    public static final class TrustedHost {
+        public final String name;
+        public final String hostNqn;
+        /** The trusted host's authRequired, or null when the cluster did not say. */
+        public final Boolean authRequired;
+
+        public TrustedHost(String name, String hostNqn) {
+            this(name, hostNqn, null);
+        }
+
+        public TrustedHost(String name, String hostNqn, Boolean authRequired) {
+            this.name = name;
+            this.hostNqn = hostNqn;
+            this.authRequired = authRequired;
+        }
+
+        @Override
+        public String toString() {
+            return name + " (" + hostNqn + ")";
+        }
+    }
+
+    /**
+     * The trusted hosts of this client's project ({@code GET /api/v2/projects/{p}/trustedHosts}).
+     * A project token sees only its own project's. Needs the cluster's InBandAuthentication
+     * feature flag; without it the cluster refuses the call.
+     */
+    public List<TrustedHost> listTrustedHosts() {
+        List<TrustedHost> out = new ArrayList<>();
+        String offset = "";
+        try {
+            while (true) {
+                String resp = execute("GET", projectColl("trustedHosts") + (offset.isEmpty() ? "" : "?offset=" + urlenc(offset)), null);
+                JsonNode root = mapper.readTree(resp);
+                for (JsonNode h : root.path("hosts")) {
+                    String name = h.path("name").asText(null);
+                    if (name != null) {
+                        // The cluster sends authRequired as a string ("true"/"false"); a boolean reads the same.
+                        String auth = h.path("authRequired").asText("");
+                        out.add(new TrustedHost(name, h.path("hostNqn").asText(null),
+                                "true".equalsIgnoreCase(auth) ? Boolean.TRUE : "false".equalsIgnoreCase(auth) ? Boolean.FALSE : null));
+                    }
+                }
+                String next = root.path("nextOffset").asText("");
+                if (next.isEmpty()) {
+                    return out;
+                }
+                if (next.equals(offset)) {
+                    throw new LightbitsApiException(Kind.UNKNOWN, "the trusted hosts list did not advance past offset " + offset
+                            + "; refusing to act on a partial list", null);
+                }
+                offset = next;
+            }
+        } catch (IOException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "malformed trusted hosts list response", e);
+        }
+    }
+
+    /** The trusted host of this project with the given host NQN, if there is one. */
+    public Optional<TrustedHost> findTrustedHostByNqn(String hostNqn) {
+        for (TrustedHost h : listTrustedHosts()) {
+            if (hostNqn.equals(h.hostNqn)) {
+                return Optional.of(h);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Create a trusted host that must authenticate ({@code authRequired} "true"). A host NQN can
+     * be a trusted host only once per cluster: the cluster answers 409 when the NQN (or the name)
+     * is taken, in this project or another one.
+     */
+    public void createTrustedHost(String name, String hostNqn, Map<String, String> labels) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("name", name);
+        body.put("hostNqn", hostNqn);
+        body.put("projectName", project);
+        body.put("authRequired", "true");
+        if (labels != null && !labels.isEmpty()) {
+            ArrayNode l = body.putArray("labels");
+            labels.forEach((k, v) -> l.addObject().put("key", k).put("value", v));
+        }
+        execute("POST", projectColl("trustedHosts"), body.toString());
+    }
+
+    /**
+     * Set a trusted host's host secret, with no target secret (one-way authentication):
+     * {@code PUT /api/v2/projects/{p}/trustedHostSecrets/{name}}. Idempotent. The secret is
+     * never logged: a failure reports the cluster's answer, which does not echo it.
+     */
+    public void setTrustedHostSecret(String name, String hostSecret) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("projectName", project);
+        body.put("name", name);
+        body.put("hostSecret", hostSecret);
+        body.put("targetSecretType", "Disabled");
+        execute("PUT", projectColl("trustedHostSecrets") + "/" + urlenc(name), body.toString());
+    }
+
+    /** Delete a trusted host of this project; false when it was not there. */
+    public boolean deleteTrustedHost(String name) {
+        try {
+            execute("DELETE", projectColl("trustedHosts") + "/" + urlenc(name), null);
+            return true;
+        } catch (LightbitsApiException e) {
+            if (e.getKind() == Kind.NOT_FOUND) {
+                return false;
+            }
+            throw e;
+        }
+    }
+
     // ---------------- internals ----------------
 
     private String projectPath(String kind, String uuid) {

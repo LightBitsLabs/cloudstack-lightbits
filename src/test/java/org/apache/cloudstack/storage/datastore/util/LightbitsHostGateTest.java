@@ -221,6 +221,73 @@ class LightbitsHostGateTest {
     }
 
     @Test
+    void aRemovalMarkCountsWhileARemovalCanBeActiveAndIsNeverClearedByAConnect() {
+        long host = 5;
+        java.util.Map<String, String> details = new java.util.concurrent.ConcurrentHashMap<>(java.util.Map.of("nvme.hostnqn", "nqn.h"));
+        com.cloud.host.dao.HostDetailsDao dao = (com.cloud.host.dao.HostDetailsDao) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {com.cloud.host.dao.HostDetailsDao.class}, (proxy, m, args) -> {
+                    if ("findDetail".equals(m.getName()) && Long.valueOf(host).equals(args[0])) {
+                        String v = details.get((String) args[1]);
+                        return v == null ? null : new com.cloud.host.DetailVO(host, (String) args[1], v);
+                    }
+                    throw new UnsupportedOperationException(m.getName());
+                });
+        java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong(1_000_000_000L);
+        LightbitsHostGate.RemovingCheck removing = LightbitsHostGate.removingCheck(dao, "nvme.hostnqn", now::get);
+
+        assertFalse(removing.isRemoving(host));
+        details.put(LightbitsHostGate.REMOVING_DETAIL, LightbitsHostGate.markValue(now.get()));   // a removal begins
+        now.addAndGet(LightbitsHostGate.REMOVAL_LOCK_SECONDS * 1000L + 60_000);
+        assertTrue(removing.isRemoving(host), "still counts after the removal's longest lock wait");
+        now.addAndGet(LightbitsHostGate.MARK_HOLD_MILLIS);
+        assertFalse(removing.isRemoving(host), "a removal that did not go through stops counting on its own");
+        details.put(LightbitsHostGate.REMOVING_DETAIL, LightbitsHostGate.markValue(now.get()));   // a new attempt renews it
+        assertTrue(removing.isRemoving(host), "a renewed mark counts again: nothing ever deletes it under a removal");
+        details.put(LightbitsHostGate.REMOVING_DETAIL, "true");
+        assertFalse(removing.isRemoving(host), "a mark from an earlier version has no time and does not count");
+        details.remove("nvme.hostnqn");
+        assertTrue(removing.isRemoving(host), "details gone: removed");
+    }
+
+    @Test
+    void aRegistrationThatFinishesAfterTheRemovalAndTheDetailDeletionSeesTheHostRemoved() throws Exception {
+        long host = 4;
+        java.util.Map<String, String> details = new java.util.concurrent.ConcurrentHashMap<>(java.util.Map.of("nvme.hostnqn", "nqn.h"));
+        com.cloud.host.dao.HostDetailsDao dao = (com.cloud.host.dao.HostDetailsDao) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {com.cloud.host.dao.HostDetailsDao.class}, (proxy, m, args) -> {
+                    if ("findDetail".equals(m.getName()) && Long.valueOf(host).equals(args[0])) {
+                        String v = details.get((String) args[1]);
+                        return v == null ? null : new com.cloud.host.DetailVO(host, (String) args[1], v);
+                    }
+                    throw new UnsupportedOperationException(m.getName());
+                });
+        LightbitsHostGate.RemovingCheck removing = LightbitsHostGate.removingCheck(dao, "nvme.hostnqn");
+        assertFalse(removing.isRemoving(host), "a connected host is not being removed");
+
+        java.util.Set<String> trusted = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        CountDownLatch removed = new CountDownLatch(1);
+        Thread registration = new Thread(() -> {
+            try {
+                removed.await(5, TimeUnit.SECONDS);   // paused until the removal and the detail deletion are done
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            trusted.add("nqn.h");                     // the in-flight registration writes
+            if (removing.isRemoving(host)) {          // and checks after the write
+                trusted.remove("nqn.h");
+            }
+        });
+        registration.start();
+        details.put(LightbitsHostGate.REMOVING_DETAIL, LightbitsHostGate.markValue(System.currentTimeMillis()));   // removal: mark,
+        assertTrue(removing.isRemoving(host));
+        trusted.remove("nqn.h");                                  // sweep,
+        details.clear();                                          // then CloudStack deletes the details
+        removed.countDown();
+        registration.join(5000);
+        assertTrue(trusted.isEmpty(), "the removed host does not stay trusted");
+    }
+
+    @Test
     void aGrantReadsItsHostsIpsUnderTheLocksSoItsOwnRefreshCannotLeaveItOut() throws Exception {
         // Host B is granted while its own refresh moves it from 10.0.0.1 to 10.0.0.2, and host A
         // on the volume has no known IPs (union unknown: each writer only adds its host's IPs).

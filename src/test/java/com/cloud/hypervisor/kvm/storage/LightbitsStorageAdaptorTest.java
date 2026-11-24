@@ -19,6 +19,7 @@
 package com.cloud.hypervisor.kvm.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -317,5 +318,18 @@ class LightbitsStorageAdaptorTest {
         poolA = pool(POOL_A, "10.0.0.1");
         assertThrows(CloudRuntimeException.class, () -> adaptor.getPhysicalDisk(VOL, poolA));
         assertEquals(2, sys.connects("10.0.0.1"), "a pool that was removed and added again is tried at once");
+    }
+
+    @Test
+    void onlyAPoolWithInbandAuthConnectsWithTheHostKey(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
+        LightbitsStorageAdaptor a = new LightbitsStorageAdaptor(new LightbitsNvmeHost(sys), new LightbitsHostKey(tmp.resolve("lightbits"), tmp,
+                (Integer) java.nio.file.Files.getAttribute(tmp, "unix:uid")));
+        assertNull(a.authConfig(poolA));
+        assertFalse(java.nio.file.Files.exists(tmp.resolve("lightbits")), "no key is made for a pool without the option");
+        KVMStoragePool auth = a.createStoragePool(POOL_B, "10.0.1.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.1.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true"), true);
+        assertEquals(tmp.resolve("lightbits").resolve("auth.json"), a.authConfig(auth));
+        assertTrue(java.nio.file.Files.exists(tmp.resolve("lightbits").resolve("dhchap-key")));
     }
 }
