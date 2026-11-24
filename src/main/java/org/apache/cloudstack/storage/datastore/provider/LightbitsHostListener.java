@@ -367,7 +367,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
         }
         setHostDetail(hostId, LightbitsTrustedHosts.KEYLESS_DETAIL,
                 answer.getKeylessPaths() == null ? null : String.valueOf(answer.getKeylessPaths()));
-        setHostDetail(hostId, LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, answer.isKeysPossiblyExposed() ? "true" : null);
+        // only a report changes the stored state: a host whose check failed keeps its warning
+        if (answer.getKeysPossiblyExposed() != null) {
+            setHostDetail(hostId, LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, answer.isKeysPossiblyExposed() ? "true" : null);
+        }
         if (answer.isKeysPossiblyExposed()) {
             LOG.warn("Lightbits: host {} reports that its in-band authentication key files were readable by other users"
                     + " than root before they were made root-only again; the keys may have been copied. Rotate them: raise"
