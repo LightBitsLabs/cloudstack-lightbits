@@ -152,4 +152,23 @@ class LightbitsRevocationsTest {
         assertEquals(List.of(nqn), LightbitsRevocations.pending(writesOnly, pool));
         LightbitsRevocations.clear(dao(), pool, nqn);
     }
+
+    @Test
+    void eachPassStartsOneRecordFurther() {
+        long pool = 9107L;
+        StoragePoolDetailsDao dao = dao();
+        LightbitsRevocations.record(dao, pool, "nqn.2014-08.org.nvmexpress:uuid:rotate-a");
+        LightbitsRevocations.record(dao, pool, "nqn.2014-08.org.nvmexpress:uuid:rotate-b");
+        java.util.List<String> first = new java.util.ArrayList<>();
+        LightbitsHostGate.Locker busy = (name, seconds, work) -> {
+            first.add(name);
+            return false;
+        };
+        LightbitsRevocations.retry(dao, null, "nvme.hostnqn", pool, null, null, busy);
+        String a = first.get(0);
+        first.clear();
+        LightbitsRevocations.retry(dao, null, "nvme.hostnqn", pool, null, null, busy);
+        assertTrue(!first.get(0).equals(a), "the next pass starts with the other record");
+        assertEquals(2, first.size(), "every record gets its turn while the budget lasts");
+    }
 }
