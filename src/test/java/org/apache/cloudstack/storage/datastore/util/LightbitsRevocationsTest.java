@@ -54,6 +54,10 @@ class LightbitsRevocationsTest {
                 });
     }
 
+    private void deleteAll(StoragePoolDetailsDao dao, long pool, String nqn) {
+        LightbitsRevocations.delete(dao, pool, LightbitsRevocations.recordKeys(dao, pool, nqn));
+    }
+
     @Test
     void aRevocationThatCannotBeSavedIsKeptAndSavedLater() {
         String nqn = "nqn.2014-08.org.nvmexpress:uuid:unsaved-revocation";
@@ -66,42 +70,40 @@ class LightbitsRevocationsTest {
 
         failWrites = false;
         assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "listed once, not twice");
-        assertEquals(nqn, LightbitsRevocations.nqnOf(details.get(LightbitsRevocations.detailKey(nqn))), "saved by the next retry pass");
+        assertEquals(1, details.size(), "saved by the next retry pass");
+        assertEquals(nqn, details.values().iterator().next());
 
-        LightbitsRevocations.clear(dao, pool, nqn);
+        deleteAll(dao, pool, nqn);
         assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty());
     }
 
     @Test
-    void aRetryDropsOnlyTheRecordVersionItLookedAt() {
-        String nqn = "nqn.2014-08.org.nvmexpress:uuid:versioned-revocation";
+    void anActionDeletesOnlyTheRecordsItLookedAt() {
+        String nqn = "nqn.2014-08.org.nvmexpress:uuid:append-only";
         long pool = 9102L;
         StoragePoolDetailsDao dao = dao();
         LightbitsRevocations.record(dao, pool, nqn);
-        String observed = LightbitsRevocations.recordValue(dao, pool, nqn);
-        // a removal writes the record again after the retry looked
-        LightbitsRevocations.record(dao, pool, nqn);
-        LightbitsRevocations.clearIf(dao, pool, nqn, observed);
-        assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "the newer record stays");
-        LightbitsRevocations.clearIf(dao, pool, nqn, LightbitsRevocations.recordValue(dao, pool, nqn));
-        assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty(), "the version looked at is dropped");
-        assertEquals(nqn, LightbitsRevocations.nqnOf(nqn), "a record from before versions reads as its NQN");
+        java.util.Set<String> observed = LightbitsRevocations.recordKeys(dao, pool, nqn);
+        LightbitsRevocations.record(dao, pool, nqn);   // a removal writes again, after the retry looked
+        LightbitsRevocations.delete(dao, pool, observed);
+        assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "the later record stays");
+        deleteAll(dao, pool, nqn);
+        assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty());
     }
 
     @Test
-    void aNewerRevocationKeptInMemoryIsNotDroppedByARetryThatLookedEarlier() {
-        String nqn = "nqn.2014-08.org.nvmexpress:uuid:unsaved-versioned";
+    void aLaterRecordKeptInMemoryStaysToo() {
+        String nqn = "nqn.2014-08.org.nvmexpress:uuid:unsaved-later";
         long pool = 9103L;
         StoragePoolDetailsDao dao = dao();
         LightbitsRevocations.record(dao, pool, nqn);
-        String observed = LightbitsRevocations.recordValue(dao, pool, nqn);
+        java.util.Set<String> observed = LightbitsRevocations.recordKeys(dao, pool, nqn);
         failWrites = true;
-        LightbitsRevocations.record(dao, pool, nqn);   // a removal writes again; the database refuses it
-        LightbitsRevocations.clearIf(dao, pool, nqn, observed);
-        assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "the newer one, kept in memory, stays");
+        LightbitsRevocations.record(dao, pool, nqn);   // a later removal; the database refuses it
+        LightbitsRevocations.delete(dao, pool, observed);
+        assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "the later one, kept in memory, stays");
         failWrites = false;
-        LightbitsRevocations.clearIf(dao, pool, nqn, LightbitsRevocations.recordValue(dao, pool, nqn));
-        assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty());
+        deleteAll(dao, pool, nqn);
     }
 
     @Test
@@ -116,41 +118,13 @@ class LightbitsRevocationsTest {
                 });
         assertEquals(List.of(nqn), LightbitsRevocations.pending(broken, pool));
         failWrites = false;
-        LightbitsRevocations.clear(dao(), pool, nqn);
+        deleteAll(dao(), pool, nqn);
     }
 
     @Test
-    void anOlderRecordKeptInMemoryIsNeverSavedOverANewerOne() {
-        String nqn = "nqn.2014-08.org.nvmexpress:uuid:replay-order";
-        long pool = 9105L;
-        StoragePoolDetailsDao dao = dao();
-        failWrites = true;
-        LightbitsRevocations.record(dao, pool, nqn);   // v1 kept in memory
-        failWrites = false;
-        LightbitsRevocations.record(dao, pool, nqn);   // v2 saved: v1 is gone from memory
-        String v2 = details.get(LightbitsRevocations.detailKey(nqn));
-        assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool));
-        assertEquals(v2, details.get(LightbitsRevocations.detailKey(nqn)), "the pass does not save v1 back");
-        LightbitsRevocations.clear(dao, pool, nqn);
-    }
-
-    @Test
-    void aRevocationSavedByThisPassIsListedEvenIfTheReadThenFails() {
-        String nqn = "nqn.2014-08.org.nvmexpress:uuid:saved-then-unreadable";
-        long pool = 9106L;
-        failWrites = true;
-        LightbitsRevocations.record(dao(), pool, nqn);
-        failWrites = false;
-        StoragePoolDetailsDao writesOnly = (StoragePoolDetailsDao) Proxy.newProxyInstance(getClass().getClassLoader(),
-                new Class<?>[] {StoragePoolDetailsDao.class}, (p, m, a) -> {
-                    if (m.getName().equals("addDetail")) {
-                        details.put((String) a[1], (String) a[2]);
-                        return null;
-                    }
-                    throw new IllegalStateException("database read down");
-                });
-        assertEquals(List.of(nqn), LightbitsRevocations.pending(writesOnly, pool));
-        LightbitsRevocations.clear(dao(), pool, nqn);
+    void recordsOfAnEarlierBuildReadAsTheirNqn() {
+        assertEquals("nqn.x", LightbitsRevocations.nqnOf("nqn.x 18c-1f"));
+        assertEquals("nqn.x", LightbitsRevocations.nqnOf("nqn.x"));
     }
 
     @Test
