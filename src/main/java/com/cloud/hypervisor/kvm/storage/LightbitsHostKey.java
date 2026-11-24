@@ -229,8 +229,8 @@ public class LightbitsHostKey {
         }
     }
 
-    /** Lightbits NVMe/TCP paths on this host that were connected without a key. */
-    public static int keylessPaths() {
-        return new LightbitsNvmeHost().keylessPaths();
+    /** Lightbits NVMe/TCP paths on this host that do not hold the given (current) key: none, or an old one. */
+    public static int pathsWithoutKey(String currentKey) {
+        return new LightbitsNvmeHost().pathsWithoutKey(currentKey);
     }
 }

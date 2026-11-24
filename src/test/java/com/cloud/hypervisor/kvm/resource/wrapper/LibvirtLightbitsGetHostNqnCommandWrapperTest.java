@@ -184,7 +184,7 @@ class LibvirtLightbitsGetHostNqnCommandWrapperTest {
             }
 
             @Override
-            protected int keylessPaths() {
+            protected int pathsWithoutKey(String currentKey) {
                 return 2;
             }
         };

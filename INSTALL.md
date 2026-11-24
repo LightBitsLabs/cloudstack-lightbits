@@ -339,7 +339,8 @@ this order:
 4. Watch the management log. Each host connect logs, for each pool with the option, either
    `the <n> host(s) of pool <id> are ready for in-band authentication` or `the hosts of pool
    <id> are NOT ready`, with the hosts that are not registered and those with NVMe/TCP paths
-   made before the option was on (they hold no key). Move each of those hosts onto keyed
+   that do not hold the host's current key: paths made before the option was on hold none,
+   and paths made before a key was replaced hold an old one. Move each of those hosts onto keyed
    paths: put it in maintenance (its VMs migrate away), disconnect it from the cluster's
    subsystem (`nvme disconnect -n <subsystem NQN>`, the `nqn.2016-01.com.lightbitslabs:`
    entry of `nvme list-subsys`), and cancel maintenance; its next connects use the key.
@@ -355,9 +356,13 @@ A path that fails authentication shows in the host's kernel log, and nvme-cli re
 wording is nvme-cli's, the cause is DH-HMAC-CHAP). Check a host's registration with
 `lbcli list trusted-hosts --project-name=<project>`.
 
-To rotate a host's key, delete `/etc/nvme/lightbits/dhchap-key` on the host and reconnect it
-in CloudStack: a new key is made and registered. Paths that are already connected keep the
-old key until they reconnect, so move the host onto new paths as in step 4.
+To rotate a host's key, put the host in maintenance (its VMs migrate away), delete
+`/etc/nvme/lightbits/dhchap-key`, disconnect it from the cluster's subsystem as in step 4 and
+cancel maintenance: a new key is made and registered, and the new paths hold it. Do not
+replace the key of a host that keeps running VMs while enforcement is on: its connected
+paths keep the old key, which the cluster no longer accepts, so their next reconnect fails
+and a volume with no other path stops (its I/O waits for a path that never comes back). The
+readiness line lists such a host until its paths hold the new key.
 
 To turn the option off, the cluster admin first turns enforcement off
 (`lbcli disable in-band-auth`); then remove the detail. The trusted hosts stay on the

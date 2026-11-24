@@ -283,7 +283,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
     /**
      * Register the host's in-band authentication key as a trusted host in the pool's project
      * and keep its fingerprint (host detail lightbits.inband.<pool id>) and the agent's count of
-     * keyless paths, then log whether every host of the pool is ready for the cluster admin to
+     * paths without its current key, then log whether every host of the pool is ready for the cluster admin to
      * turn in-band authentication on. Failures are logged and retried at the next connect.
      */
     private void registerTrustedHost(long hostId, long poolId, String nqn, LightbitsGetHostNqnAnswer answer) {
@@ -352,7 +352,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
 
     /**
      * One log line per host connect on whether the pool's hosts are ready for in-band
-     * authentication: every host of the pool registered, and none with paths that hold no key.
+     * authentication: every host of the pool registered, and none with paths that do not hold its current key.
      * This covers only this pool's hosts; enforcement is cluster-wide, so the log says so.
      */
     private void reportInbandReadiness(long poolId) {
@@ -383,8 +383,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     + " pools, projects and clients outside CloudStack", refs.size(), poolId, optionalNote);
         } else {
             LOG.warn("Lightbits: the hosts of pool {} are NOT ready for in-band authentication; do not turn it on yet. Not"
-                    + " registered: {}. With paths that hold no key (they fail at their next reconnect once it is on; put"
-                    + " the host in maintenance and reconnect it, see INSTALL.md): {}.{}", poolId, unregistered, keyless,
+                    + " registered: {}. With paths that do not hold the host's current key, none or an old one (they fail"
+                    + " at their next reconnect once it is on; put the host in maintenance, disconnect its Lightbits paths"
+                    + " and cancel maintenance, see INSTALL.md): {}.{}", poolId, unregistered, keyless,
                     optionalNote);
         }
     }

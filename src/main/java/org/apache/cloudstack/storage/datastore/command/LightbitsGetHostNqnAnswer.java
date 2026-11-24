@@ -33,7 +33,10 @@ public class LightbitsGetHostNqnAnswer extends Answer {
      */
     @LogLevel(Log4jLevel.Off)
     private String dhchapKey;
-    /** Lightbits paths of this host that hold no key; null when not asked or not known. */
+    /**
+     * Lightbits paths of this host that do not hold its current key (none, or an old one); null
+     * when not asked or not known. The name stays for compatibility with agents of this version.
+     */
     private Integer keylessPaths;
     /** Why the key could not be prepared, when the command asked for it and that failed. */
     private String inbandAuthError;

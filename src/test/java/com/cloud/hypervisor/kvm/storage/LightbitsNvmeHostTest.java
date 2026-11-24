@@ -446,14 +446,18 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
-    void pathsWithoutAKeyAreCounted() {
+    void pathsWithoutTheCurrentKeyAreCounted() {
+        String current = "DHHC-1:00:current:";
         sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");
         sys.controller("nvme2", "traddr=10.0.0.2,trsvcid=4420", "live");
         sys.controller("nvme3", "traddr=10.0.0.3,trsvcid=4420", "connecting");
+        sys.controller("nvme4", "traddr=10.0.0.1,trsvcid=4420", "live");
         sys.files.put("/sys/class/nvme/nvme1/dhchap_secret", "none");
-        sys.files.put("/sys/class/nvme/nvme2/dhchap_secret", "DHHC-1:00:abc:");
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_secret", current + "\n");
         // nvme3: a kernel without the attribute counts as keyless
+        // nvme4: a key from before the key file was replaced (rotation, or the file deleted)
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_secret", "DHHC-1:00:old:");
         sys.files.put("/sys/class/nvme/nvme9/subsysnqn", "nqn.2014-08.org.example:other");
-        assertEquals(2, host.keylessPaths());
+        assertEquals(3, host.pathsWithoutKey(current));
     }
 }

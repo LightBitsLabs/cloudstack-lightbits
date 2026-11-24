@@ -151,9 +151,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `inbandAuth` is one-way: the cluster checks the host, the host does not check the cluster
   (no target secret). nvme-cli `connect-all` cannot take a controller key on its command line,
   and the configuration file needs one entry per cluster port for it.
-- With `inbandAuth=true`, NVMe/TCP paths a host made before the option was on hold no key.
-  They keep working until they reconnect, and once the cluster admin turns in-band
-  authentication on, that reconnect fails. The management log lists such hosts on each host
+- With `inbandAuth=true`, NVMe/TCP paths a host made before the option was on hold no key,
+  and paths made before its key was replaced hold the old one. They keep working until they
+  reconnect, and once the cluster admin turns in-band authentication on, that reconnect fails
+  (a volume with no other path then stops). The management log lists such hosts on each host
   connect; put each one in maintenance and reconnect it (INSTALL.md, "In-band
   authentication") before in-band authentication is turned on.
 - A host NQN can be a trusted host in only one project of a cluster. With `inbandAuth=true`

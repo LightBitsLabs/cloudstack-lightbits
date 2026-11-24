@@ -45,7 +45,7 @@ public class LightbitsGetHostNqnCommand extends Command {
 
     /**
      * When true the agent makes this host's in-band authentication key if it has none, and
-     * reports it with the number of Lightbits paths that hold no key. An older agent ignores it.
+     * reports it with the number of Lightbits paths that do not hold that key. An older agent ignores it.
      */
     private boolean inbandAuth;
 

@@ -44,7 +44,7 @@ import org.apache.cloudstack.storage.datastore.client.LightbitsApiException;
 public final class LightbitsTrustedHosts {
     /** Host detail prefix: the fingerprint of the key registered for the pool. */
     public static final String DETAIL_PREFIX = "lightbits.inband.";
-    /** Host detail: how many Lightbits paths of the host hold no key, as the agent last reported. */
+    /** Host detail: how many Lightbits paths of the host do not hold its current key (none, or an old one), as the agent last reported. */
     public static final String KEYLESS_DETAIL = "lightbits.keylesspaths";
 
     private LightbitsTrustedHosts() {

@@ -328,15 +328,18 @@ class LightbitsNvmeHost {
     }
 
     /**
-     * Lightbits paths that hold no in-band authentication key ({@code dhchap_secret} reads
-     * "none", or the kernel has no such attribute). Once the cluster turns in-band
-     * authentication on, such a path fails at its next reconnect.
+     * Lightbits paths that do not hold this host's current in-band authentication key: no key
+     * ({@code dhchap_secret} reads "none", or the kernel has no such attribute) or another key,
+     * such as one from before the key was rotated or its file deleted. The registered key is the
+     * current one, so once the cluster turns in-band authentication on, such a path fails at its
+     * next reconnect, and a volume reachable only through it hangs. The secrets are compared in
+     * memory and never logged.
      */
-    int keylessPaths() {
+    int pathsWithoutKey(String currentKey) {
         int n = 0;
         for (Path p : paths()) {
             String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_secret");
-            if (secret == null || secret.isEmpty() || "none".equals(secret)) {
+            if (secret == null || !secret.trim().equals(currentKey)) {
                 n++;
             }
         }

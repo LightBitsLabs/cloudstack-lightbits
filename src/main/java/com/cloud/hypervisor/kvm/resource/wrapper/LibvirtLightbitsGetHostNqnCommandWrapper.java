@@ -81,7 +81,7 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
 
     /**
      * This host's in-band authentication key (made if missing) and how many of its Lightbits
-     * paths hold no key. A failure is reported in the answer, not as a failed command: the
+     * paths do not hold that key (none, or an old one). A failure is reported in the answer, not as a failed command: the
      * NQN and data IPs are still good.
      */
     void inbandAuth(LightbitsGetHostNqnAnswer answer) {
@@ -95,9 +95,9 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
         }
         Integer keyless;
         try {
-            keyless = keylessPaths();
+            keyless = pathsWithoutKey(key);
         } catch (RuntimeException e) {
-            LOG.warn("Lightbits: could not count this host's NVMe/TCP paths without a key: {}", e.getMessage());
+            LOG.warn("Lightbits: could not count this host's NVMe/TCP paths without its current key: {}", e.getMessage());
             keyless = null;
         }
         answer.withInbandAuth(key, keyless, null);
@@ -107,8 +107,9 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
         return new com.cloud.hypervisor.kvm.storage.LightbitsHostKey();
     }
 
-    protected int keylessPaths() {
-        return com.cloud.hypervisor.kvm.storage.LightbitsHostKey.keylessPaths();
+    /** Paths that hold no key or an old one; reported in the answer's keylessPaths field. */
+    protected int pathsWithoutKey(String currentKey) {
+        return com.cloud.hypervisor.kvm.storage.LightbitsHostKey.pathsWithoutKey(currentKey);
     }
 
     /**
