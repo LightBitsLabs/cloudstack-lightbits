@@ -253,6 +253,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 } else {
                     LightbitsGetHostNqnAnswer report = (LightbitsGetHostNqnAnswer) answer;
                     String hostNqn = hasNqn ? existing.getValue() : nqn;
+                    // the scope the host's keys for this pool now have (none from an agent without scopes)
+                    setHostDetail(hostId, LightbitsTrustedHosts.perPool(HOST_SCOPE_DETAIL, poolId),
+                            report.getKeyScope() == null ? HOST_WIDE : report.getKeyScope());
                     registerTrustedHost(hostId, poolId, hostNqn, report);
                     // An agent that does not know scopes answers without one: its keys are host-wide and
                     // shared by every in-band pool of the host, whatever cluster each is on.
@@ -681,11 +684,28 @@ public class LightbitsHostListener implements HypervisorHostListener {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig c = poolConfigOrNull(other);
             // only pools of the same cluster share the rotated keys; other clusters keep theirs
             // the other pool's kept scope, not a fresh cluster read: the scope its agent was given
-            if (c != null && c.isInbandAuth() && (anyScope || java.util.Objects.equals(scope, keptScope(other)))) {
+            if (c != null && c.isInbandAuth() && (anyScope || java.util.Objects.equals(scope, hostScope(hostId, other)))) {
                 out.put(other, c.getInbandKeyGeneration());
             }
         }
         return out;
+    }
+
+    /** Host detail (per pool): the key scope this host was last given for the pool; {@value #HOST_WIDE} for none. */
+    static final String HOST_SCOPE_DETAIL = "lightbits.keyscope";
+    static final String HOST_WIDE = "host-wide";
+
+    /**
+     * The key scope the host uses for a pool: the one recorded at the host's last connect of that
+     * pool (null for its host-wide keys), else the pool's kept scope. Scopes are per host, since
+     * one host may have connected a pool before the pool's scope was known.
+     */
+    private String hostScope(long hostId, long poolId) {
+        String recorded = value(hostId, LightbitsTrustedHosts.perPool(HOST_SCOPE_DETAIL, poolId));
+        if (recorded != null) {
+            return HOST_WIDE.equals(recorded) ? null : recorded;
+        }
+        return keptScope(poolId);
     }
 
     /** The pool's key scope as kept, without reading the cluster; null when not known yet. */
@@ -705,10 +725,21 @@ public class LightbitsHostListener implements HypervisorHostListener {
         String ctrlFp = answer.getDhchapCtrlKey() == null ? null : LightbitsTrustedHosts.fingerprint(answer.getDhchapCtrlKey());
         for (Long other : otherPoolGenerations(hostId, poolId, scope, anyScope).keySet()) {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig c = poolConfigOrNull(other);
-            if (c != null && c.isInbandAuthTwoWay() && ctrlFp == null) {
-                continue;   // this report has no controller key: the pool's own connect registers it
-            }
             String known = value(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other));
+            if (c != null && c.isInbandAuthTwoWay() && ctrlFp == null) {
+                // this report has no controller key, so the pool cannot be registered from it; if the
+                // host key changed, its records are stale: the pool reports the host not ready until
+                // its own connect registers both keys
+                if (known != null && !known.equals(fp)) {
+                    LOG.info("Lightbits: host {} has a new in-band key; pool {} (two-way) counts it not ready until its next"
+                            + " connect", hostId, other);
+                    clearRegistration(hostId, other);
+                    setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other), fp);
+                    setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYLESS_DETAIL, other), null);
+                    reportInbandReadiness(other);
+                }
+                continue;
+            }
             String knownCtrl = value(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, other));
             if (known != null && !known.equals(fp) || ctrlFp != null && knownCtrl != null && !knownCtrl.equals(ctrlFp)) {
                 LOG.info("Lightbits: host {} has new in-band keys; registering them with pool {} too", hostId, other);

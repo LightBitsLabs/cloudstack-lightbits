@@ -273,22 +273,29 @@ public class LightbitsHostKey {
         if (untrusted) {
             // the clusters that had keys or marks here: after the cleanup each makes its own new keys,
             // never copies of host-wide keys made again in the meantime
+            // (only files that exist: a scope with none was never used and keeps its first seeding)
             java.util.Set<String> scopes = new java.util.HashSet<>();
             for (Path f : files) {
                 java.util.regex.Matcher m = SCOPED_FILE.matcher(f.getFileName().toString());
-                if (m.matches()) {
+                if (m.matches() && (Files.exists(f, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(f))) {
                     scopes.add(m.group(1));
                 }
             }
+            // The new marks are in place before anything is deleted (an existing mark, even a link,
+            // is replaced by a root-owned file), so a cleanup cut short never leaves a used scope
+            // without its mark.
+            java.util.Set<Path> marks = new java.util.HashSet<>();
+            for (String sfx : scopes) {
+                Path mark = dir.resolve("own-keys" + sfx);
+                Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
+                Files.move(tmp, mark, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                marks.add(mark);
+            }
             for (Path f : files) {
-                if (Files.deleteIfExists(f)) {
+                if (!marks.contains(f) && Files.deleteIfExists(f)) {
                     LOG.warn("Lightbits: removed {}: a key, configuration or mark file was not a file owned by root, so new"
                             + " in-band authentication keys are made (register them by reconnecting the host)", f);
                 }
-            }
-            for (String sfx : scopes) {
-                Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
-                Files.move(tmp, dir.resolve("own-keys" + sfx), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             }
         } else if (wider) {
             // Making the files root-only again does not take back a copy someone made while they
@@ -358,11 +365,13 @@ public class LightbitsHostKey {
         if (key == null) {
             return null;
         }
-        writePrivate(own, key + "\n");
+        // the exposure mark goes first: if it cannot be written, no copy exists and the next
+        // attempt does both again
         if (Files.exists(legacy.rotationMarker(), LinkOption.NOFOLLOW_LINKS) && !keysPossiblyExposedUnlocked()) {
             Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
             Files.move(tmp, rotationMarker(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         }
+        writePrivate(own, key + "\n");
         LOG.info("Lightbits: {} starts as a copy of {} (the host's existing paths hold it); it becomes its own at the next"
                 + " rotation", own, legacyFile);
         return key;

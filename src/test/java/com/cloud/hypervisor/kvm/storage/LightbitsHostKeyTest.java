@@ -339,6 +339,18 @@ class LightbitsHostKeyTest {
     }
 
     @Test
+    void aCleanupMarksOnlyClustersThatHadFiles() throws IOException {
+        key.ensure();
+        key.ensureCtrlKey();
+        LightbitsHostKey a = key.forScope(SUB);   // never used: no files of its own
+        Path elsewhere = Files.writeString(tmp.resolve("planted.json"), LightbitsHostKey.config(NQN, HOST_ID, KNOWN));
+        Files.delete(a.configFile().getParent().resolve("auth.json"));
+        Files.createSymbolicLink(a.configFile().getParent().resolve("auth.json"), elsewhere);
+        a.ensure();   // the cleanup runs from the unused cluster's own request
+        assertFalse(Files.exists(a.ownMarker()), "a cluster that had no files is not marked: it keeps its first seeding");
+    }
+
+    @Test
     void anExposureMarkCoversEveryClustersKeys() throws IOException {
         key.ensure();
         LightbitsHostKey a = key.forScope(SUB);

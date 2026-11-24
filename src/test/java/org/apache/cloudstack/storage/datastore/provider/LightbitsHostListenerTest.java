@@ -702,4 +702,23 @@ class LightbitsHostListenerTest {
         assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)));
         assertTrue(poolDetails.containsValue(NQN), "recorded");
     }
+
+    @Test
+    void anotherPoolIsMatchedByTheScopeThisHostWasGivenForIt() throws Exception {
+        String sub = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+        poolDetails.put("lightbits.subsystemnqn", sub);
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
+                ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeyScope(((LightbitsGetHostNqnCommand) cmd).getKeyScope())
+                : new Answer(cmd);
+        long other = POOL + 1;
+        refs.add(new StoragePoolHostVO(other, HOST, ""));
+        String otherKey = LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other);
+        // this host connected the other pool before its scope was known: its keys there are host-wide
+        putDetail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other), "host-wide");
+        putDetail(otherKey, "fingerprint-of-old-key");
+        listener.hostConnect(HOST, POOL);
+        assertEquals("fingerprint-of-old-key", detail(otherKey), "scoped keys are not registered with a pool this host keys host-wide");
+        assertEquals(sub, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", POOL)), "the scope this connect used is recorded");
+    }
 }
