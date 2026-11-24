@@ -420,16 +420,27 @@ each host (the host key, and the controller key for two-way) and works with enfo
 
 A rolling rotation of all hosts of a cluster, one at a time. `prepare hostformaintenance`
 returns before the VMs have moved, so wait until the host runs none before the reconnect, and
-until it is Up again after it:
+until it is Up again after it. Before cancelling maintenance, check that the host's new keys
+are registered: the loop stops for that.
 ```bash
 up() { [ "$(cmk list hosts id=$1 filter=state | jq -r '.host[0].state')" = Up ]; }
 for h in $(cmk list hosts clusterid=<cluster-id> type=Routing filter=id | jq -r '.host[].id'); do
   cmk prepare hostformaintenance id=$h
   until [ "$(cmk list virtualmachines hostid=$h listall=true filter=id | jq '.count // 0')" = 0 ]; do sleep 10; done
   cmk reconnect host id=$h; sleep 10; until up $h; do sleep 10; done
+  read -p "Host $h: check the management log, then press Enter to cancel maintenance "
   cmk cancel hostmaintenance id=$h; until up $h; do sleep 10; done
 done
 ```
+At the stop, the management log of that reconnect must show "host <id> rotated its in-band
+authentication keys" and, in the readiness line of each of its pools, the host neither under
+"Not registered" nor under the hosts still on an older key generation. If it is listed there,
+keep the host in maintenance and reconnect it again (a failed registration is retried at each
+connect) until it is not. If the host's trusted host belongs to another project, the plugin
+cannot set the new keys there: keep the host in maintenance until the cluster admin has set
+them, as described next, on every Lightbits cluster where that trusted host exists. Only then
+cancel maintenance; a host back in service with unregistered keys cannot attach volumes once
+enforcement is on.
 Then check the readiness line: no host should be left on an older key generation.
 
 The storage admin starts nothing: a rotation of CloudStack hosts is the CloudStack
@@ -437,7 +448,7 @@ operator's step above. To cut a host off at once, the cluster admin deletes its 
 (`lbcli delete trusted-host`); with enforcement on it can then no longer connect.
 
 A host whose trusted host belongs to another project (step 5) is not updated by the plugin.
-After it rotated (step 2) and before VMs go back to it, the cluster admin sets its new host key
+After it rotated (step 2) and before maintenance is cancelled, the cluster admin sets its new host key
 there on **every** Lightbits cluster where the host has such a trusted host (one
 `lbcli set trusted-host-secrets` per cluster; add `--target-secret-type=Enabled
 --target-secret=...` with the controller key for two-way); a cluster left out refuses the
