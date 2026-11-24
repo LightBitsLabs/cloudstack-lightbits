@@ -191,10 +191,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * the old detail is kept and the host cannot be granted access to the pool's volumes until
      * it is upgraded.
      *
-     * <p>Storing the IPs and the refresh run under the pool's IP ACL lock (so two refreshes of
-     * the pool cannot interleave and the slower one overwrite the newer IPs) and the host's ACL
-     * lock (so a grant for the host cannot resolve its old IPs and write them after the
-     * refresh). Without the locks in time nothing changes and the next connect tries again.
+     * <p>Storing the IPs and the refresh run under the host's ACL lock, then the pool's IP ACL
+     * lock, which every IP ACL writer of the pool holds (grants, revokes, host removal; see
+     * LightbitsHostGate). So no other writer can resolve this host's old IPs and write them
+     * after the refresh, and two refreshes of the pool cannot interleave. Without the locks in
+     * time nothing changes and the next connect tries again.
      */
     private void recordDataIps(long hostId, long poolId, String nqn, java.util.List<String> dataIps, boolean partial) {
         if (dataIps == null) {
@@ -207,24 +208,26 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     + " were", hostId, poolId);
             return;
         }
-        boolean had = hostGateLocker.run(ipAclLockName(poolId), IP_ACL_LOCK_SECONDS, () -> {
-            boolean hostLock = hostGateLocker.run(org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.lockName(hostId),
-                    IP_ACL_LOCK_SECONDS, () -> storeAndRefresh(hostId, poolId, nqn, dataIps, partial));
-            if (!hostLock) {
-                LOG.warn("Lightbits: the ACL lock of host {} was busy for {} s; its data IPs for pool {} are recorded at its"
-                        + " next connect", hostId, IP_ACL_LOCK_SECONDS, poolId);
+        // Lock order as everywhere: the host's ACL lock, then the pool's IP ACL lock (LightbitsHostGate).
+        boolean had = hostGateLocker.run(org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.lockName(hostId),
+                IP_ACL_LOCK_SECONDS, () -> {
+            boolean poolLock = hostGateLocker.run(ipAclLockName(poolId), IP_ACL_LOCK_SECONDS,
+                    () -> storeAndRefresh(hostId, poolId, nqn, dataIps, partial));
+            if (!poolLock) {
+                LOG.warn("Lightbits: the IP ACL lock of pool {} was busy for {} s; the data IPs of host {} are recorded at its"
+                        + " next connect", poolId, IP_ACL_LOCK_SECONDS, hostId);
             }
         });
         if (!had) {
-            LOG.warn("Lightbits: the IP ACL lock of pool {} was busy for {} s; the data IPs of host {} are recorded at its"
-                    + " next connect", poolId, IP_ACL_LOCK_SECONDS, hostId);
+            LOG.warn("Lightbits: the ACL lock of host {} was busy for {} s; its data IPs for pool {} are recorded at its"
+                    + " next connect", hostId, IP_ACL_LOCK_SECONDS, poolId);
         }
     }
 
     static final int IP_ACL_LOCK_SECONDS = 120;
 
     static String ipAclLockName(long poolId) {
-        return "lightbits.pool.ipacl." + poolId;
+        return org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.poolIpAclLockName(poolId);
     }
 
     private void storeAndRefresh(long hostId, long poolId, String nqn, java.util.List<String> reported, boolean partial) {
@@ -331,8 +334,19 @@ public class LightbitsHostListener implements HypervisorHostListener {
             try {
                 org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                         org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());
-                java.util.List<String> pruned = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(cfg.newClient(),
-                        cfg.getEnvironment(), pool.getId(), nqnValue, cfg.isIpAcl() ? ipResolver(pool.getId()) : null);
+                java.util.List<String> pruned = new java.util.ArrayList<>();
+                Runnable prune = () -> pruned.addAll(org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(
+                        cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, cfg.isIpAcl() ? ipResolver(pool.getId()) : null));
+                // With ipAcl, under the pool's IP ACL lock (inside the host's lock, as everywhere). The
+                // removal must not be held up: without the lock in time it prunes anyway, and the next
+                // connect of a host whose IPs it got wrong puts them right.
+                if (cfg.isIpAcl() && !hostGateLocker.run(ipAclLockName(pool.getId()), IP_ACL_LOCK_SECONDS, prune)) {
+                    LOG.warn("Lightbits: the IP ACL lock of pool {} was busy for {} s while host {} is being removed; pruning"
+                            + " without it", pool.getName(), IP_ACL_LOCK_SECONDS, hostId);
+                    prune.run();
+                } else if (!cfg.isIpAcl()) {
+                    prune.run();
+                }
                 if (!pruned.isEmpty()) {
                     LOG.warn("Lightbits: host {} is being removed and still had access to {} volume(s) of pool {}: removed it"
                             + " from their ACLs {}", hostId, pruned.size(), pool.getName(), pruned);
