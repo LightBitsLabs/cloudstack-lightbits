@@ -236,8 +236,8 @@ public class LightbitsHostKey {
                         + " could read or replace this host's in-band authentication key. Remove the directory (a new key"
                         + " is made) and reconnect the host");
             }
-            wider = !DIR_MODE.containsAll(Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS));
-            Files.setPosixFilePermissions(dir, DIR_MODE);
+            // The directory's own mode exposes no key: a file readable only by root stays so, and a
+            // file another user replaced through a writable directory is no longer root's (below).
         }
         // every file here holds or marks keys: each cluster's keys and configurations, the
         // host-wide ones, the per-pool two-way configurations and the rotation marks
@@ -252,25 +252,34 @@ public class LightbitsHostKey {
             untrusted |= Files.isSymbolicLink(f) || Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS) && uid(f) != ownerUid;
         }
         java.util.List<String> keyed = new java.util.ArrayList<>();   // suffixes of the keys present
-        for (Path f : files) {
-            if (untrusted) {
+        if (!untrusted) {
+            for (Path f : files) {
+                if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
+                    String name = f.getFileName().toString();
+                    java.util.regex.Matcher m = KEY_FILE.matcher(name);
+                    if (m.matches() && !keyed.contains(m.group(1))) {
+                        keyed.add(m.group(1));
+                    }
+                    // keys and the configuration files holding them; the marks hold none
+                    if (m.matches() || name.endsWith(".json")) {
+                        wider |= groupOrOthers(Files.getPosixFilePermissions(f, LinkOption.NOFOLLOW_LINKS));
+                    }
+                }
+            }
+        }
+        if (untrusted) {
+            for (Path f : files) {
                 if (Files.deleteIfExists(f)) {
                     LOG.warn("Lightbits: removed {}: a key, configuration or mark file was not a file owned by root, so new"
                             + " in-band authentication keys are made (register them by reconnecting the host)", f);
                 }
-            } else if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
-                wider |= !FILE_MODE.containsAll(Files.getPosixFilePermissions(f, LinkOption.NOFOLLOW_LINKS));
-                Files.setPosixFilePermissions(f, FILE_MODE);
-                java.util.regex.Matcher m = KEY_FILE.matcher(f.getFileName().toString());
-                if (m.matches() && !keyed.contains(m.group(1))) {
-                    keyed.add(m.group(1));
-                }
             }
-        }
-        if (wider && !untrusted) {
+        } else if (wider) {
             // Making the files root-only again does not take back a copy someone made while they
             // were readable. Replacing the keys at once could break this host's live paths, so the
-            // keys stay until a rotation replaces them, and the host is reported until then.
+            // keys stay until a rotation replaces them, and the host is reported until then. The
+            // marks are written before the modes are tightened: if one cannot be written, the wide
+            // modes stay as the evidence and the next attempt tries again.
             for (String sfx : keyed) {
                 Path mark = dir.resolve("rotation-required" + sfx);
                 if (!Files.exists(mark, LinkOption.NOFOLLOW_LINKS)) {
@@ -284,6 +293,26 @@ public class LightbitsHostKey {
                         + " the keys\")");
             }
         }
+        if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            Files.setPosixFilePermissions(dir, DIR_MODE);
+        }
+        if (!untrusted) {
+            for (Path f : files) {
+                if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
+                    Files.setPosixFilePermissions(f, FILE_MODE);
+                }
+            }
+        }
+    }
+
+    /** True when the group or other users have any permission (owner bits do not expose a key). */
+    private static boolean groupOrOthers(Set<PosixFilePermission> perms) {
+        for (PosixFilePermission p : perms) {
+            if (p.name().startsWith("GROUP_") || p.name().startsWith("OTHERS_")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** A key file name: host or controller key, host-wide or one cluster's (group 1: the suffix). */

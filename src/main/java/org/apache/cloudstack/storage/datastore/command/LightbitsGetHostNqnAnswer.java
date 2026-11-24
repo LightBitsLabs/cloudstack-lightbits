@@ -86,6 +86,11 @@ public class LightbitsGetHostNqnAnswer extends Answer {
         return Boolean.TRUE.equals(keysPossiblyExposed);
     }
 
+    /** The exposure report; null when the agent did not report one (an older agent, or its check failed). */
+    public Boolean getKeysPossiblyExposed() {
+        return keysPossiblyExposed;
+    }
+
     /** Whether a requested key rotation was done; null when none was asked for (or an older agent). */
     private Boolean keysRotated;
     /** Why a requested key rotation was not done. */

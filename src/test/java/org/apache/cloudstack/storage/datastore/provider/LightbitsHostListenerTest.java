@@ -405,7 +405,12 @@ class LightbitsHostListenerTest {
         assertEquals("true", detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, POOL)));
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN) : new Answer(cmd);
         listener.hostConnect(HOST, POOL);
-        assertNull(detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, POOL)), "cleared once the agent no longer reports it");
+        String exposed = LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, POOL);
+        assertEquals("true", detail(exposed), "kept while the agent sends no report");
+        agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
+                ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeysPossiblyExposed(false) : new Answer(cmd);
+        listener.hostConnect(HOST, POOL);
+        assertNull(detail(exposed), "cleared once the agent reports the keys are not exposed");
     }
 
     @Test
