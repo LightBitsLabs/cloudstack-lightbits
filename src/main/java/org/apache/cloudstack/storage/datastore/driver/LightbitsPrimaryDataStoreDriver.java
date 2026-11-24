@@ -979,6 +979,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         try {
             long poolId = storagePool.getId();
             LightbitsPoolConfig cfg = configForPool(poolId);
+            // first, so a capacity read that fails or reports nothing does not skip the retries
+            retryRevocations(poolId, cfg);
             LightbitsApiClient.NodeCapacity nc = clientFor(cfg).nodeCapacity();
             if (nc.effectivePhysicalBytes <= 0) {
                 LOG.warn("Lightbits: nodes report no effective capacity for pool {}; skipping stats cycle", poolId);
@@ -987,7 +989,6 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             long replicas = Math.max(1, cfg.getReplicaCount());
             long capacity = nc.effectivePhysicalBytes / replicas;
             long used = Math.max(0L, nc.effectivePhysicalBytes - nc.freePhysicalBytes) / replicas;
-            retryRevocations(poolId, cfg);
             return new Pair<>(capacity, used);
         } catch (Exception e) {
             // The stats path must degrade gracefully and never wedge the collector; null is

@@ -193,9 +193,12 @@ class LightbitsDriverOperationsTest {
             v.setEtag(String.valueOf(Integer.parseInt(v.getEtag()) + 1));
         }
 
+        /** Effective capacity the nodes report; 0 models a cluster that reports none. */
+        long effectiveBytes = 30L << 40;
+
         @Override
         public NodeCapacity nodeCapacity() {
-            return new NodeCapacity(3, 30L << 40, 20L << 40);
+            return new NodeCapacity(3, effectiveBytes, 20L << 40);
         }
 
         @Override
@@ -643,5 +646,18 @@ class LightbitsDriverOperationsTest {
         assertEquals(List.of("ALLOW_NONE"), v.getAcl().getValues(), "the removed host is taken out");
         assertTrue(poolDetails.keySet().stream().noneMatch(k -> k.startsWith(
                 org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.DETAIL_PREFIX)), "and the record cleared");
+    }
+
+    @Test
+    void theStatisticsPollRetriesARevocationEvenWhenTheClusterReportsNoCapacity() {
+        String gone = "nqn.2014-08.org.nvmexpress:uuid:00000000-0000-0000-0000-00000000beef";
+        Volume v = cluster.add(volName(), 1L << 30, List.of(gone));
+        org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.record(
+                fake(org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao.class,
+                        n -> n.equals("addDetail") ? a -> poolDetails.put((String) a[1], (String) a[2]) : null), POOL, gone);
+        cluster.effectiveBytes = 0;
+        assertNull(driver.getStorageStats(fake(com.cloud.storage.StoragePool.class, n -> n.equals("getId") ? a -> POOL : null)),
+                "no statistics this cycle");
+        assertEquals(List.of("ALLOW_NONE"), v.getAcl().getValues(), "the removed host is taken out all the same");
     }
 }
