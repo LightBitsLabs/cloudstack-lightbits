@@ -187,7 +187,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // would turn false into a generic "failed to connect disks".
         String device = nvme.waitForDevice(uuid, DEFAULT_WAIT_SECS, nvme.hostNqn());
         if (twoWay(pool)) {
-            nvme.requireTwoWayPaths(nvme.verifyIdentity(uuid), keys(pool).ensureCtrlKey());
+            requireTwoWayPaths(nvme.verifyIdentity(uuid), pool);
         }
         LOG.info("Lightbits volume {} verified at {}", uuid, device);
         nvme.warnOnDegradedPaths(endpoints.size());
@@ -418,13 +418,26 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // never hand out a path whose namespace was not matched against the volume
         String kernelName = nvme.verifyIdentity(uuid);
         if (twoWay(pool)) {
-            nvme.requireTwoWayPaths(kernelName, keys(pool).ensureCtrlKey());
+            requireTwoWayPaths(kernelName, pool);
         }
         KVMPhysicalDisk disk = new KVMPhysicalDisk(LightbitsNvmeHost.BY_ID_PREFIX + uuid, volumePath, pool);
         disk.setFormat(PhysicalDiskFormat.RAW);
         disk.setSize(nvme.sizeBytes(kernelName));
         disk.setVirtualSize(disk.getSize());
         return disk;
+    }
+
+    /**
+     * The two-way check before a handoff, under the connect lock: a connect holds it until it has
+     * dropped the paths it made without the controller key, so the check never sees a connect
+     * half done. A later connect that cannot drop such a path fails and marks it rejected, which
+     * the next check refuses.
+     */
+    private void requireTwoWayPaths(String kernelName, KVMStoragePool pool) {
+        String ctrlKey = keys(pool).ensureCtrlKey();
+        synchronized (CONNECT_LOCK) {
+            nvme.requireTwoWayPaths(kernelName, ctrlKey);
+        }
     }
 
     @Override

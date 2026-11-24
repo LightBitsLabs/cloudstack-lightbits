@@ -506,9 +506,11 @@ class LightbitsNvmeHost {
         if (!unsafe.isEmpty()) {
             throw new CloudRuntimeException("Lightbits: the pool uses two-way in-band authentication, but path(s) " + unsafe
                     + " of subsystem " + subsystem.trim() + " on this host do not hold its current controller key, so the host"
-                    + " would not check the cluster on them; the volume is not handed over. Move the host onto two-way paths:"
-                    + " put it in maintenance, disconnect its Lightbits paths (nvme disconnect -n " + subsystem.trim()
-                    + "), cancel maintenance (INSTALL.md, \"In-band authentication\"). Running VMs are not affected.");
+                    + " would not check the cluster on them; the volume is not handed over. Move the host onto two-way paths"
+                    + " in the host order of INSTALL.md (\"In-band authentication\"): migrate its VMs to hosts already moved"
+                    + " (CloudStack stops a VM that maintenance cannot migrate), put it in maintenance, disconnect its Lightbits"
+                    + " paths (nvme disconnect -n " + subsystem.trim() + "), cancel maintenance and reconnect the host."
+                    + " Running VMs are not affected.");
         }
     }
 
