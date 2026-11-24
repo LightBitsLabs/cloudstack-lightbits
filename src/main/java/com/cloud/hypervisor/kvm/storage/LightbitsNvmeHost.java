@@ -60,6 +60,8 @@ class LightbitsNvmeHost {
     private static final Pattern CONTROLLER_ENTRY = Pattern.compile("nvme[0-9]+");
     private static final String SUBSYSTEMS = "/sys/class/nvme-subsystem";
     private static final AtomicInteger ROTATION = new AtomicInteger();
+    /** Two-way: paths rejected for lacking the controller key that could not be disconnected (agent-wide). */
+    private static final java.util.Set<String> REJECTED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /** The host, as far as this class needs it. Replaced by a fake in unit tests. */
     interface Sys {
@@ -471,20 +473,25 @@ class LightbitsNvmeHost {
      */
     List<String> dropNewPathsWithoutCtrlKey(java.util.Set<String> before, String currentCtrlKey) {
         List<String> dropped = new ArrayList<>();
+        java.util.Set<String> present = pathNames();
+        REJECTED.retainAll(present);   // a rejected controller that is gone is forgotten (the name can be reused)
         for (Path p : paths()) {
-            if (before.contains(p.controller)) {
+            // a path an earlier connect rejected but could not disconnect stays rejected
+            if (before.contains(p.controller) && !REJECTED.contains(p.controller)) {
                 continue;
             }
             String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_ctrl_secret");
             if (secret == null || !secret.trim().equals(currentCtrlKey)) {
                 Result r = sys.run(30_000, "nvme", "disconnect", "-d", p.controller);
                 if (!r.ok() || sys.exists("/sys/class/nvme/" + p.controller)) {
+                    REJECTED.add(p.controller);
                     throw new CloudRuntimeException("Lightbits: path " + p.controller + " (" + p.address + ") was made without this"
                             + " host's controller key (two-way) and could not be disconnected (exit " + r.exit + ": " + r.output
                             + "); disconnect it by hand (nvme disconnect -d " + p.controller + ")");
                 }
                 LOG.warn("Lightbits: dropped path {} ({}): it was made without this host's controller key, so the host would not"
                         + " check the cluster on it (two-way); the next connect makes it again", p.controller, p.address);
+                REJECTED.remove(p.controller);
                 dropped.add(p.controller);
             }
         }

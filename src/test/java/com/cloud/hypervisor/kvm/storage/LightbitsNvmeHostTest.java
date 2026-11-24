@@ -598,6 +598,14 @@ class LightbitsNvmeHostTest {
         sys.results.put("nvme disconnect -d nvme3", new LightbitsNvmeHost.Result(1, "failed"));
         CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
         assertTrue(e.getMessage().contains("could not be disconnected"), e.getMessage());
+        // the next connect sees nvme3 among the paths that were already there: it stays rejected
+        java.util.Set<String> next = host.pathNames();
+        assertTrue(next.contains("nvme3"));
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(next, ctrl));
+        sys.results.remove("nvme disconnect -d nvme3");
+        assertEquals(List.of("nvme3"), host.dropNewPathsWithoutCtrlKey(next, ctrl), "dropped once the disconnect works");
+        // (the fake keeps nvme3 in sysfs) once dropped it is no longer rejected: an old path again, left alone
+        assertEquals(List.of(), host.dropNewPathsWithoutCtrlKey(next, ctrl));
     }
 
     @Test

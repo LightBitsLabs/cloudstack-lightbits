@@ -197,6 +197,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 rotate = gen == null || generation(gen.getValue()) < cfg.getInbandKeyGeneration();
             }
         }
+        // the other pools' generations as they are before the keys are made: a raise after this
+        // read then costs at most one more rotation, never a skipped one
+        java.util.Map<Long, Integer> otherGenerations = rotate ? otherPoolGenerations(hostId, poolId) : java.util.Map.of();
         // a rotation also asks for the controller key: the new keys go to every pool of the host,
         // two-way ones included
         Answer answer = agentMgr.easySend(hostId, new LightbitsGetHostNqnCommand(wantIps ? cfg.discoveryEndpoints() : null, wantAuth,
@@ -222,7 +225,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 } else {
                     registerTrustedHost(hostId, poolId, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
                     if (rotated) {
-                        registerWithOtherPools(hostId, poolId, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
+                        registerWithOtherPools(hostId, otherGenerations, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
                     }
                 }
             }
@@ -582,7 +585,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * the keys are per host, and each of those clusters would refuse the new key until that
      * pool's own host connect. Runs under the host's report lock, like every registration.
      */
-    private void registerWithOtherPools(long hostId, long rotatingPoolId, String nqn, LightbitsGetHostNqnAnswer answer) {
+    /** The key generation of every other inbandAuth Lightbits pool of the host, by pool id. */
+    private java.util.Map<Long, Integer> otherPoolGenerations(long hostId, long rotatingPoolId) {
+        java.util.Map<Long, Integer> out = new java.util.LinkedHashMap<>();
         for (StoragePoolHostVO ref : storagePoolHostDao.listByHostId(hostId)) {
             long other = ref.getPoolId();
             if (other == rotatingPoolId) {
@@ -594,10 +599,18 @@ public class LightbitsHostListener implements HypervisorHostListener {
             }
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig c = poolConfigOrNull(other);
             if (c != null && c.isInbandAuth()) {
-                registerTrustedHost(hostId, other, nqn, answer);
-                // the keys were just made: newer than any raise of that pool's generation too
-                setHostDetail(hostId, LightbitsTrustedHosts.generationDetailKey(other), String.valueOf(c.getInbandKeyGeneration()));
+                out.put(other, c.getInbandKeyGeneration());
             }
+        }
+        return out;
+    }
+
+    private void registerWithOtherPools(long hostId, java.util.Map<Long, Integer> generations, String nqn,
+                                        LightbitsGetHostNqnAnswer answer) {
+        for (java.util.Map.Entry<Long, Integer> e : generations.entrySet()) {
+            registerTrustedHost(hostId, e.getKey(), nqn, answer);
+            // the keys were made after this generation was read: they are at least that new
+            setHostDetail(hostId, LightbitsTrustedHosts.generationDetailKey(e.getKey()), String.valueOf(e.getValue()));
         }
     }
 
