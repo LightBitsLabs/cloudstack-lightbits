@@ -473,8 +473,13 @@ class LightbitsNvmeHost {
      */
     List<String> dropNewPathsWithoutCtrlKey(java.util.Set<String> before, String currentCtrlKey) {
         List<String> dropped = new ArrayList<>();
-        java.util.Set<String> present = pathNames();
-        REJECTED.retainAll(present);   // a rejected controller that is gone is forgotten (the name can be reused)
+        // a rejected controller that is gone is forgotten (the name can be reused); one that cannot
+        // be read is kept, and an unreadable listing fails the check
+        List<String> listed = sys.listOrNull("/sys/class/nvme");
+        if (listed == null) {
+            throw new CloudRuntimeException("Lightbits: could not list /sys/class/nvme to check this host's two-way paths");
+        }
+        REJECTED.retainAll(new java.util.HashSet<>(listed));
         for (Path p : paths()) {
             // a path an earlier connect rejected but could not disconnect stays rejected
             if (before.contains(p.controller) && !REJECTED.contains(p.controller)) {

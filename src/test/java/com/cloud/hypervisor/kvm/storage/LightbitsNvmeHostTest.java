@@ -598,6 +598,14 @@ class LightbitsNvmeHostTest {
         sys.results.put("nvme disconnect -d nvme3", new LightbitsNvmeHost.Result(1, "failed"));
         CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
         assertTrue(e.getMessage().contains("could not be disconnected"), e.getMessage());
+        // an unreadable listing fails the check and forgets nothing
+        sys.unreadable.add("/sys/class/nvme");
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        sys.unreadable.clear();
+        // nor does a controller whose subsystem NQN cannot be read for a moment
+        sys.unreadable.add("/sys/class/nvme/nvme3/subsysnqn");
+        host.dropNewPathsWithoutCtrlKey(host.pathNames(), ctrl);
+        sys.unreadable.clear();
         // the next connect sees nvme3 among the paths that were already there: it stays rejected
         java.util.Set<String> next = host.pathNames();
         assertTrue(next.contains("nvme3"));
