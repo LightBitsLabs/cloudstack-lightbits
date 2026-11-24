@@ -38,7 +38,7 @@ Working today (KVM):
   or, with the pool option `qosFromIops=true`, a policy picked from the offering's max IOPS.
   A changed offering moves the volume to its policy at the next resize, attach, VM start or
   migration; a failed change is logged and tried again at a later one (see INSTALL.md,
-  "QoS policy": until then the old limit applies)
+  "QoS policy": until then the limit may be the old or the new one)
 - Volume IP ACL (pool option `ipAcl=true`): each volume accepts connections only from the
   data IPs of the hosts it is granted to, on top of the host NQN ACL (see INSTALL.md,
   "Volume IP ACL")

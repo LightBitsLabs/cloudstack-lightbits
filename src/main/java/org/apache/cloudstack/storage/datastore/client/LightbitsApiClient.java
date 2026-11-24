@@ -302,7 +302,9 @@ public class LightbitsApiClient {
 
     /**
      * The IOPS-limit QoS policies visible to this project ({@code GET /api/v2/policies}).
-     * Bandwidth and IOPS-per-GB policies are left out: they do not map to an IOPS figure.
+     * Bandwidth and IOPS-per-GB policies are left out: they do not map to an IOPS figure. So is
+     * a policy in any state other than Active (for example Deprecated, which the cluster does
+     * not accept for new volumes); a policy without a state is kept.
      */
     public List<IopsPolicy> listIopsPolicies() {
         Map<String, String> q = new HashMap<>();
@@ -313,7 +315,8 @@ public class LightbitsApiClient {
             for (JsonNode p : mapper.readTree(resp).path("policies")) {
                 JsonNode iops = p.path("QoSRateLimitPolicy").path("limitIOPS");
                 String name = p.path("name").asText(null);
-                if (name == null || iops.isMissingNode() || iops.isNull()) {
+                String state = p.path("state").asText("");
+                if (name == null || iops.isMissingNode() || iops.isNull() || !(state.isEmpty() || "Active".equals(state))) {
                     continue;
                 }
                 out.add(new IopsPolicy(name, iops.path("readIOPSLimit").asLong(0), iops.path("writeIOPSLimit").asLong(0)));
