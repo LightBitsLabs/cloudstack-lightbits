@@ -66,9 +66,25 @@ class LightbitsRevocationsTest {
 
         failWrites = false;
         assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "listed once, not twice");
-        assertEquals(nqn, details.get(LightbitsRevocations.detailKey(nqn)), "saved by the next retry pass");
+        assertEquals(nqn, LightbitsRevocations.nqnOf(details.get(LightbitsRevocations.detailKey(nqn))), "saved by the next retry pass");
 
         LightbitsRevocations.clear(dao, pool, nqn);
         assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty());
+    }
+
+    @Test
+    void aRetryDropsOnlyTheRecordVersionItLookedAt() {
+        String nqn = "nqn.2014-08.org.nvmexpress:uuid:versioned-revocation";
+        long pool = 9102L;
+        StoragePoolDetailsDao dao = dao();
+        LightbitsRevocations.record(dao, pool, nqn);
+        String observed = LightbitsRevocations.recordValue(dao, pool, nqn);
+        // a removal writes the record again after the retry looked
+        LightbitsRevocations.record(dao, pool, nqn);
+        LightbitsRevocations.clearIf(dao, pool, nqn, observed);
+        assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "the newer record stays");
+        LightbitsRevocations.clearIf(dao, pool, nqn, LightbitsRevocations.recordValue(dao, pool, nqn));
+        assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty(), "the version looked at is dropped");
+        assertEquals(nqn, LightbitsRevocations.nqnOf(nqn), "a record from before versions reads as its NQN");
     }
 }
