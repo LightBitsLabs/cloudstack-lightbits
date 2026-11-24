@@ -700,7 +700,7 @@ class LightbitsHostListenerTest {
         lockNames.clear();
         assertTrue(listener.hostAboutToBeRemoved(HOST));
         assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)));
-        assertTrue(poolDetails.containsValue(NQN), "recorded");
+        assertTrue(poolDetails.values().stream().anyMatch(v -> v.startsWith(NQN + " ")), "recorded, with a version");
     }
 
     @Test

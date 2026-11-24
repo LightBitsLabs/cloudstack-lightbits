@@ -68,7 +68,10 @@ public final class LightbitsRevocations {
     /** Record a revocation of the NQN on the pool's cluster as pending. */
     public static void record(StoragePoolDetailsDao dao, long poolId, String nqn) {
         try {
-            dao.addDetail(poolId, detailKey(nqn), nqn, false);
+            // the value carries a version: a retry drops only the record it looked at, never one a
+            // removal wrote after that
+            dao.addDetail(poolId, detailKey(nqn), nqn + " " + Long.toHexString(System.currentTimeMillis())
+                    + "-" + Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt()), false);
             unsaved(poolId).remove(nqn);
         } catch (RuntimeException e) {
             // CloudStack removes the host whatever its listeners return, so the revocation cannot
@@ -98,8 +101,9 @@ public final class LightbitsRevocations {
         if (details != null) {
             for (Map.Entry<String, String> e : details.entrySet()) {
                 if (e.getKey() != null && e.getKey().startsWith(DETAIL_PREFIX) && e.getValue() != null && !e.getValue().isBlank()) {
-                    if (!out.contains(e.getValue().trim())) {
-                        out.add(e.getValue().trim());
+                    String nqn = nqnOf(e.getValue());
+                    if (!out.contains(nqn)) {
+                        out.add(nqn);
                     }
                 }
             }
@@ -110,6 +114,28 @@ public final class LightbitsRevocations {
     static void clear(StoragePoolDetailsDao dao, long poolId, String nqn) {
         unsaved(poolId).remove(nqn);
         dao.removeDetail(poolId, detailKey(nqn));
+    }
+
+    /** The NQN of a record's value (the NQN, then its version). */
+    static String nqnOf(String value) {
+        String v = value.trim();
+        int sp = v.indexOf(' ');
+        return sp < 0 ? v : v.substring(0, sp);
+    }
+
+    /** The record's value as stored now (with its version), or null. */
+    static String recordValue(StoragePoolDetailsDao dao, long poolId, String nqn) {
+        Map<String, String> details = dao.listDetailsKeyPairs(poolId);
+        return details == null ? null : details.get(detailKey(nqn));
+    }
+
+    /** Drop the record only if it is still the version the caller looked at. */
+    static void clearIf(StoragePoolDetailsDao dao, long poolId, String nqn, String observed) {
+        if (java.util.Objects.equals(recordValue(dao, poolId, nqn), observed)) {
+            clear(dao, poolId, nqn);
+        } else {
+            LOG.info("Lightbits: the pending revocation of host NQN {} on pool {} was written again meanwhile; it stays", nqn, poolId);
+        }
     }
 
     /**
@@ -143,9 +169,18 @@ public final class LightbitsRevocations {
      */
     public static boolean revokeOrKeep(StoragePoolDetailsDao dao, LightbitsApiClient client, LightbitsPoolConfig cfg, long poolId,
                                        String nqn) {
+        return revokeOrKeep(dao, client, cfg, poolId, nqn, null, false);
+    }
+
+    private static boolean revokeOrKeep(StoragePoolDetailsDao dao, LightbitsApiClient client, LightbitsPoolConfig cfg, long poolId,
+                                        String nqn, String observed, boolean versioned) {
         try {
             if (revoke(client, cfg, poolId, nqn)) {
-                clear(dao, poolId, nqn);
+                if (versioned) {
+                    clearIf(dao, poolId, nqn, observed);
+                } else {
+                    clear(dao, poolId, nqn);
+                }
                 return true;
             }
             LOG.warn("Lightbits: the cluster of pool {} still lists removed host {} in a volume ACL or as a trusted host;"
@@ -200,6 +235,7 @@ public final class LightbitsRevocations {
 
     private static void retryOne(StoragePoolDetailsDao poolDetails, HostDetailsDao hostDetails, String nqnDetail, long poolId,
                                  LightbitsPoolConfig cfg, LightbitsApiClient client, String nqn) {
+        String observed = recordValue(poolDetails, poolId, nqn);   // the version this retry acts on
         LightbitsHostGate.RemovingCheck removing = LightbitsHostGate.removingCheck(hostDetails, nqnDetail);
         for (DetailVO d : hostDetails.findByName(nqnDetail)) {
             if (d.getValue() != null && nqn.equals(d.getValue().trim()) && !removing.isRemoving(d.getHostId())) {
@@ -209,13 +245,13 @@ public final class LightbitsRevocations {
                 if (LightbitsHostGate.removingCheck(hostDetails, nqnDetail).isRemoving(d.getHostId())) {
                     continue;
                 }
-                clear(poolDetails, poolId, nqn);
+                clearIf(poolDetails, poolId, nqn, observed);
                 LOG.info("Lightbits: host NQN {} belongs to a CloudStack host again; dropped its pending revocation on pool {}",
                         nqn, poolId);
                 return;
             }
         }
-        if (revokeOrKeep(poolDetails, client, cfg, poolId, nqn)) {
+        if (revokeOrKeep(poolDetails, client, cfg, poolId, nqn, observed, true)) {
             LOG.info("Lightbits: completed the pending revocation of removed host {} on pool {}", nqn, poolId);
         }
     }
