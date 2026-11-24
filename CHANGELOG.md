@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   storage statistics poll and at host connects, and logged until they complete; one for a
   machine added back to CloudStack is dropped.
 
+### Known limitations
+- A pending revocation that the database cannot save while the host is being removed (CloudStack
+  removes the host whatever the plugin returns) is kept in memory, saved again on each retry and
+  logged as an error; a management server restart before it is saved or confirmed loses it.
+
 ## [0.1.0-rc.1] - 2026-11-24
 
 Release candidate for 0.1.0: feature-complete and validated in the lab; for evaluation and
