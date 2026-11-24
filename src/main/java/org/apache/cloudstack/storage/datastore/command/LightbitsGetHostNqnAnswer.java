@@ -74,6 +74,18 @@ public class LightbitsGetHostNqnAnswer extends Answer {
         return this;
     }
 
+    /** True when the host's keys were readable by other users than root and have not been rotated since. */
+    private Boolean keysPossiblyExposed;
+
+    public LightbitsGetHostNqnAnswer withKeysPossiblyExposed(boolean exposed) {
+        this.keysPossiblyExposed = exposed;
+        return this;
+    }
+
+    public boolean isKeysPossiblyExposed() {
+        return Boolean.TRUE.equals(keysPossiblyExposed);
+    }
+
     /** Whether a requested key rotation was done; null when none was asked for (or an older agent). */
     private Boolean keysRotated;
     /** Why a requested key rotation was not done. */

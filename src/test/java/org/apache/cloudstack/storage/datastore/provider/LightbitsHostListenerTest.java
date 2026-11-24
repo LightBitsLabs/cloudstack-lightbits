@@ -391,6 +391,18 @@ class LightbitsHostListenerTest {
     }
 
     @Test
+    void aHostWhoseKeysMayHaveBeenCopiedIsRecordedUntilItRotates() {
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
+                ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeysPossiblyExposed(true) : new Answer(cmd);
+        listener.hostConnect(HOST, POOL);
+        assertEquals("true", detail(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL));
+        agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN) : new Answer(cmd);
+        listener.hostConnect(HOST, POOL);
+        assertNull(detail(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL), "cleared once the agent no longer reports it");
+    }
+
+    @Test
     void twoWayRegistersTheControllerKeyAsTheTargetSecret() {
         option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
         option(LightbitsPoolConfig.KEY_INBAND_AUTH_TWO_WAY, "true");

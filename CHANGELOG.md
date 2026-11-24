@@ -5,6 +5,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+- In-band authentication keys found readable by other users than root are still made root-only
+  and kept (so the host keeps working), but are now flagged as possibly copied: the agent
+  reports it, the management log warns, and the readiness line lists the host until its keys
+  are rotated.
+
 ## [0.1.0-rc.1] - 2026-11-24
 
 Release candidate for 0.1.0: feature-complete and validated in the lab; for evaluation and
