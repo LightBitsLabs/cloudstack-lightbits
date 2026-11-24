@@ -330,6 +330,19 @@ the host side:
 - The discovery service (port 8009) does not authenticate, so discovery is unchanged. The
   authentication is one-way: the host does not check the cluster.
 
+**Warning: turning enforcement on too early can freeze a host.** Once the cluster admin runs
+`lbcli enable in-band-auth`, any NVMe/TCP path that does not hold the host's current key
+(made before `inbandAuth=true`, or before the key was replaced) fails at its next reconnect,
+and even a short network blip or controller reset triggers one. A volume with no other
+working path then stops: its I/O waits forever, the VMs on it hang, and libvirt and the
+CloudStack agent on that host can block, so CloudStack marks the host Down. The plugin
+reports the risk ("NOT ready", step 4) but cannot stop the cluster admin from enabling
+enforcement. In the lab this happened to a host that still had paths with an old key. To
+recover, turn enforcement off (`lbcli disable in-band-auth`) and, on that host, reconnect
+the missing paths by hand (`nvme connect -t tcp -a <node data IP> -s 4420 -n <subsystem
+NQN>` for each node without a live path); the stuck I/O resumes and the host comes back Up.
+Then move it onto keyed paths as in step 4.
+
 Turning in-band authentication on is a cluster-wide switch that only a cluster admin can
 flip, and a host without a registered key loses each path at its next reconnect. Follow
 this order:

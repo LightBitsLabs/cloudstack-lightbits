@@ -7,6 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 - Pool option `inbandAuth=true`: NVMe in-band authentication (DH-HMAC-CHAP, host to cluster).
+  **Read INSTALL.md ("In-band authentication") before enabling enforcement on the cluster:
+  enabling it while a host has paths without its current key can freeze that host's VMs
+  and take the host Down.**
   Each KVM host makes its own key (root-only, under `/etc/nvme/lightbits/`) and connects to
   the pool's cluster with it through an nvme-cli configuration file, so the key never appears
   on a command line. On host connect the management server registers the host as a trusted
