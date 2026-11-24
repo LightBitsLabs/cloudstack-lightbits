@@ -144,12 +144,34 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * toward the pool's cluster (see {@link #recordDataIps}).
      */
     private void ensureHostDetails(long hostId, long poolId) {
+        org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
+        if (cfg == null || !cfg.isInbandAuth()) {
+            ensureHostDetails(hostId, poolId, cfg, false);
+            return;
+        }
+        // The key request and its registration run under the host's in-band lock (held across
+        // management servers), so of two overlapping connects of one host the one that read the
+        // key last also writes it last, and an older key cannot overwrite a newer one. Without the
+        // lock in time this connect records the rest and leaves the registration to the next one.
+        if (!hostGateLocker.run(inbandLockName(hostId), INBAND_LOCK_SECONDS, () -> ensureHostDetails(hostId, poolId, cfg, true))) {
+            LOG.warn("Lightbits: the in-band authentication lock of host {} was busy for {} s; its key is registered for"
+                    + " pool {} at its next connect", hostId, INBAND_LOCK_SECONDS, poolId);
+            ensureHostDetails(hostId, poolId, cfg, false);
+        }
+    }
+
+    static final int INBAND_LOCK_SECONDS = 120;
+
+    static String inbandLockName(long hostId) {
+        return "lightbits.host.inband." + hostId;
+    }
+
+    private void ensureHostDetails(long hostId, long poolId, org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg,
+                                   boolean wantAuth) {
         String key = LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL;
         DetailVO existing = hostDetailsDao.findDetail(hostId, key);
         boolean hasNqn = existing != null && existing.getValue() != null && !existing.getValue().isBlank();
-        org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
         boolean wantIps = cfg != null && cfg.isIpAcl();
-        boolean wantAuth = cfg != null && cfg.isInbandAuth();
         if (hasNqn && !wantIps && !wantAuth) {
             LOG.debug("Lightbits: host {} already has '{}' = {}", hostId, key, existing.getValue());
             return;
@@ -336,8 +358,13 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     LOG.info("Lightbits: host {} registered as trusted host '{}' in project {} of pool {} (key {})", hostId,
                             r.name, cfg.getProject(), poolId, fp);
                 }
-                setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), r.authRequired ? null : "true");
-                if (!r.authRequired) {
+                setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId),
+                        Boolean.TRUE.equals(r.authRequired) ? null : r.authRequired == null ? "unknown" : "true");
+                if (r.authRequired == null) {
+                    LOG.warn("Lightbits: the cluster did not report authRequired for trusted host '{}' of host {} in project"
+                            + " {}; it may allow connections without a key. Check it with lbcli get trusted-host"
+                            + " --project-name={} --name={}", r.name, hostId, cfg.getProject(), cfg.getProject(), r.name);
+                } else if (!r.authRequired) {
                     LOG.warn("Lightbits: trusted host '{}' of host {} in project {} has authRequired=false: the host has its"
                             + " key, but may still connect without one when in-band authentication is on. The plugin leaves"
                             + " this to the cluster admin (lbcli update trusted-host --project-name={} --name={}"
@@ -394,8 +421,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 unregistered.add(label);
             } else if (!LightbitsTrustedHosts.holdsCurrentKey(reg.getValue(), current == null ? null : current.getValue())) {
                 unregistered.add(label + " (registered with an earlier key)");
-            } else if (hostDetailsDao.findDetail(id, LightbitsTrustedHosts.keyOptionalDetailKey(poolId)) != null) {
-                optional.add(label);
+            } else {
+                DetailVO opt = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.keyOptionalDetailKey(poolId));
+                if (opt != null) {
+                    optional.add("unknown".equals(opt.getValue()) ? label + " (authRequired not reported)" : label);
+                }
             }
             DetailVO k = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.KEYLESS_DETAIL);
             if (k == null || !"0".equals(k.getValue())) {

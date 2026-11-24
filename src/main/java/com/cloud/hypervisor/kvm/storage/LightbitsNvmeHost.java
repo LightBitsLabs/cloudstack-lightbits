@@ -333,16 +333,27 @@ class LightbitsNvmeHost {
      * such as one from before the key was rotated or its file deleted. The registered key is the
      * current one, so once the cluster turns in-band authentication on, such a path fails at its
      * next reconnect, and a volume reachable only through it hangs. The secrets are compared in
-     * memory and never logged. Throws when the controller list cannot be read (the caller then
-     * reports the count as unknown), so a failed read is never taken for "no such path".
+     * memory and never logged. Throws when the controller list, or a listed controller's
+     * subsystem NQN, cannot be read (the caller then reports the count as unknown), so a failed
+     * read is never taken for "no such path". It enumerates the one listing it checked, unlike
+     * {@link #paths()}, which skips what it cannot read.
      */
     int pathsWithoutKey(String currentKey) {
-        if (sys.listOrNull("/sys/class/nvme") == null) {
+        List<String> controllers = sys.listOrNull("/sys/class/nvme");
+        if (controllers == null) {
             throw new CloudRuntimeException("could not list /sys/class/nvme to check this host's NVMe/TCP paths");
         }
         int n = 0;
-        for (Path p : paths()) {
-            String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_secret");
+        for (String ctrl : controllers) {
+            String nqn = sys.read("/sys/class/nvme/" + ctrl + "/subsysnqn");
+            if (nqn == null) {
+                throw new CloudRuntimeException("could not read the subsystem NQN of " + ctrl
+                        + " to check this host's NVMe/TCP paths");
+            }
+            if (!nqn.startsWith(LIGHTBITS_NQN_PREFIX)) {
+                continue;
+            }
+            String secret = sys.read("/sys/class/nvme/" + ctrl + "/dhchap_secret");
             if (secret == null || !secret.trim().equals(currentKey)) {
                 n++;
             }

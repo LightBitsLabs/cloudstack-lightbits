@@ -181,6 +181,20 @@ class LightbitsTrustedHostsTest {
     }
 
     @Test
+    void aReusedTrustedHostWithoutARecognizedAuthRequiredIsUnknownNotTrue() {
+        for (String field : new String[] {"", ",\"authRequired\":\"maybe\""}) {
+            wm.resetAll();
+            wm.stubFor(get(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody(
+                    "{\"hosts\":[{\"name\":\"staged\",\"hostNqn\":\"" + NQN + "\"" + field + "}],\"nextOffset\":\"\"}")));
+            wm.stubFor(put(urlEqualTo(SECRETS + "staged")).willReturn(aResponse().withStatus(200).withBody("{}")));
+
+            LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(client, NAME, NQN, KEY, Map.of());
+            assertTrue(r.registered(), field);
+            assertNull(r.authRequired, "absent or unrecognized authRequired is unknown: " + field);
+        }
+    }
+
+    @Test
     void aReusedTrustedHostWithAuthRequiredFalseIsReportedAndLeftAsItIs() {
         wm.stubFor(get(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody(
                 "{\"hosts\":[{\"name\":\"staged\",\"hostNqn\":\"" + NQN + "\",\"authRequired\":\"false\"}],\"nextOffset\":\"\"}")));

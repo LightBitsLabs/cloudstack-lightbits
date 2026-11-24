@@ -125,13 +125,19 @@ public class LightbitsHostKey {
     }
 
     /**
-     * Before anything is read: an existing directory must be owned by root and is made 0700;
-     * an existing key or configuration file owned by root is made 0600 (files from an earlier
-     * version, or copied or made by hand with a wider mode, are root-only again), and one owned
-     * by another user, or a symbolic link, is removed, so a new key is made: another user may
-     * have read the old one. New files are made with these modes.
+     * Before anything is read: the directory must not be a symbolic link and, if it exists, must
+     * be owned by root; it is made 0700. If the key or the configuration file is owned by another
+     * user or is a symbolic link, both are removed, so a new key is made: another user may have
+     * read the old one (the configuration file holds it too). Otherwise existing files are made
+     * 0600 (files from an earlier version, or copied or made by hand with a wider mode, are
+     * root-only again). New files are made with these modes.
      */
     private void restrict() throws IOException {
+        if (Files.isSymbolicLink(dir)) {
+            throw new CloudRuntimeException("Lightbits: " + dir + " is a symbolic link; this host's in-band"
+                    + " authentication key must be in a root-owned directory. Remove the link (a new key is made) and"
+                    + " reconnect the host");
+        }
         if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
             int uid = uid(dir);
             if (uid != ownerUid) {
@@ -141,11 +147,17 @@ public class LightbitsHostKey {
             }
             Files.setPosixFilePermissions(dir, DIR_MODE);
         }
-        for (Path f : new Path[] {keyFile(), configFile()}) {
-            if (Files.isSymbolicLink(f) || Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS) && uid(f) != ownerUid) {
-                Files.delete(f);
-                LOG.warn("Lightbits: {} was not a file owned by root; removed it, and a new in-band authentication key"
-                        + " is made (register it by reconnecting the host)", f);
+        Path[] files = {keyFile(), configFile()};
+        boolean untrusted = false;
+        for (Path f : files) {
+            untrusted |= Files.isSymbolicLink(f) || Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS) && uid(f) != ownerUid;
+        }
+        for (Path f : files) {
+            if (untrusted) {
+                if (Files.deleteIfExists(f)) {
+                    LOG.warn("Lightbits: removed {}: the key or configuration file was not a file owned by root, so a new"
+                            + " in-band authentication key is made (register it by reconnecting the host)", f);
+                }
             } else if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
                 Files.setPosixFilePermissions(f, FILE_MODE);
             }

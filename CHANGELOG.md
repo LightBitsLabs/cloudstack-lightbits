@@ -175,6 +175,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   then reported NOT ready for its pools until it reconnects and the new key is registered.
   After a key change, a pool whose registration still holds the earlier key is reported NOT
   ready for that host.
+- With `inbandAuth=true`, a host connect that waits more than 120 s for the host's in-band
+  lock (another connect of the same host holds it) leaves the key registration to the next
+  connect; the management log says so.
+- A trusted host whose `authRequired` the cluster does not report is listed as "authRequired
+  not reported" in the readiness log, as it may allow connections without a key.
 - Turning `inbandAuth` off leaves the trusted hosts on the cluster and the key on the hosts;
   the cluster admin turns in-band authentication off first, or hosts keep needing their keys.
 - With `ipAcl=true`, a host whose agent is older than this plugin version does not report its

@@ -83,7 +83,7 @@ class LightbitsNvmeHostTest {
         }
 
         @Override public boolean exists(String path) { return links.containsKey(path) || files.containsKey(path); }
-        @Override public String read(String path) { return files.get(path); }
+        @Override public String read(String path) { return unreadable.contains(path) ? null : files.get(path); }
         @Override public String canonical(String path) { return links.get(path); }
         @Override public void sleep(long millis) { slept++; }
 
@@ -463,5 +463,11 @@ class LightbitsNvmeHostTest {
         sys.unreadable.add("/sys/class/nvme");
         assertThrows(CloudRuntimeException.class, () -> host.pathsWithoutKey(current),
                 "an unreadable controller list is an unknown count, not zero");
+
+        sys.unreadable.remove("/sys/class/nvme");
+        sys.unreadable.add("/sys/class/nvme/nvme2/subsysnqn");
+        assertThrows(CloudRuntimeException.class, () -> host.pathsWithoutKey(current),
+                "a listed controller whose NQN cannot be read is an unknown count, not skipped");
+        assertEquals(2, host.livePaths().size(), "paths() still skips it for its other callers (nvme1, nvme4)");
     }
 }

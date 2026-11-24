@@ -68,7 +68,10 @@ public final class LightbitsTrustedHosts {
         return registeredFingerprint != null && registeredFingerprint.equals(currentFingerprint);
     }
 
-    /** Host detail, set to "true" while the host's trusted host for the pool has authRequired=false. */
+    /**
+     * Host detail, set to "true" while the host's trusted host for the pool has authRequired=false,
+     * and to "unknown" when the cluster did not report the value.
+     */
     public static String keyOptionalDetailKey(long poolId) {
         return "lightbits.inbandoptional." + poolId;
     }
@@ -120,11 +123,12 @@ public final class LightbitsTrustedHosts {
         /**
          * False when the trusted host the key was set on has {@code authRequired=false}: the host
          * may then connect without a key even with in-band authentication on. The plugin leaves
-         * that setting to the cluster admin, who uses it for a staged rollout.
+         * that setting to the cluster admin, who uses it for a staged rollout. Null when the
+         * cluster did not return a recognized value: not taken for true.
          */
-        public final boolean authRequired;
+        public final Boolean authRequired;
 
-        Registration(String name, boolean foreignName, boolean authRequired) {
+        Registration(String name, boolean foreignName, Boolean authRequired) {
             this.name = name;
             this.foreignName = foreignName;
             this.authRequired = authRequired;
@@ -166,7 +170,8 @@ public final class LightbitsTrustedHosts {
         String used = existing.map(h -> h.name).orElse(name);
         client.setTrustedHostSecret(used, key);
         // A trusted host the plugin creates has authRequired=true; one that existed keeps what it has.
-        boolean authRequired = existing.map(h -> !Boolean.FALSE.equals(h.authRequired)).orElse(true);
+        // An existing one whose value the cluster did not report stays unknown (null), not true.
+        Boolean authRequired = existing.isPresent() ? existing.get().authRequired : Boolean.TRUE;
         return new Registration(used, !used.equals(name), authRequired);
     }
 

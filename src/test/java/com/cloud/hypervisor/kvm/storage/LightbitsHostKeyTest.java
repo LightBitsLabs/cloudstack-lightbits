@@ -137,6 +137,29 @@ class LightbitsHostKeyTest {
     }
 
     @Test
+    void aSymlinkedKeyDirectoryIsRefused() throws IOException {
+        Path real = Files.createDirectories(tmp.resolve("elsewhere"));
+        Files.writeString(real.resolve("dhchap-key"), KNOWN + "\n");
+        Files.createSymbolicLink(nvme.resolve("lightbits"), real);
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, key::ensure);
+        assertTrue(e.getMessage().contains("symbolic link"), e.getMessage());
+        assertEquals(KNOWN, Files.readString(real.resolve("dhchap-key")).trim(), "nothing is read or changed");
+    }
+
+    @Test
+    void anUntrustedConfigFileAlsoReplacesTheKey() throws IOException {
+        Files.createDirectories(nvme.resolve("lightbits"));
+        Files.writeString(key.keyFile(), KNOWN + "\n");
+        Path elsewhere = Files.writeString(tmp.resolve("planted.json"), LightbitsHostKey.config(NQN, HOST_ID, KNOWN));
+        Files.createSymbolicLink(key.configFile(), elsewhere);
+        String k = key.ensure();
+        assertNotEquals(KNOWN, k, "the key the untrusted configuration held is not reused");
+        assertFalse(Files.isSymbolicLink(key.configFile()));
+        assertTrue(Files.readString(key.configFile()).contains(k));
+        assertEquals(LightbitsHostKey.config(NQN, HOST_ID, KNOWN), Files.readString(elsewhere), "the link target is not written");
+    }
+
+    @Test
     void aKeyPutThereByHandIsUsedAndAnInvalidOneIsReplaced() throws IOException {
         Path dir = Files.createDirectories(nvme.resolve("lightbits"));
         Files.writeString(dir.resolve("dhchap-key"), KNOWN + "\n");
