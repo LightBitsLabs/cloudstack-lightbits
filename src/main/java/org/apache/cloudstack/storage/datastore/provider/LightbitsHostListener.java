@@ -350,9 +350,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     LightbitsTrustedHosts.name(cfg.getEnvironment(), hostUuid), nqn, key,
                     java.util.Map.of("cloudstack-host", hostUuid));
             if (r.registered() && removing(hostId)) {
-                // The host's removal began while this connect registered it. The removal marks the
-                // host before it deletes the trusted host, so either its sweep runs after this write
-                // and deletes it, or this check sees the mark: the host never stays trusted.
+                // The host's removal began, or finished, while this connect registered it. The removal
+                // marks the host before it deletes the trusted host, and CloudStack deletes the host's
+                // details (mark and NQN) only after that: so either the sweep runs after this write and
+                // deletes it, or this check sees the mark or the missing NQN. The host never stays trusted.
                 LightbitsTrustedHosts.unregister(client, cfg.getEnvironment(), nqn, new java.util.ArrayList<>());
                 setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
                 setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
@@ -483,8 +484,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL, poolId);
     }
 
+    /** Being removed, or already removed (its details gone): see LightbitsHostGate.removingCheck. */
     private boolean removing(long hostId) {
-        return hostDetailsDao.findDetail(hostId, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL) != null;
+        return org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.removingCheck(hostDetailsDao,
+                LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL).isRemoving(hostId);
     }
 
     /** A host that connects is not being removed (a removal that did not go through). */

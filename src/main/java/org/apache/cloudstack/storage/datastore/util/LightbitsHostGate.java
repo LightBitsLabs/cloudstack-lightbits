@@ -73,6 +73,15 @@ public final class LightbitsHostGate {
         boolean isRemoving(long hostId);
     }
 
+    /**
+     * Whether a host is being removed, from its details: the removal mark is set, or the host's
+     * NQN detail is gone (CloudStack deletes a removed host's details, the mark included, once
+     * the removal listeners have run, so the mark alone stops answering after the removal).
+     */
+    public static RemovingCheck removingCheck(com.cloud.host.dao.HostDetailsDao dao, String nqnDetail) {
+        return hostId -> dao.findDetail(hostId, REMOVING_DETAIL) != null || dao.findDetail(hostId, nqnDetail) == null;
+    }
+
     private LightbitsHostGate() {
     }
 
