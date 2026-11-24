@@ -74,6 +74,25 @@ public class LightbitsGetHostNqnAnswer extends Answer {
         return this;
     }
 
+    /** Whether a requested key rotation was done; null when none was asked for (or an older agent). */
+    private Boolean keysRotated;
+    /** Why a requested key rotation was not done. */
+    private String rotateError;
+
+    public LightbitsGetHostNqnAnswer withRotation(boolean rotated, String error) {
+        this.keysRotated = rotated;
+        this.rotateError = error;
+        return this;
+    }
+
+    public Boolean getKeysRotated() {
+        return keysRotated;
+    }
+
+    public String getRotateError() {
+        return rotateError;
+    }
+
     /** Adds the two-way outcome: the controller key and the count of paths without it. */
     public LightbitsGetHostNqnAnswer withCtrlKey(String dhchapCtrlKey, Integer pathsWithoutCtrlKey) {
         this.dhchapCtrlKey = dhchapCtrlKey;

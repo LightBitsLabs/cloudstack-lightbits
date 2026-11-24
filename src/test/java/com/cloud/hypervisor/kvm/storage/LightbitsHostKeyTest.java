@@ -253,4 +253,17 @@ class LightbitsHostKeyTest {
         assertNotEquals(c, key.ensureCtrlKey(), "the controller key is replaced");
         assertFalse(Files.exists(f, java.nio.file.LinkOption.NOFOLLOW_LINKS), "the linked configuration is removed");
     }
+
+    @Test
+    void deletingTheKeysMakesNewOnesNextTime() throws IOException {
+        String k = key.ensure();
+        String c = key.ensureCtrlKey();
+        key.ensureTwoWayConfig(POOL, List.of(new LightbitsHostKey.Port(SUB, "10.0.0.1", "4420")));
+        key.deleteKeys();
+        try (var files = Files.list(nvme.resolve("lightbits"))) {
+            assertEquals(0, files.count(), "no key or configuration file is left");
+        }
+        assertNotEquals(k, key.ensure());
+        assertNotEquals(c, key.ensureCtrlKey());
+    }
 }

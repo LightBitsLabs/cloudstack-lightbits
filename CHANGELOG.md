@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- In-band key rotation from CloudStack: raise the pool detail `inbandKeyGeneration`, then cycle
+  each host through maintenance. At that reconnect the host drops its idle Lightbits paths and
+  makes new keys (host key and controller key), which are registered with every
+  `inbandAuth=true` pool of the host; a host that still carries volumes refuses and is asked
+  again at its next reconnect. The readiness log lists hosts still on an older generation.
 - Pool option `inbandAuthTwoWay=true` (with `inbandAuth=true`): two-way in-band
   authentication. Each host also makes a controller key, registered as the trusted host's
   target secret, and connects the pool with a per-pool nvme-cli configuration built from the

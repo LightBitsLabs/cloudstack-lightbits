@@ -70,6 +70,15 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
                 answer = new LightbitsGetHostNqnAnswer(command, nqn, ips).withDataIpsPartial(!failed.isEmpty());
             }
             if (command.isInbandAuth()) {
+                if (command.isRotateKeys()) {
+                    try {
+                        rotateKeys();
+                        answer.withRotation(true, null);
+                    } catch (RuntimeException e) {
+                        LOG.warn("Lightbits: {}", e.getMessage());
+                        answer.withRotation(false, e.getMessage());
+                    }
+                }
                 inbandAuth(answer);
                 if (command.isTwoWay() && answer.getDhchapKey() != null) {
                     ctrlKey(answer);
@@ -132,6 +141,11 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
     /** Paths whose controller key is none or an old one. */
     protected int pathsWithoutCtrlKey(String currentCtrlKey) {
         return com.cloud.hypervisor.kvm.storage.LightbitsHostKey.pathsWithoutCtrlKey(currentCtrlKey);
+    }
+
+    /** Rotate this host's keys if no Lightbits volume is in use here; throws with the reason otherwise. */
+    protected void rotateKeys() {
+        com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.rotateInbandKeys();
     }
 
     protected com.cloud.hypervisor.kvm.storage.LightbitsHostKey hostKey() {

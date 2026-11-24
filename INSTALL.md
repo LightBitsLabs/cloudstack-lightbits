@@ -395,40 +395,59 @@ A path that fails authentication shows in the host's kernel log, and nvme-cli re
 wording is nvme-cli's, the cause is DH-HMAC-CHAP). Check a host's registration with
 `lbcli list trusted-hosts --project-name=<project>`.
 
-To rotate a host's key, put the host in maintenance (its VMs migrate away), delete
-`/etc/nvme/lightbits/dhchap-key` (and, for two-way, `/etc/nvme/lightbits/dhchap-ctrl-key`), disconnect it from the subsystem of **every** Lightbits
-cluster it uses (as in step 4, one `nvme disconnect -n` per `nqn.2016-01.com.lightbitslabs:`
-entry of `nvme list-subsys`) and cancel maintenance: a new key is made and registered with
-every `inbandAuth=true` pool the host is in, and the new paths hold it.
+#### Rotating the keys
 
-A host whose trusted host belongs to another project (step 5) is not updated by the plugin,
-so its new key must be set there before the host leaves maintenance. While the host is in
-maintenance, make the new key on the host instead of deleting the old one (the plugin uses a
-valid key it finds there):
+Rotation is started from CloudStack and needs no shell on the hosts. It replaces both keys of
+each host (the host key, and the controller key for two-way) and works with enforcement on.
+
+1. Raise the pool's key generation (it starts at 0):
+   ```bash
+   cmk update storagepool id=<pool-id> details[0].inbandKeyGeneration=<current + 1>
+   ```
+2. For each host of the pool in turn: put it in maintenance (its VMs migrate away), then
+   cancel maintenance. At that reconnect the agent drops the host's idle Lightbits paths, makes
+   new keys, and the management server registers them with every `inbandAuth=true` pool the
+   host is in (the keys are per host); the management log says "rotated its in-band
+   authentication keys". The host's paths are made again, with the new keys, at the next
+   attach or migration.
+3. Watch the readiness line: it lists the hosts still on keys older than the pool's key
+   generation. A host that reconnects while it still carries volumes (not in maintenance)
+   refuses to rotate, keeps its keys, and logs why; it is asked again at its next reconnect.
+
+A rolling rotation of all hosts of a cluster, one at a time:
 ```bash
-(umask 077; nvme gen-dhchap-key --nqn="$(cat /etc/nvme/hostnqn)" > /etc/nvme/lightbits/dhchap-key.new \
-  && mv -f /etc/nvme/lightbits/dhchap-key.new /etc/nvme/lightbits/dhchap-key)
+for h in $(cmk list hosts clusterid=<cluster-id> type=Routing filter=id | jq -r '.host[].id'); do
+  cmk prepare hostformaintenance id=$h && cmk cancel hostmaintenance id=$h
+done
 ```
-then have the cluster admin set it in the other project on **every** Lightbits cluster where
-the host has such a trusted host (one `lbcli set trusted-host-secrets` per cluster), and only
-then disconnect the paths and cancel maintenance as above; a cluster left out refuses the
-host's new key. `lbcli set trusted-host-secrets` takes the key only on its
-command line (`--host-secret`; it has no file or standard-input option), so keep it out of
-shell history and files, for example:
+(check that each host is back Up before the next one, as for any maintenance).
+
+The storage admin starts nothing: a rotation of CloudStack hosts is the CloudStack
+operator's step above. To cut a host off at once, the cluster admin deletes its trusted host
+(`lbcli delete trusted-host`); with enforcement on it can then no longer connect.
+
+A host whose trusted host belongs to another project (step 5) is not updated by the plugin.
+After it rotated (step 2) and before VMs go back to it, the cluster admin sets its new host key
+there on **every** Lightbits cluster where the host has such a trusted host (one
+`lbcli set trusted-host-secrets` per cluster; add `--target-secret-type=Enabled
+--target-secret=...` with the controller key for two-way); a cluster left out refuses the
+host's new key. `lbcli set trusted-host-secrets` takes the keys only on its command line (it
+has no file or standard-input option), so keep them out of shell history and files, for
+example:
 ```bash
 set +o history
 K="$(ssh root@<host> cat /etc/nvme/lightbits/dhchap-key)"
 lbcli set trusted-host-secrets --project-name=<other project> --name=<trusted host> --host-secret="$K"
 unset K; set -o history
 ```
-While that command runs, its arguments, the key included, are visible to other users of
-that machine (`ps`), so run it where only cluster admins can log in. The key is one per
-host, shared by all its pools; a cluster whose paths were not disconnected keeps them on the
-old key, and they fail at their next reconnect once that cluster enforces authentication. Do not
-replace the key of a host that keeps running VMs while enforcement is on: its connected
-paths keep the old key, which the cluster no longer accepts, so their next reconnect fails
-and a volume with no other path stops (its I/O waits for a path that never comes back). The
-readiness line lists such a host until its paths hold the new key.
+While that command runs, its arguments, the keys included, are visible to other users of that
+machine (`ps`), so run it where only cluster admins can log in.
+
+Do not replace the keys of a host that keeps running VMs by hand (deleting the files under
+`/etc/nvme/lightbits`) while enforcement is on: its connected paths keep the old keys, which
+the cluster no longer accepts, so their next reconnect fails and a volume with no other path
+stops (its I/O waits for a path that never comes back). The rotation above refuses in that
+case.
 
 To turn the option off, the cluster admin first turns enforcement off
 (`lbcli disable in-band-auth`); then remove the detail. The trusted hosts stay on the

@@ -70,6 +70,21 @@ public class LightbitsGetHostNqnCommand extends Command {
         return twoWay;
     }
 
+    /**
+     * When true (with inbandAuth) the agent rotates this host's keys first, if no Lightbits
+     * volume is in use on it, and reports the new ones. An older agent ignores it.
+     */
+    private boolean rotateKeys;
+
+    public LightbitsGetHostNqnCommand withRotateKeys(boolean rotateKeys) {
+        this.rotateKeys = inbandAuth && rotateKeys;
+        return this;
+    }
+
+    public boolean isRotateKeys() {
+        return rotateKeys;
+    }
+
     public java.util.List<String> getEndpoints() {
         return endpoints;
     }

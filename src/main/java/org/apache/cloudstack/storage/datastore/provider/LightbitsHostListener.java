@@ -185,8 +185,22 @@ public class LightbitsHostListener implements HypervisorHostListener {
             LOG.debug("Lightbits: host {} already has '{}' = {}", hostId, key, existing.getValue());
             return;
         }
+        // Rotation: the pool's key generation is above the one this host's keys belong to. A host
+        // seen for the first time starts at the pool's current generation (nothing to rotate).
+        boolean rotate = false;
+        if (wantAuth) {
+            DetailVO gen = hostDetailsDao.findDetail(hostId, LightbitsTrustedHosts.generationDetailKey(poolId));
+            if (gen == null) {
+                setHostDetail(hostId, LightbitsTrustedHosts.generationDetailKey(poolId), String.valueOf(cfg.getInbandKeyGeneration()));
+            } else {
+                rotate = generation(gen.getValue()) < cfg.getInbandKeyGeneration();
+            }
+        }
         Answer answer = agentMgr.easySend(hostId, new LightbitsGetHostNqnCommand(wantIps ? cfg.discoveryEndpoints() : null, wantAuth,
-                wantAuth && cfg.isInbandAuthTwoWay()));
+                wantAuth && cfg.isInbandAuthTwoWay()).withRotateKeys(rotate));
+        if (rotate && answer instanceof LightbitsGetHostNqnAnswer && answer.getResult()) {
+            recordRotation(hostId, poolId, cfg.getInbandKeyGeneration(), (LightbitsGetHostNqnAnswer) answer);
+        }
         if (answer instanceof LightbitsGetHostNqnAnswer && answer.getResult()
                 && ((LightbitsGetHostNqnAnswer) answer).getHostNqn() != null) {
             String nqn = ((LightbitsGetHostNqnAnswer) answer).getHostNqn();
@@ -464,6 +478,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
         java.util.List<String> unregistered = new java.util.ArrayList<>();
         java.util.List<String> keyless = new java.util.ArrayList<>();
         java.util.List<String> optional = new java.util.ArrayList<>();
+        java.util.List<String> pendingRotation = new java.util.ArrayList<>();
         java.util.List<StoragePoolHostVO> refs = storagePoolHostDao.listByPoolId(poolId);
         org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
         boolean twoWay = cfg != null && cfg.isInbandAuthTwoWay();
@@ -486,6 +501,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     optional.add("unknown".equals(opt.getValue()) ? label + " (authRequired not reported)" : label);
                 }
             }
+            String gen = value(id, LightbitsTrustedHosts.generationDetailKey(poolId));
+            if (cfg != null && gen != null && generation(gen) < cfg.getInbandKeyGeneration()) {
+                pendingRotation.add(label);
+            }
             DetailVO k = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.KEYLESS_DETAIL);
             if (k == null || !"0".equals(k.getValue())) {
                 keyless.add(label + (k == null ? " (unknown)" : " (" + k.getValue() + ")"));
@@ -497,8 +516,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 }
             }
         }
-        String optionalNote = optional.isEmpty() ? "" : " Trusted hosts with authRequired=false (they may still connect"
-                + " without a key; the cluster admin sets this): " + optional + ".";
+        String optionalNote = (optional.isEmpty() ? "" : " Trusted hosts with authRequired=false (they may still connect"
+                + " without a key; the cluster admin sets this): " + optional + ".")
+                + (pendingRotation.isEmpty() ? "" : " Hosts still on keys older than key generation "
+                + cfg.getInbandKeyGeneration() + " (they rotate at their next reconnect while in maintenance): " + pendingRotation + ".");
         if (unregistered.isEmpty() && keyless.isEmpty()) {
             LOG.info("Lightbits: the {} host(s) of pool {} are ready for in-band authentication: all are trusted hosts and"
                     + " connect with their keys{}.{} Enforcement is cluster-wide: the cluster admin turns it on (lbcli enable"
@@ -511,6 +532,33 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     + " at their next reconnect once it is on; put the host in maintenance, disconnect its Lightbits paths"
                     + " and cancel maintenance, see INSTALL.md): {}.{}", poolId, unregistered, keyless,
                     optionalNote);
+        }
+    }
+
+    private static int generation(String v) {
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Record the outcome of a requested rotation. Done: the host's generation for the pool is
+     * raised (its new keys are registered right after, in the same connect). Refused (volumes in
+     * use) or not understood (an older agent): logged, and asked again at the next connect.
+     */
+    private void recordRotation(long hostId, long poolId, int generation, LightbitsGetHostNqnAnswer answer) {
+        if (Boolean.TRUE.equals(answer.getKeysRotated())) {
+            setHostDetail(hostId, LightbitsTrustedHosts.generationDetailKey(poolId), String.valueOf(generation));
+            LOG.info("Lightbits: host {} rotated its in-band authentication keys (pool {} key generation {})", hostId, poolId,
+                    generation);
+        } else if (answer.getKeysRotated() == null) {
+            LOG.warn("Lightbits: host {} did not rotate its in-band authentication keys for pool {} key generation {}: its"
+                    + " agent is older than this plugin version; upgrade it", hostId, poolId, generation);
+        } else {
+            LOG.warn("Lightbits: host {} did not rotate its in-band authentication keys for pool {} key generation {}: {}."
+                    + " Asked again at its next connect", hostId, poolId, generation, answer.getRotateError());
         }
     }
 

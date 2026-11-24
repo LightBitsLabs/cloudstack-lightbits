@@ -61,6 +61,11 @@ public final class LightbitsTrustedHosts {
     /** Host detail: Lightbits paths of the host whose controller key is not the current one, as last reported. */
     public static final String CTRL_KEYLESS_DETAIL = "lightbits.ctrlkeylesspaths";
 
+    /** Host detail: the pool's key generation the host's keys belong to (rotation). */
+    public static String generationDetailKey(long poolId) {
+        return "lightbits.keygeneration." + poolId;
+    }
+
     /** Host detail: the fingerprint of the controller key registered as the target secret for the pool (two-way). */
     public static String ctrlDetailKey(long poolId) {
         return "lightbits.inbandctrl." + poolId;

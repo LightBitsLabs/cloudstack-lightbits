@@ -71,6 +71,8 @@ public class LightbitsPoolConfig {
     public static final String KEY_INBAND_AUTH = "inbandAuth";
     /** With inbandAuth: also register a controller key, so each host verifies the cluster (two-way, opt-in). */
     public static final String KEY_INBAND_AUTH_TWO_WAY = "inbandAuthTwoWay";
+    /** Raise to rotate the in-band keys of the pool's hosts: each rotates at its next idle reconnect. */
+    public static final String KEY_INBAND_KEY_GENERATION = "inbandKeyGeneration";
     public static final int DISCOVERY_PORT = 8009;
     private static final int MAX_DETAIL_LENGTH = 255;
 
@@ -92,6 +94,7 @@ public class LightbitsPoolConfig {
     private boolean ipAcl;
     private boolean inbandAuth;
     private boolean inbandAuthTwoWay;
+    private int inbandKeyGeneration;
 
     public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
                                boolean compression, String qosPolicy, String jwt, String environment) {
@@ -183,6 +186,7 @@ public class LightbitsPoolConfig {
         cfg.ipAcl = parseStrictBoolean(KEY_IP_ACL, q.get(KEY_IP_ACL));
         cfg.inbandAuth = parseStrictBoolean(KEY_INBAND_AUTH, q.get(KEY_INBAND_AUTH));
         cfg.inbandAuthTwoWay = parseStrictBoolean(KEY_INBAND_AUTH_TWO_WAY, q.get(KEY_INBAND_AUTH_TWO_WAY));
+        cfg.inbandKeyGeneration = parseGeneration(q.get(KEY_INBAND_KEY_GENERATION));
         if (cfg.inbandAuthTwoWay && !cfg.inbandAuth) {
             throw new IllegalArgumentException(KEY_INBAND_AUTH_TWO_WAY + "=true needs " + KEY_INBAND_AUTH + "=true");
         }
@@ -282,6 +286,7 @@ public class LightbitsPoolConfig {
         cfg.inbandAuth = parseStrictBoolean(KEY_INBAND_AUTH, details.get(KEY_INBAND_AUTH));
         // set on an existing pool without inbandAuth it has no effect (isInbandAuthTwoWay)
         cfg.inbandAuthTwoWay = parseStrictBoolean(KEY_INBAND_AUTH_TWO_WAY, details.get(KEY_INBAND_AUTH_TWO_WAY));
+        cfg.inbandKeyGeneration = parseGeneration(details.get(KEY_INBAND_KEY_GENERATION));
         return cfg;
     }
 
@@ -311,6 +316,9 @@ public class LightbitsPoolConfig {
         }
         if (inbandAuthTwoWay) {
             d.put(KEY_INBAND_AUTH_TWO_WAY, "true");
+        }
+        if (inbandKeyGeneration > 0) {
+            d.put(KEY_INBAND_KEY_GENERATION, String.valueOf(inbandKeyGeneration));
         }
         if (qosFromIops) {
             d.put(KEY_QOS_FROM_IOPS, "true");
@@ -436,8 +444,25 @@ public class LightbitsPoolConfig {
     public boolean isInbandAuth() { return inbandAuth; }
     /** Two-way in-band authentication: only together with {@link #isInbandAuth()}. */
     public boolean isInbandAuthTwoWay() { return inbandAuth && inbandAuthTwoWay; }
+    public int getInbandKeyGeneration() { return inbandKeyGeneration; }
 
     /** Absent means false; anything but true or false is refused rather than read as false. */
+    /** A key generation: a whole number 0 or more; absent is 0. */
+    private static int parseGeneration(String value) {
+        if (value == null || value.isBlank()) {
+            return 0;
+        }
+        try {
+            int g = Integer.parseInt(value.trim());
+            if (g >= 0) {
+                return g;
+            }
+        } catch (NumberFormatException e) {
+            // fall through
+        }
+        throw new IllegalArgumentException(KEY_INBAND_KEY_GENERATION + " must be a whole number 0 or more (got '" + value + "')");
+    }
+
     private static boolean parseStrictBoolean(String key, String value) {
         if (value == null || value.isBlank()) {
             return false;

@@ -285,4 +285,16 @@ class LightbitsPoolConfigTest {
         org.junit.jupiter.api.Assertions.assertFalse(LightbitsPoolConfig.fromDetails(d, "jwt").isInbandAuthTwoWay(),
                 "set on an existing pool without inbandAuth it has no effect");
     }
+
+    @Test
+    void theKeyGenerationIsAWholeNumberAndSurvivesTheDetailsRoundTrip() {
+        assertEquals(0, LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1", "jwt").getInbandKeyGeneration());
+        LightbitsPoolConfig g = LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandAuth=true&inbandKeyGeneration=3", "jwt");
+        assertEquals(3, LightbitsPoolConfig.fromDetails(g.toDetailsWithoutSecret(), "jwt").getInbandKeyGeneration());
+        for (String bad : new String[] {"-1", "two", "1.5"}) {
+            IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandKeyGeneration=" + bad, "jwt"));
+            assertTrue(e.getMessage().contains("inbandKeyGeneration"), e.getMessage());
+        }
+    }
 }

@@ -131,6 +131,30 @@ public class LightbitsHostKey {
         }
     }
 
+    /**
+     * Delete this host's keys and every configuration file that holds them (rotation): the next
+     * {@link #ensure()} and {@link #ensureCtrlKey()} make new ones. The caller makes sure no path
+     * still uses the old keys.
+     */
+    public void deleteKeys() {
+        synchronized (LOCK) {
+            try {
+                java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), ctrlKeyFile(), configFile()));
+                if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+                    try (java.util.stream.Stream<Path> list = Files.list(dir)) {
+                        list.filter(f -> f.getFileName().toString().matches("auth-.+\\.json")).forEach(files::add);
+                    }
+                }
+                for (Path f : files) {
+                    Files.deleteIfExists(f);
+                }
+            } catch (IOException e) {
+                throw new CloudRuntimeException("Lightbits: could not delete this host's in-band authentication keys in " + dir
+                        + ": " + e.getMessage(), e);
+            }
+        }
+    }
+
     /** The configuration file for {@code nvme connect-all --config}, made if missing. */
     public Path ensureConfig() {
         ensure();

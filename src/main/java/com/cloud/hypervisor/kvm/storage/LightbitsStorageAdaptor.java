@@ -272,6 +272,31 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      * host loses its paths once the cluster turns in-band authentication on.
      */
     /**
+     * Rotate this host's in-band authentication keys (host key and controller key): only when no
+     * Lightbits volume is in use here. Under the connect lock, idle Lightbits connections are
+     * dropped first (they hold the old keys and would fail their next reconnect once the cluster
+     * has the new ones); if any Lightbits path is still left, a volume is still granted to this
+     * host and the rotation is refused. Otherwise the keys are deleted; the caller makes new
+     * ones, and the next attach connects with them.
+     */
+    public static void rotateInbandKeys() {
+        rotateInbandKeys(new LightbitsNvmeHost(), new LightbitsHostKey());
+    }
+
+    static void rotateInbandKeys(LightbitsNvmeHost nvme, LightbitsHostKey hostKey) {
+        synchronized (CONNECT_LOCK) {
+            List<String> dropped = nvme.disconnectIdleSubsystems();
+            int left = nvme.paths().size();
+            if (left > 0) {
+                throw new CloudRuntimeException("Lightbits: key rotation refused: " + left + " Lightbits NVMe/TCP path(s) of this"
+                        + " host still carry volumes. Put the host in maintenance (its VMs migrate away), then reconnect it");
+            }
+            hostKey.deleteKeys();
+            LOG.info("Lightbits: rotating this host's in-band authentication keys (disconnected idle subsystems {})", dropped);
+        }
+    }
+
+    /**
      * The configuration file to connect a pool with, chosen per discovery endpoint: none for a
      * pool without in-band authentication, the shared one-way file ({@link #authConfig}) for
      * one-way, and for two-way the pool's own file with the host and controller keys on every

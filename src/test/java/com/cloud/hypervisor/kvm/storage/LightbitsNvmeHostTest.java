@@ -19,6 +19,7 @@
 package com.cloud.hypervisor.kvm.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -520,5 +521,49 @@ class LightbitsNvmeHostTest {
         sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", ctrl + "\n");
         sys.files.put("/sys/class/nvme/nvme3/dhchap_ctrl_secret", "DHHC-1:00:old:");
         assertEquals(2, host.pathsWithoutCtrlKey(ctrl));
+    }
+
+    private LightbitsHostKey keyIn(java.nio.file.Path tmp) throws java.io.IOException {
+        java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
+        return new LightbitsHostKey(tmp.resolve("lightbits"), tmp, (Integer) java.nio.file.Files.getAttribute(tmp, "unix:uid"));
+    }
+
+    @Test
+    void anIdleHostRotatesItsKeysAfterDroppingItsIdlePaths(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        LightbitsHostKey key = keyIn(tmp);
+        String k = key.ensure();
+        String c = key.ensureCtrlKey();
+        key.ensureTwoWayConfig("387e455e-bb68-498f-9ef3-04c463815e5d", List.of());
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        // the disconnect removes the controller with its subsystem, as the kernel does
+        LightbitsNvmeHost nvme = new LightbitsNvmeHost(new FakeSys() {
+            { files.putAll(sys.files); }
+            @Override
+            public LightbitsNvmeHost.Result run(long t, String... argv) {
+                LightbitsNvmeHost.Result r = super.run(t, argv);
+                if (String.join(" ", argv).startsWith("nvme disconnect")) {
+                    files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme3/"));
+                }
+                return r;
+            }
+        });
+        LightbitsStorageAdaptor.rotateInbandKeys(nvme, key);
+        assertNotEquals(k, key.ensure(), "a new host key");
+        assertNotEquals(c, key.ensureCtrlKey(), "a new controller key");
+        assertTrue(java.nio.file.Files.list(tmp.resolve("lightbits")).noneMatch(f -> f.getFileName().toString().startsWith("auth-")),
+                "the old two-way configurations are gone");
+    }
+
+    @Test
+    void aHostWithAVolumeInUseRefusesToRotate(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        LightbitsHostKey key = keyIn(tmp);
+        String k = key.ensure();
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme3n2");
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> LightbitsStorageAdaptor.rotateInbandKeys(host, key));
+        assertTrue(e.getMessage().contains("maintenance"), e.getMessage());
+        assertEquals(k, key.ensure(), "the keys are kept");
+        assertTrue(sys.commands.stream().noneMatch(cmd -> cmd.startsWith("nvme disconnect")), "a subsystem in use is not touched");
     }
 }
