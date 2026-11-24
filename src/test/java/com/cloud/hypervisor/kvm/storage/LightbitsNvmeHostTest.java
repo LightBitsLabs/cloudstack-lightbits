@@ -667,4 +667,22 @@ class LightbitsNvmeHostTest {
         host.dropNewPathsWithoutCtrlKey(java.util.Set.of(), ctrl);
         host.requireTwoWayPaths("nvme3n1", ctrl);
     }
+
+    @Test
+    void pathCountsCanBeLimitedToOneCluster() {
+        String key = "DHHC-1:00:k:";
+        String other = "nqn.2016-01.com.lightbitslabs:uuid:0b0b0b0b-1111-2222-3333-444444444444";
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme1/dhchap_secret", key);
+        sys.files.put("/sys/class/nvme/nvme1/dhchap_ctrl_secret", key);
+        sys.files.put("/sys/class/nvme/nvme7/subsysnqn", other);
+        sys.files.put("/sys/class/nvme/nvme7/state", "live");
+        sys.files.put("/sys/class/nvme/nvme7/dhchap_secret", "none");
+        assertEquals(1, host.pathsWithoutKey(key), "all clusters");
+        assertEquals(0, host.pathsWithoutKey(key, NQN), "only this cluster's paths count");
+        assertEquals(1, host.pathsWithoutKey(key, other));
+        assertEquals(0, host.pathsWithoutCtrlKey(key, NQN));
+        assertEquals(2, host.lightbitsPathCount());
+        assertEquals(1, host.lightbitsPathCount(other));
+    }
 }

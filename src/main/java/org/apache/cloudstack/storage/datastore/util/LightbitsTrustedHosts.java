@@ -73,6 +73,14 @@ public final class LightbitsTrustedHosts {
         return "lightbits.inbandctrl." + poolId;
     }
 
+    /**
+     * A host detail kept per pool: the host's current key, its path counts and its exposure mark
+     * are per cluster now (each cluster has its own keys), so each pool keeps its own copy.
+     */
+    public static String perPool(String detail, long poolId) {
+        return detail + "." + poolId;
+    }
+
     public static String detailKey(long poolId) {
         return DETAIL_PREFIX + poolId;
     }

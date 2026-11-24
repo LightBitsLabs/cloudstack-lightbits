@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Changed
+- In-band authentication keys are per Lightbits cluster: a host makes a host key and a
+  controller key for each cluster (identified by its subsystem NQN, read from the cluster) and
+  registers each only with its own cluster, so one cluster's secrets cannot be used against
+  another. A host's existing key is kept for each cluster until that cluster's keys are rotated,
+  so live paths are not disturbed; rotation (pool `inbandKeyGeneration`) is per cluster. Path
+  counts and the readiness line are per pool, so a host's paths to another cluster no longer
+  make a pool report it not ready. An agent or management server of an earlier version uses
+  the host-wide key as before.
 - In-band authentication keys found readable by other users than root are still made root-only
   and kept (so the host keeps working), but are now flagged as possibly copied: the agent
   reports it, the management log warns, and the readiness line lists the host until its keys

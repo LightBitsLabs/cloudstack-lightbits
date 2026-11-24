@@ -128,6 +128,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     String.join(",", cfg.discoveryEndpoints()));
             if (cfg.isInbandAuth()) {
                 out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true");
+                String scope = keyScope(poolId);
+                if (scope != null) {
+                    out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE, scope);
+                }
                 if (cfg.isInbandAuthTwoWay()) {
                     out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_TWO_WAY, "true");
                 }
@@ -204,7 +208,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
         // a rotation also asks for the controller key: the new keys go to every pool of the host,
         // two-way ones included
         Answer answer = agentMgr.easySend(hostId, new LightbitsGetHostNqnCommand(wantIps ? cfg.discoveryEndpoints() : null, wantAuth,
-                wantAuth && (cfg.isInbandAuthTwoWay() || rotate)).withRotateKeys(rotate));
+                wantAuth && (cfg.isInbandAuthTwoWay() || rotate)).withRotateKeys(rotate)
+                .withKeyScope(wantAuth ? keyScope(poolId) : null));
         boolean rotated = false;
         if (rotate && answer instanceof LightbitsGetHostNqnAnswer && answer.getResult()) {
             rotated = recordRotation(hostId, poolId, cfg.getInbandKeyGeneration(), (LightbitsGetHostNqnAnswer) answer);
@@ -361,14 +366,14 @@ public class LightbitsHostListener implements HypervisorHostListener {
             // No key now: an earlier registration no longer says this host is ready, and its
             // count of keyless paths is unknown until the agent reports one again.
             clearRegistration(hostId, poolId);
-            setHostDetail(hostId, LightbitsTrustedHosts.KEYLESS_DETAIL, null);
-            setHostDetail(hostId, LightbitsTrustedHosts.CURRENT_KEY_DETAIL, null);
+            setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYLESS_DETAIL, poolId), null);
+            setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, poolId), null);
             reportInbandReadiness(poolId);
             return;
         }
-        setHostDetail(hostId, LightbitsTrustedHosts.KEYLESS_DETAIL,
+        setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYLESS_DETAIL, poolId),
                 answer.getKeylessPaths() == null ? null : String.valueOf(answer.getKeylessPaths()));
-        setHostDetail(hostId, LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, answer.isKeysPossiblyExposed() ? "true" : null);
+        setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, poolId), answer.isKeysPossiblyExposed() ? "true" : null);
         if (answer.isKeysPossiblyExposed()) {
             LOG.warn("Lightbits: host {} reports that its in-band authentication key files were readable by other users"
                     + " than root before they were made root-only again; the keys may have been copied. Rotate them: raise"
@@ -377,7 +382,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
         }
         String fp = LightbitsTrustedHosts.fingerprint(key);
         // host-wide: a pool whose registration holds another fingerprint no longer counts this host as ready
-        setHostDetail(hostId, LightbitsTrustedHosts.CURRENT_KEY_DETAIL, fp);
+        setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, poolId), fp);
         String ctrl = null;
         try {
             LightbitsPoolConfig cfg = poolSecrets.apply(poolId);
@@ -387,11 +392,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     LOG.warn("Lightbits: pool {} has inbandAuthTwoWay on, but host {} sent no controller key (its agent is"
                             + " older than this plugin version, or the key could not be made; see the agent log); it is"
                             + " registered one-way", poolId, hostId);
-                    setHostDetail(hostId, LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, null);
-                    setHostDetail(hostId, LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL, null);
+                    setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, poolId), null);
+                    setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL, poolId), null);
                 } else {
-                    setHostDetail(hostId, LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, LightbitsTrustedHosts.fingerprint(ctrl));
-                    setHostDetail(hostId, LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL,
+                    setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, poolId), LightbitsTrustedHosts.fingerprint(ctrl));
+                    setHostDetail(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL, poolId),
                             answer.getPathsWithoutCtrlKey() == null ? null : String.valueOf(answer.getPathsWithoutCtrlKey()));
                 }
             }
@@ -512,13 +517,13 @@ public class LightbitsHostListener implements HypervisorHostListener {
             com.cloud.host.HostVO h = hostDao.findById(id);
             String label = h == null ? String.valueOf(id) : h.getName();
             DetailVO reg = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.detailKey(poolId));
-            DetailVO current = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.CURRENT_KEY_DETAIL);
+            DetailVO current = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, poolId));
             if (reg == null) {
                 unregistered.add(label);
             } else if (!LightbitsTrustedHosts.holdsCurrentKey(reg.getValue(), current == null ? null : current.getValue())) {
                 unregistered.add(label + " (registered with an earlier key)");
             } else if (twoWay && !LightbitsTrustedHosts.holdsCurrentKey(value(id, LightbitsTrustedHosts.ctrlDetailKey(poolId)),
-                    value(id, LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL))) {
+                    value(id, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, poolId)))) {
                 unregistered.add(label + " (no current controller key registered: two-way not in place)");
             } else {
                 DetailVO opt = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.keyOptionalDetailKey(poolId));
@@ -526,19 +531,19 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     optional.add("unknown".equals(opt.getValue()) ? label + " (authRequired not reported)" : label);
                 }
             }
-            if ("true".equals(value(id, LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL))) {
+            if ("true".equals(value(id, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, poolId)))) {
                 exposed.add(label);
             }
             String gen = value(id, LightbitsTrustedHosts.generationDetailKey(poolId));
             if (gen != null && generation(gen) < cfg.getInbandKeyGeneration()) {
                 pendingRotation.add(label);
             }
-            DetailVO k = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.KEYLESS_DETAIL);
+            DetailVO k = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYLESS_DETAIL, poolId));
             if (k == null || !"0".equals(k.getValue())) {
                 keyless.add(label + (k == null ? " (unknown)" : " (" + k.getValue() + ")"));
             }
             if (twoWay) {
-                String c = value(id, LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL);
+                String c = value(id, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL, poolId));
                 if (!"0".equals(c)) {
                     keyless.add(label + (c == null ? " (controller key: unknown)" : " (" + c + " without the current controller key)"));
                 }
@@ -599,9 +604,37 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * the keys are per host, and each of those clusters would refuse the new key until that
      * pool's own host connect. Runs under the host's report lock, like every registration.
      */
-    /** The key generation of every other inbandAuth Lightbits pool of the host, by pool id. */
+    /**
+     * The scope of a pool's host keys: its cluster's subsystem NQN, read once from the cluster and
+     * kept as a pool detail ({@value #KEY_SCOPE_DETAIL}). Null when it cannot be read: the host
+     * then uses its host-wide keys, as with a management server of an earlier version.
+     */
+    String keyScope(long poolId) {
+        String kept = storagePoolDetailsDao.listDetailsKeyPairs(poolId).get(KEY_SCOPE_DETAIL);
+        if (kept != null && !kept.isBlank()) {
+            return kept.trim();
+        }
+        try {
+            LightbitsPoolConfig cfg = poolSecrets.apply(poolId);
+            String scope = clients.apply(cfg).clusterSubsystemNqn();
+            if (scope != null) {
+                storagePoolDetailsDao.addDetail(poolId, KEY_SCOPE_DETAIL, scope, false);
+            }
+            return scope;
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not read the subsystem NQN of the cluster of pool {} ({}); its hosts use their"
+                    + " host-wide in-band keys until it can be read", poolId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** Pool detail: the cluster's subsystem NQN, the scope of the hosts' in-band keys for the pool. */
+    static final String KEY_SCOPE_DETAIL = "lightbits.subsystemnqn";
+
+    /** The key generation of every other inbandAuth Lightbits pool of the host on the same cluster, by pool id. */
     private java.util.Map<Long, Integer> otherPoolGenerations(long hostId, long rotatingPoolId) {
         java.util.Map<Long, Integer> out = new java.util.LinkedHashMap<>();
+        String scope = keyScope(rotatingPoolId);
         for (StoragePoolHostVO ref : storagePoolHostDao.listByHostId(hostId)) {
             long other = ref.getPoolId();
             if (other == rotatingPoolId) {
@@ -612,7 +645,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 continue;
             }
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig c = poolConfigOrNull(other);
-            if (c != null && c.isInbandAuth()) {
+            // only pools of the same cluster share the rotated keys; other clusters keep theirs
+            if (c != null && c.isInbandAuth() && java.util.Objects.equals(scope, keyScope(other))) {
                 out.put(other, c.getInbandKeyGeneration());
             }
         }

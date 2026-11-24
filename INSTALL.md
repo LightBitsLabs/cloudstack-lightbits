@@ -318,11 +318,17 @@ IP ACLs, and a volume left with one host's address refuses every other host.
 (DH-HMAC-CHAP) turned on, the cluster lets a host open an I/O path only when the host proves
 it holds the key registered for it as a trusted host. With `inbandAuth=true` the plugin does
 the host side:
-- Each KVM host makes its own key the first time it is needed and keeps it in
-  `/etc/nvme/lightbits/dhchap-key`, with an nvme-cli configuration file next to it
-  (`auth.json`); the directory is 0700 and both files 0600. The agent connects to the pool's
-  cluster with `nvme connect-all --config=/etc/nvme/lightbits/auth.json`, so the key never
-  appears on a command line. A cluster with in-band authentication off ignores the key.
+- Each KVM host makes its own key, one per Lightbits cluster, the first time it is needed and
+  keeps it under `/etc/nvme/lightbits/` (`dhchap-key-<cluster id>`), with an nvme-cli
+  configuration file next to it (`auth-<cluster id>.json`); the directory is 0700 and the
+  files 0600. The cluster id is a digest of the cluster's subsystem NQN, which the management
+  server reads from the cluster. Because each cluster has its own keys, a cluster (or anyone
+  holding its project token, which can read the trusted host's secrets) cannot use a host's
+  keys against another cluster. A host that already had a key from an earlier version keeps
+  using it for each cluster (its paths hold it) until that cluster's keys are rotated; from
+  then on they are the cluster's own. The agent connects with
+  `nvme connect-all --config=<that file>`, so the key never appears on a command line. A
+  cluster with in-band authentication off ignores the key.
   Key files found readable by other users (copied in or made by hand with a wider mode) are
   made root-only again but may already have been copied: the host is then listed in the
   readiness line as needing a key rotation (see [Rotating the keys](#rotating-the-keys))
@@ -414,7 +420,9 @@ wording is nvme-cli's, the cause is DH-HMAC-CHAP). Check a host's registration w
 #### Rotating the keys
 
 Rotation is started from CloudStack and needs no shell on the hosts. It replaces both keys of
-each host (the host key, and the controller key for two-way) and works with enforcement on.
+each host for one Lightbits cluster (the host key, and the controller key for two-way) and
+works with enforcement on. Keys are per cluster: rotating one cluster's keys leaves the
+host's keys for its other clusters as they are.
 
 1. Raise the pool's key generation (it starts at 0):
    ```bash
@@ -424,9 +432,10 @@ each host (the host key, and the controller key for two-way) and works with enfo
    until it runs no VMs, cancel maintenance and right away reconnect it
    (`cmk reconnect host id=<host-id>`). The reconnect is what rotates: cancelling maintenance
    does not reconnect the agent, and CloudStack sends a host in maintenance no plugin command,
-   so it cannot rotate before maintenance ends. At that reconnect the agent drops the host's idle Lightbits paths, makes new keys, and the management server registers them with every `inbandAuth=true` pool the
-   host is in (the keys are per host); the management log says "rotated its in-band
-   authentication keys". The host's paths are made again, with the new keys, at the next
+   so it cannot rotate before maintenance ends. At that reconnect the agent drops the host's
+   idle Lightbits paths, makes new keys for the pool's cluster, and the management server
+   registers them with every `inbandAuth=true` pool of the host on that cluster; the
+   management log says "rotated its in-band authentication keys". The host's paths are made again, with the new keys, at the next
    attach or migration.
 3. Watch the readiness line: it lists the hosts still on keys older than the pool's key
    generation. A host that reconnects while it still carries volumes (a VM was placed on it

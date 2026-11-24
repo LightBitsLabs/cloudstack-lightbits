@@ -359,7 +359,12 @@ class LightbitsNvmeHost {
      * {@link #paths()}, which skips what it cannot read.
      */
     int pathsWithoutKey(String currentKey) {
-        return pathsWithoutSecret("dhchap_secret", currentKey);
+        return pathsWithoutSecret("dhchap_secret", currentKey, null);
+    }
+
+    /** {@link #pathsWithoutKey(String)} for the paths of one subsystem (one cluster); null: every Lightbits path. */
+    int pathsWithoutKey(String currentKey, String subsystem) {
+        return pathsWithoutSecret("dhchap_secret", currentKey, subsystem);
     }
 
     /**
@@ -369,10 +374,15 @@ class LightbitsNvmeHost {
      * with the new key. Same rules as {@link #pathsWithoutKey(String)}.
      */
     int pathsWithoutCtrlKey(String currentCtrlKey) {
-        return pathsWithoutSecret("dhchap_ctrl_secret", currentCtrlKey);
+        return pathsWithoutSecret("dhchap_ctrl_secret", currentCtrlKey, null);
     }
 
-    private int pathsWithoutSecret(String attribute, String current) {
+    /** {@link #pathsWithoutCtrlKey(String)} for the paths of one subsystem (one cluster); null: every Lightbits path. */
+    int pathsWithoutCtrlKey(String currentCtrlKey, String subsystem) {
+        return pathsWithoutSecret("dhchap_ctrl_secret", currentCtrlKey, subsystem);
+    }
+
+    private int pathsWithoutSecret(String attribute, String current, String subsystem) {
         List<String> controllers = sys.listOrNull("/sys/class/nvme");
         if (controllers == null) {
             throw new CloudRuntimeException("could not list /sys/class/nvme to check this host's NVMe/TCP paths");
@@ -384,7 +394,7 @@ class LightbitsNvmeHost {
                 throw new CloudRuntimeException("could not read the subsystem NQN of " + ctrl
                         + " to check this host's NVMe/TCP paths");
             }
-            if (!nqn.startsWith(LIGHTBITS_NQN_PREFIX)) {
+            if (!nqn.startsWith(LIGHTBITS_NQN_PREFIX) || subsystem != null && !subsystem.trim().equals(nqn.trim())) {
                 continue;
             }
             String secret = sys.read("/sys/class/nvme/" + ctrl + "/" + attribute);
@@ -439,6 +449,11 @@ class LightbitsNvmeHost {
      * is never taken for zero (rotation deletes keys only on a known zero).
      */
     int lightbitsPathCount() {
+        return lightbitsPathCount(null);
+    }
+
+    /** {@link #lightbitsPathCount()} for one subsystem (one cluster); null: every Lightbits path. */
+    int lightbitsPathCount(String subsystem) {
         List<String> controllers = sys.listOrNull("/sys/class/nvme");
         if (controllers == null) {
             throw new CloudRuntimeException("could not list /sys/class/nvme to count this host's NVMe/TCP paths");
@@ -449,7 +464,7 @@ class LightbitsNvmeHost {
             if (nqn == null) {
                 throw new CloudRuntimeException("could not read the subsystem NQN of " + ctrl + " to count this host's NVMe/TCP paths");
             }
-            if (nqn.startsWith(LIGHTBITS_NQN_PREFIX)) {
+            if (nqn.startsWith(LIGHTBITS_NQN_PREFIX) && (subsystem == null || subsystem.trim().equals(nqn.trim()))) {
                 n++;
             }
         }

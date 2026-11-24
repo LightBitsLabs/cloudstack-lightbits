@@ -84,6 +84,8 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     static final long DISCOVER_TIMEOUT_MILLIS = 15_000;
     /** Pool detail from the management server: two-way in-band authentication (with inbandAuth). */
     public static final String DETAIL_INBAND_TWO_WAY = "inbandAuthTwoWay";
+    /** Pool detail from the management server: the cluster's subsystem NQN, the scope of the host's keys for it. */
+    public static final String DETAIL_INBAND_KEY_SCOPE = "inbandKeyScope";
 
     private final LightbitsNvmeHost nvme;
     private final LightbitsHostKey hostKey;
@@ -185,7 +187,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // would turn false into a generic "failed to connect disks".
         String device = nvme.waitForDevice(uuid, DEFAULT_WAIT_SECS, nvme.hostNqn());
         if (twoWay(pool)) {
-            nvme.requireTwoWayPaths(nvme.verifyIdentity(uuid), hostKey.ensureCtrlKey());
+            nvme.requireTwoWayPaths(nvme.verifyIdentity(uuid), keys(pool).ensureCtrlKey());
         }
         LOG.info("Lightbits volume {} verified at {}", uuid, device);
         nvme.warnOnDegradedPaths(endpoints.size());
@@ -289,7 +291,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             // a connect that failed may still have made paths: they get the same check
             if (twoWay) {
                 try {
-                    nvme.dropNewPathsWithoutCtrlKey(before, hostKey.ensureCtrlKey());
+                    nvme.dropNewPathsWithoutCtrlKey(before, keys(pool).ensureCtrlKey());
                 } catch (RuntimeException cleanup) {
                     e.addSuppressed(cleanup);
                 }
@@ -297,12 +299,22 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             throw e;
         }
         if (twoWay) {
-            nvme.dropNewPathsWithoutCtrlKey(before, hostKey.ensureCtrlKey());
+            nvme.dropNewPathsWithoutCtrlKey(before, keys(pool).ensureCtrlKey());
         }
         return answered;
     }
 
     /** The pool uses two-way in-band authentication (both details from the management server). */
+    /** The scope of this host's keys for the pool's cluster (its subsystem NQN), or null for the host-wide keys. */
+    static String keyScope(KVMStoragePool pool) {
+        Map<String, String> d = pool == null ? null : pool.getDetails();
+        return d == null ? null : d.get(DETAIL_INBAND_KEY_SCOPE);
+    }
+
+    private LightbitsHostKey keys(KVMStoragePool pool) {
+        return hostKey.forScope(keyScope(pool));
+    }
+
     static boolean twoWay(KVMStoragePool pool) {
         Map<String, String> d = pool == null ? null : pool.getDetails();
         return d != null && "true".equals(d.get(DETAIL_INBAND_AUTH)) && "true".equals(d.get(DETAIL_INBAND_TWO_WAY));
@@ -317,15 +329,24 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      * ones, and the next attach connects with them.
      */
     public static void rotateInbandKeys() {
-        rotateInbandKeys(new LightbitsNvmeHost(), new LightbitsHostKey());
+        rotateInbandKeys(null);
+    }
+
+    /** Rotate this host's keys for one cluster (its subsystem NQN; null: the host-wide keys). */
+    public static void rotateInbandKeys(String scope) {
+        rotateInbandKeys(new LightbitsNvmeHost(), new LightbitsHostKey().forScope(scope), scope);
     }
 
     static void rotateInbandKeys(LightbitsNvmeHost nvme, LightbitsHostKey hostKey) {
+        rotateInbandKeys(nvme, hostKey, null);
+    }
+
+    static void rotateInbandKeys(LightbitsNvmeHost nvme, LightbitsHostKey hostKey, String scope) {
         synchronized (CONNECT_LOCK) {
             List<String> dropped = nvme.disconnectIdleSubsystems();
             int left;
             try {
-                left = nvme.lightbitsPathCount();
+                left = nvme.lightbitsPathCount(scope);
             } catch (RuntimeException e) {
                 throw new CloudRuntimeException("Lightbits: key rotation refused: this host's NVMe/TCP paths could not be counted ("
                         + e.getMessage() + "); the keys are kept", e);
@@ -357,7 +378,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             return endpoint -> oneWay;
         }
         String poolUuid = pool.getUuid();
-        return endpoint -> hostKey.ensureTwoWayConfig(poolUuid, nvme.discover(endpoint, DISCOVER_TIMEOUT_MILLIS));
+        return endpoint -> keys(pool).ensureTwoWayConfig(poolUuid, nvme.discover(endpoint, DISCOVER_TIMEOUT_MILLIS));
     }
 
     java.nio.file.Path authConfig(KVMStoragePool pool) {
@@ -365,7 +386,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         if (details == null || !"true".equals(details.get(DETAIL_INBAND_AUTH))) {
             return null;
         }
-        return hostKey.ensureConfig();
+        return keys(pool).ensureConfig();
     }
 
     /**
@@ -397,7 +418,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // never hand out a path whose namespace was not matched against the volume
         String kernelName = nvme.verifyIdentity(uuid);
         if (twoWay(pool)) {
-            nvme.requireTwoWayPaths(kernelName, hostKey.ensureCtrlKey());
+            nvme.requireTwoWayPaths(kernelName, keys(pool).ensureCtrlKey());
         }
         KVMPhysicalDisk disk = new KVMPhysicalDisk(LightbitsNvmeHost.BY_ID_PREFIX + uuid, volumePath, pool);
         disk.setFormat(PhysicalDiskFormat.RAW);

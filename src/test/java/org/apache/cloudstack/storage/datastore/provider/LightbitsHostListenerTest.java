@@ -386,8 +386,8 @@ class LightbitsHostListenerTest {
         listener.hostConnect(HOST, POOL);
         String fp = LightbitsTrustedHosts.fingerprint(KEY);
         assertEquals(fp, detail(LightbitsTrustedHosts.detailKey(POOL)));
-        assertEquals(fp, detail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL));
-        assertEquals("0", detail(LightbitsTrustedHosts.KEYLESS_DETAIL));
+        assertEquals(fp, detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, POOL)));
+        assertEquals("0", detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYLESS_DETAIL, POOL)));
         assertEquals("0", detail(LightbitsTrustedHosts.generationDetailKey(POOL)), "a first host starts at generation 0");
         wm.verify(postRequestedFor(urlEqualTo(P + "/trustedHosts")).withRequestBody(matchingJsonPath("$.hostNqn", equalTo(NQN))));
         wm.verify(putRequestedFor(urlEqualTo(P + "/trustedHostSecrets/" + TH_NAME))
@@ -402,10 +402,10 @@ class LightbitsHostListenerTest {
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
                 ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeysPossiblyExposed(true) : new Answer(cmd);
         listener.hostConnect(HOST, POOL);
-        assertEquals("true", detail(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL));
+        assertEquals("true", detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, POOL)));
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN) : new Answer(cmd);
         listener.hostConnect(HOST, POOL);
-        assertNull(detail(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL), "cleared once the agent no longer reports it");
+        assertNull(detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, POOL)), "cleared once the agent no longer reports it");
     }
 
     @Test
@@ -418,20 +418,20 @@ class LightbitsHostListenerTest {
                 .withRequestBody(matchingJsonPath("$.targetSecretType", equalTo("Enabled")))
                 .withRequestBody(matchingJsonPath("$.targetSecret", equalTo(CTRL))));
         assertEquals(LightbitsTrustedHosts.fingerprint(CTRL), detail(LightbitsTrustedHosts.ctrlDetailKey(POOL)));
-        assertEquals(LightbitsTrustedHosts.fingerprint(CTRL), detail(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL));
-        assertEquals("0", detail(LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL));
+        assertEquals(LightbitsTrustedHosts.fingerprint(CTRL), detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, POOL)));
+        assertEquals("0", detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL, POOL)));
     }
 
     @Test
     void anAgentWithoutAKeyClearsTheRegistrationDetails() throws Exception {
         option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
         putDetail(LightbitsTrustedHosts.detailKey(POOL), "old");
-        putDetail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, "old");
+        putDetail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, POOL), "old");
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
                 ? new LightbitsGetHostNqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN, null) : new Answer(cmd);
         listener.hostConnect(HOST, POOL);
         assertNull(detail(LightbitsTrustedHosts.detailKey(POOL)));
-        assertNull(detail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL));
+        assertNull(detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, POOL)));
         wm.verify(0, putRequestedFor(urlEqualTo(P + "/trustedHostSecrets/" + TH_NAME)));
     }
 
@@ -463,7 +463,7 @@ class LightbitsHostListenerTest {
         wm.stubFor(post(urlEqualTo(P + "/trustedHosts")).willReturn(aResponse().withStatus(400).withBody("{\"message\":\"bad\"}")));
         listener.hostConnect(HOST, POOL);
         assertNull(detail(LightbitsTrustedHosts.detailKey(POOL)));
-        assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL));
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, POOL)));
         // the next connect registers it
         wm.stubFor(post(urlEqualTo(P + "/trustedHosts")).willReturn(aResponse().withStatus(200).withBody("{}")));
         listener.hostConnect(HOST, POOL);
@@ -601,5 +601,22 @@ class LightbitsHostListenerTest {
                 new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default", java.net.http.HttpClient.newHttpClient(), 1));
         assertFalse(poolDetails.containsValue(NQN), "dropped, not revoked");
         wm.verify(0, putRequestedFor(urlPathEqualTo(P + "/volumes/u1")));
+    }
+
+    @Test
+    void theClustersSubsystemNqnScopesTheHostKeysAndIsKept() {
+        String sub = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+        wm.stubFor(get(urlEqualTo("/api/v2/clusterinfo")).willReturn(aResponse().withStatus(200)
+                .withBody("{\"UUID\":\"c1\",\"subsystemNQN\":\"" + sub + "\"}")));
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        listener.hostConnect(HOST, POOL);
+        ModifyStoragePoolCommand modify = (ModifyStoragePoolCommand) sent.get(0);
+        assertEquals(sub, modify.getDetails().get(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE),
+                "the agent gets the scope with the pool");
+        assertEquals(sub, nqnCommands().get(0).getKeyScope(), "and with the key request");
+        assertEquals(sub, poolDetails.get("lightbits.subsystemnqn"), "kept as a pool detail");
+        wm.resetRequests();
+        listener.hostConnect(HOST, POOL);
+        wm.verify(0, getRequestedFor(urlEqualTo("/api/v2/clusterinfo")));
     }
 }
