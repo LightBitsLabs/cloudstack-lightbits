@@ -413,14 +413,21 @@ each host (the host key, and the controller key for two-way) and works with enfo
 3. Watch the readiness line: it lists the hosts still on keys older than the pool's key
    generation. A host that reconnects while it still carries volumes (not in maintenance)
    refuses to rotate, keeps its keys, and logs why; it is asked again at its next reconnect.
+   A host the plugin has no generation record for (keys of unknown age, for example from an
+   earlier plugin version) rotates too once the pool's generation is above 0.
 
-A rolling rotation of all hosts of a cluster, one at a time:
+A rolling rotation of all hosts of a cluster, one at a time. `prepare hostformaintenance`
+returns before the VMs have moved, so wait until the host runs none before cancelling, and
+until it is Up again before the next host:
 ```bash
 for h in $(cmk list hosts clusterid=<cluster-id> type=Routing filter=id | jq -r '.host[].id'); do
-  cmk prepare hostformaintenance id=$h && cmk cancel hostmaintenance id=$h
+  cmk prepare hostformaintenance id=$h
+  until [ "$(cmk list virtualmachines hostid=$h listall=true filter=id | jq '.count // 0')" = 0 ]; do sleep 10; done
+  cmk cancel hostmaintenance id=$h
+  until [ "$(cmk list hosts id=$h filter=state | jq -r '.host[0].state')" = Up ]; do sleep 10; done
 done
 ```
-(check that each host is back Up before the next one, as for any maintenance).
+Then check the readiness line: no host should be left on an older key generation.
 
 The storage admin starts nothing: a rotation of CloudStack hosts is the CloudStack
 operator's step above. To cut a host off at once, the cluster admin deletes its trusted host

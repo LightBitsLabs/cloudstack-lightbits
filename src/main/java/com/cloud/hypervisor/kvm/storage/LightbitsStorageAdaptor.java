@@ -280,7 +280,20 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         boolean twoWay = pool.getDetails() != null && "true".equals(pool.getDetails().get(DETAIL_INBAND_AUTH))
                 && "true".equals(pool.getDetails().get(DETAIL_INBAND_TWO_WAY));
         java.util.Set<String> before = twoWay ? nvme.pathNames() : null;
-        boolean answered = nvme.connectWith(endpoints, timeoutMillis, configFor);
+        boolean answered;
+        try {
+            answered = nvme.connectWith(endpoints, timeoutMillis, configFor);
+        } catch (RuntimeException e) {
+            // a connect that failed may still have made paths: they get the same check
+            if (twoWay) {
+                try {
+                    nvme.dropNewPathsWithoutCtrlKey(before, hostKey.ensureCtrlKey());
+                } catch (RuntimeException cleanup) {
+                    e.addSuppressed(cleanup);
+                }
+            }
+            throw e;
+        }
         if (twoWay) {
             nvme.dropNewPathsWithoutCtrlKey(before, hostKey.ensureCtrlKey());
         }
@@ -302,7 +315,13 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     static void rotateInbandKeys(LightbitsNvmeHost nvme, LightbitsHostKey hostKey) {
         synchronized (CONNECT_LOCK) {
             List<String> dropped = nvme.disconnectIdleSubsystems();
-            int left = nvme.paths().size();
+            int left;
+            try {
+                left = nvme.lightbitsPathCount();
+            } catch (RuntimeException e) {
+                throw new CloudRuntimeException("Lightbits: key rotation refused: this host's NVMe/TCP paths could not be counted ("
+                        + e.getMessage() + "); the keys are kept", e);
+            }
             if (left > 0) {
                 throw new CloudRuntimeException("Lightbits: key rotation refused: " + left + " Lightbits NVMe/TCP path(s) of this"
                         + " host still carry volumes. Put the host in maintenance (its VMs migrate away), then reconnect it");

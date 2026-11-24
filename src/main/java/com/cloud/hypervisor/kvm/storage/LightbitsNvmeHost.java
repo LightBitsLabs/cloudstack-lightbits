@@ -431,6 +431,29 @@ class LightbitsNvmeHost {
         return ports;
     }
 
+    /**
+     * How many Lightbits paths this host has, from a checked enumeration: throws when the
+     * controller list or a listed controller's subsystem NQN cannot be read, so an unknown count
+     * is never taken for zero (rotation deletes keys only on a known zero).
+     */
+    int lightbitsPathCount() {
+        List<String> controllers = sys.listOrNull("/sys/class/nvme");
+        if (controllers == null) {
+            throw new CloudRuntimeException("could not list /sys/class/nvme to count this host's NVMe/TCP paths");
+        }
+        int n = 0;
+        for (String ctrl : controllers) {
+            String nqn = sys.read("/sys/class/nvme/" + ctrl + "/subsysnqn");
+            if (nqn == null) {
+                throw new CloudRuntimeException("could not read the subsystem NQN of " + ctrl + " to count this host's NVMe/TCP paths");
+            }
+            if (nqn.startsWith(LIGHTBITS_NQN_PREFIX)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     /** The controller names of this host's Lightbits paths, any state. */
     java.util.Set<String> pathNames() {
         java.util.Set<String> out = new java.util.HashSet<>();

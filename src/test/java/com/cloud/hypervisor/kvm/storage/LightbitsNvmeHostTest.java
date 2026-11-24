@@ -568,6 +568,21 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
+    void anUnknownPathCountRefusesTheRotation(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        LightbitsHostKey key = keyIn(tmp);
+        String k = key.ensure();
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.unreadable.add("/sys/class/nvme/nvme3/subsysnqn");
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> LightbitsStorageAdaptor.rotateInbandKeys(host, key));
+        assertTrue(e.getMessage().contains("could not be counted"), e.getMessage());
+        assertEquals(k, key.ensure(), "the keys are kept");
+        sys.unreadable.clear();
+        sys.unreadable.add("/sys/class/nvme");
+        assertThrows(CloudRuntimeException.class, () -> LightbitsStorageAdaptor.rotateInbandKeys(host, key));
+        assertEquals(k, key.ensure());
+    }
+
+    @Test
     void newPathsWithoutTheControllerKeyAreDroppedOldOnesKept() {
         String ctrl = "DHHC-1:00:ctrl:";
         sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");   // older one-way path, may carry volumes
