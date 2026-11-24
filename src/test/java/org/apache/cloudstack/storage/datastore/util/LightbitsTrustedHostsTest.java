@@ -53,7 +53,8 @@ class LightbitsTrustedHostsTest {
     private static final String SECRETS = "/api/v2/projects/default/trustedHostSecrets/";
     private static final String NQN = "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9";
     private static final String KEY = "DHHC-1:00:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+KfiaR:";
-    private static final String NAME = LightbitsTrustedHosts.name("cs1", "h-uuid");
+    private static final String HOST_UUID = "5d2f7e0a-9c1b-4e3d-8a6f-0b1c2d3e4f50";
+    private static final String NAME = LightbitsTrustedHosts.name("cs1", HOST_UUID);
 
     private WireMockServer wm;
     private LightbitsApiClient client;
@@ -86,7 +87,8 @@ class LightbitsTrustedHostsTest {
         wm.stubFor(post(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody("{}")));
 
         LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(client, NAME, NQN, KEY, Map.of("cloudstack-host", "h-uuid"));
-        assertEquals("cs-cs1-host-h-uuid", r.name);
+        assertEquals("cs-cs1-host-" + HOST_UUID, r.name);
+        assertTrue(r.authRequired);
         assertFalse(r.foreignName);
         wm.verify(postRequestedFor(urlEqualTo(HOSTS))
                 .withRequestBody(matchingJsonPath("$.name", equalTo(NAME)))
@@ -153,14 +155,42 @@ class LightbitsTrustedHostsTest {
     @Test
     void removalDeletesOnlyThePluginsOwnTrustedHosts() {
         wm.stubFor(get(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody(
-                hosts(NAME, NQN, "by-hand", NQN, "cs-cs1-host-other", "nqn.other", "cs-cs2-host-h-uuid", NQN))));
+                hosts(NAME, NQN, "by-hand", NQN, "cs-cs1-host-other", "nqn.other", "cs-cs2-host-" + HOST_UUID, NQN,
+                "cs-cs1-b-host-" + HOST_UUID, NQN))));
         wm.stubFor(delete(urlEqualTo(HOSTS + "/" + NAME)).willReturn(aResponse().withStatus(200).withBody("{}")));
 
         List<String> others = new ArrayList<>();
         assertEquals(List.of(NAME), LightbitsTrustedHosts.unregister(client, "cs1", NQN, others));
-        assertEquals(List.of("by-hand", "cs-cs2-host-h-uuid"), others, "another environment's and hand-made ones are left");
+        assertEquals(List.of("by-hand", "cs-cs2-host-" + HOST_UUID, "cs-cs1-b-host-" + HOST_UUID), others,
+                "another environment's (also one whose name starts with this one's) and hand-made ones are left");
         wm.verify(1, deleteRequestedFor(urlEqualTo(HOSTS + "/" + NAME)));
         wm.verify(0, deleteRequestedFor(urlEqualTo(HOSTS + "/by-hand")));
+        wm.verify(0, deleteRequestedFor(urlEqualTo(HOSTS + "/cs-cs1-b-host-" + HOST_UUID)));
+    }
+
+    @Test
+    void ownershipNeedsTheExactEnvironmentAndAHostPart() {
+        assertTrue(LightbitsTrustedHosts.ownedBy("cs-a-host-" + HOST_UUID, "a"));
+        assertTrue(LightbitsTrustedHosts.ownedBy("cs-a-host-42", "a"), "the host id fallback of name()");
+        assertFalse(LightbitsTrustedHosts.ownedBy("cs-a-b-host-" + HOST_UUID, "a"));
+        assertTrue(LightbitsTrustedHosts.ownedBy("cs-a-b-host-" + HOST_UUID, "a-b"));
+        assertFalse(LightbitsTrustedHosts.ownedBy("cs-a-host-host-" + HOST_UUID, "a"));
+        assertFalse(LightbitsTrustedHosts.ownedBy("cs-a-hand-made", "a"));
+        assertFalse(LightbitsTrustedHosts.ownedBy(null, "a"));
+    }
+
+    @Test
+    void aReusedTrustedHostWithAuthRequiredFalseIsReportedAndLeftAsItIs() {
+        wm.stubFor(get(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"hosts\":[{\"name\":\"staged\",\"hostNqn\":\"" + NQN + "\",\"authRequired\":\"false\"}],\"nextOffset\":\"\"}")));
+        wm.stubFor(put(urlEqualTo(SECRETS + "staged")).willReturn(aResponse().withStatus(200).withBody("{}")));
+
+        LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(client, NAME, NQN, KEY, Map.of());
+        assertTrue(r.registered());
+        assertFalse(r.authRequired);
+        wm.verify(putRequestedFor(urlEqualTo(SECRETS + "staged")).withRequestBody(matchingJsonPath("$.hostSecret", equalTo(KEY))));
+        wm.verify(0, putRequestedFor(urlEqualTo(HOSTS + "/staged")));
+        wm.verify(0, postRequestedFor(urlEqualTo(HOSTS)));
     }
 
     @Test

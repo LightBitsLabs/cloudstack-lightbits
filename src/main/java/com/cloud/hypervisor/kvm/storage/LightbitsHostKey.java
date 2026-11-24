@@ -21,6 +21,7 @@ package com.cloud.hypervisor.kvm.storage;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
@@ -89,6 +90,7 @@ public class LightbitsHostKey {
     public String ensure() {
         synchronized (LOCK) {
             try {
+                restrict();
                 String key = readKey();
                 if (key == null) {
                     key = newKey(RANDOM);
@@ -116,6 +118,22 @@ public class LightbitsHostKey {
     public Path ensureConfig() {
         ensure();
         return configFile();
+    }
+
+    /**
+     * Make an existing directory 0700 and existing key and configuration files 0600 before
+     * anything is read, so files from an earlier version, or copied or made by hand with a
+     * wider mode, are root-only again. New files are made with these modes.
+     */
+    private void restrict() throws IOException {
+        if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            Files.setPosixFilePermissions(dir, DIR_MODE);
+        }
+        for (Path f : new Path[] {keyFile(), configFile()}) {
+            if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
+                Files.setPosixFilePermissions(f, FILE_MODE);
+            }
+        }
     }
 
     private String readKey() throws IOException {

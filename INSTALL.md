@@ -336,15 +336,19 @@ this order:
    cmk update storagepool id=<pool-id> details[0].inbandAuth=true
    ```
    then reconnect every host (`cmk reconnect host id=<host-id>`).
-4. Watch the management log. Each host connect logs either
-   `pool <id> is ready for in-band authentication` or `pool <id> is NOT ready`, with the
-   hosts that are not registered and those with NVMe/TCP paths made before the option was on
-   (they hold no key). Move each of those hosts onto keyed paths: put it in maintenance (its
-   VMs migrate away), disconnect it from the cluster's subsystem
-   (`nvme disconnect -n <subsystem NQN>`, the `nqn.2016-01.com.lightbitslabs:` entry of
-   `nvme list-subsys`), and cancel maintenance; its next connects use the key.
-5. When the log says the pool is ready, the cluster admin turns enforcement on:
-   `lbcli enable in-band-auth`.
+4. Watch the management log. Each host connect logs, for each pool with the option, either
+   `the <n> host(s) of pool <id> are ready for in-band authentication` or `the hosts of pool
+   <id> are NOT ready`, with the hosts that are not registered and those with NVMe/TCP paths
+   made before the option was on (they hold no key). Move each of those hosts onto keyed
+   paths: put it in maintenance (its VMs migrate away), disconnect it from the cluster's
+   subsystem (`nvme disconnect -n <subsystem NQN>`, the `nqn.2016-01.com.lightbitslabs:`
+   entry of `nvme list-subsys`), and cancel maintenance; its next connects use the key.
+5. Enforcement is cluster-wide, and the readiness line covers only the hosts of one pool.
+   Before the cluster admin turns it on, every host and client that uses the cluster must be
+   ready: the hosts of every CloudStack pool on the cluster (each pool logs its own line,
+   including pools of other projects and other CloudStack environments), and every client
+   outside CloudStack, which needs its own trusted host and key. Then the cluster admin turns
+   enforcement on: `lbcli enable in-band-auth`.
 
 A path that fails authentication shows in the host's kernel log, and nvme-cli reports
 "could not add new controller: pre-shared TLS key is missing" for a host with no key (the
@@ -358,6 +362,14 @@ old key until they reconnect, so move the host onto new paths as in step 4.
 To turn the option off, the cluster admin first turns enforcement off
 (`lbcli disable in-band-auth`); then remove the detail. The trusted hosts stay on the
 cluster until the admin deletes them.
+
+The plugin creates trusted hosts with `authRequired=true`. If the host was already a trusted
+host of the project with `authRequired=false` (the cluster admin's way to let a host connect
+without a key during a staged rollout), the plugin sets its key but leaves that setting
+alone, and logs the host in a warning and in the readiness line. Such a host may still
+connect without a key while enforcement is on; the cluster admin sets
+`lbcli update trusted-host --project-name=<project> --name=<name> --auth-required=true` when
+it is no longer needed.
 
 A host NQN can be a trusted host in only one project of a cluster. If the host is already a
 trusted host of another project, the pool cannot change it and logs that the host is

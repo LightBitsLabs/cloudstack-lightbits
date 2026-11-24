@@ -88,6 +88,22 @@ class LightbitsHostKeyTest {
     }
 
     @Test
+    void reusedFilesWithAWiderModeAreMadeRootOnlyAndKept() throws IOException {
+        Path dir = Files.createDirectories(nvme.resolve("lightbits"));
+        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Files.writeString(key.keyFile(), KNOWN + "\n");
+        Files.setPosixFilePermissions(key.keyFile(), PosixFilePermissions.fromString("rw-r--r--"));
+        Files.writeString(key.configFile(), LightbitsHostKey.config(NQN, HOST_ID, KNOWN));
+        Files.setPosixFilePermissions(key.configFile(), PosixFilePermissions.fromString("rw-rw-rw-"));
+
+        assertEquals(KNOWN, key.ensure(), "a valid key is kept");
+        assertEquals("rwx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(dir)));
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.keyFile())));
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.configFile())));
+        assertEquals(LightbitsHostKey.config(NQN, HOST_ID, KNOWN), Files.readString(key.configFile()));
+    }
+
+    @Test
     void aKeyPutThereByHandIsUsedAndAnInvalidOneIsReplaced() throws IOException {
         Path dir = Files.createDirectories(nvme.resolve("lightbits"));
         Files.writeString(dir.resolve("dhchap-key"), KNOWN + "\n");

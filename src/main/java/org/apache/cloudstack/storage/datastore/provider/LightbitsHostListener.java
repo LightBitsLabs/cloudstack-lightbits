@@ -294,6 +294,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
                         + " version); pool {} has inbandAuth on, so upgrade the agent before the cluster admin turns"
                         + " in-band authentication on", hostId, poolId);
             }
+            // No key now: an earlier registration no longer says this host is ready, and its
+            // count of keyless paths is unknown until the agent reports one again.
+            setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
+            setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
+            setHostDetail(hostId, LightbitsTrustedHosts.KEYLESS_DETAIL, null);
             reportInbandReadiness(poolId);
             return;
         }
@@ -309,6 +314,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     java.util.Map.of("cloudstack-host", hostUuid));
             if (!r.registered()) {
                 setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
+                setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
                 LOG.warn("Lightbits: host {} ({}) is a trusted host of another project on the cluster of pool {}; this"
                         + " pool's project cannot set its key. It can connect once in-band authentication is on only if"
                         + " that trusted host holds this host's key ({} on the host)", hostId, nqn, poolId,
@@ -320,6 +326,13 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     LOG.info("Lightbits: host {} registered as trusted host '{}' in project {} of pool {} (key {})", hostId,
                             r.name, cfg.getProject(), poolId, fp);
                 }
+                setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), r.authRequired ? null : "true");
+                if (!r.authRequired) {
+                    LOG.warn("Lightbits: trusted host '{}' of host {} in project {} has authRequired=false: the host has its"
+                            + " key, but may still connect without one when in-band authentication is on. The plugin leaves"
+                            + " this to the cluster admin (lbcli update trusted-host --project-name={} --name={}"
+                            + " --auth-required=true)", r.name, hostId, cfg.getProject(), cfg.getProject(), r.name);
+                }
                 if (r.foreignName) {
                     LOG.info("Lightbits: host {} was already a trusted host of project {} as '{}'; set its key there", hostId,
                             cfg.getProject(), r.name);
@@ -327,6 +340,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
             }
         } catch (RuntimeException e) {
             setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
+            setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
             LOG.warn("Lightbits: could not register host {} as a trusted host for pool {}: {}; retried at its next connect"
                     + " (the cluster's InBandAuthentication feature flag must be on)", hostId, poolId, e.getMessage());
         }
@@ -334,12 +348,14 @@ public class LightbitsHostListener implements HypervisorHostListener {
     }
 
     /**
-     * One log line per host connect on whether the pool is ready for in-band authentication:
-     * every host of the pool registered, and none with paths that hold no key.
+     * One log line per host connect on whether the pool's hosts are ready for in-band
+     * authentication: every host of the pool registered, and none with paths that hold no key.
+     * This covers only this pool's hosts; enforcement is cluster-wide, so the log says so.
      */
     private void reportInbandReadiness(long poolId) {
         java.util.List<String> unregistered = new java.util.ArrayList<>();
         java.util.List<String> keyless = new java.util.ArrayList<>();
+        java.util.List<String> optional = new java.util.ArrayList<>();
         java.util.List<StoragePoolHostVO> refs = storagePoolHostDao.listByPoolId(poolId);
         for (StoragePoolHostVO ref : refs) {
             long id = ref.getHostId();
@@ -347,19 +363,26 @@ public class LightbitsHostListener implements HypervisorHostListener {
             String label = h == null ? String.valueOf(id) : h.getName();
             if (hostDetailsDao.findDetail(id, LightbitsTrustedHosts.detailKey(poolId)) == null) {
                 unregistered.add(label);
+            } else if (hostDetailsDao.findDetail(id, LightbitsTrustedHosts.keyOptionalDetailKey(poolId)) != null) {
+                optional.add(label);
             }
             DetailVO k = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.KEYLESS_DETAIL);
             if (k == null || !"0".equals(k.getValue())) {
                 keyless.add(label + (k == null ? " (unknown)" : " (" + k.getValue() + ")"));
             }
         }
+        String optionalNote = optional.isEmpty() ? "" : " Trusted hosts with authRequired=false (they may still connect"
+                + " without a key; the cluster admin sets this): " + optional + ".";
         if (unregistered.isEmpty() && keyless.isEmpty()) {
-            LOG.info("Lightbits: pool {} is ready for in-band authentication: all {} host(s) are trusted hosts and connect"
-                    + " with their keys; the cluster admin can turn it on (lbcli enable in-band-auth)", poolId, refs.size());
+            LOG.info("Lightbits: the {} host(s) of pool {} are ready for in-band authentication: all are trusted hosts and"
+                    + " connect with their keys.{} Enforcement is cluster-wide: the cluster admin turns it on (lbcli enable"
+                    + " in-band-auth) only when every host and client of the cluster is ready, including those of other"
+                    + " pools, projects and clients outside CloudStack", refs.size(), poolId, optionalNote);
         } else {
-            LOG.warn("Lightbits: pool {} is NOT ready for in-band authentication; do not turn it on yet. Not registered: {}."
-                    + " With paths that hold no key (they fail at their next reconnect once it is on; put the host in"
-                    + " maintenance and reconnect it, see INSTALL.md): {}", poolId, unregistered, keyless);
+            LOG.warn("Lightbits: the hosts of pool {} are NOT ready for in-band authentication; do not turn it on yet. Not"
+                    + " registered: {}. With paths that hold no key (they fail at their next reconnect once it is on; put"
+                    + " the host in maintenance and reconnect it, see INSTALL.md): {}.{}", poolId, unregistered, keyless,
+                    optionalNote);
         }
     }
 

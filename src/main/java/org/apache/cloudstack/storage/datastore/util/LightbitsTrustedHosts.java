@@ -54,6 +54,11 @@ public final class LightbitsTrustedHosts {
         return DETAIL_PREFIX + poolId;
     }
 
+    /** Host detail, set to "true" while the host's trusted host for the pool has authRequired=false. */
+    public static String keyOptionalDetailKey(long poolId) {
+        return "lightbits.inbandoptional." + poolId;
+    }
+
     /** The plugin's trusted host name for a CloudStack host: {@code cs-<environment>-host-<host uuid>}. */
     public static String name(String environment, String hostUuid) {
         return namePrefix(environment) + "host-" + hostUuid;
@@ -61,6 +66,21 @@ public final class LightbitsTrustedHosts {
 
     static String namePrefix(String environment) {
         return "cs-" + environment + "-";
+    }
+
+    /** What {@link #name} puts after {@code host-}: a host UUID, or a host id when the host was not found. */
+    private static final java.util.regex.Pattern HOST_PART = java.util.regex.Pattern.compile(
+            "host-([0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|[0-9]+)");
+
+    /**
+     * True when the name is one {@link #name} makes for this exact environment. A prefix test
+     * alone would also match another environment whose name starts with this one (environment
+     * {@code a} and {@code cs-a-b-host-...} of environment {@code a-b}).
+     */
+    static boolean ownedBy(String trustedHostName, String environment) {
+        String prefix = namePrefix(environment);
+        return trustedHostName != null && trustedHostName.startsWith(prefix)
+                && HOST_PART.matcher(trustedHostName.substring(prefix.length())).matches();
     }
 
     /** A short, one-way fingerprint of a key (SHA-256, first 16 hex digits), safe to store and log. */
@@ -83,10 +103,17 @@ public final class LightbitsTrustedHosts {
         public final String name;
         /** True when the host was already a trusted host of this project under another name than the plugin's. */
         public final boolean foreignName;
+        /**
+         * False when the trusted host the key was set on has {@code authRequired=false}: the host
+         * may then connect without a key even with in-band authentication on. The plugin leaves
+         * that setting to the cluster admin, who uses it for a staged rollout.
+         */
+        public final boolean authRequired;
 
-        Registration(String name, boolean foreignName) {
+        Registration(String name, boolean foreignName, boolean authRequired) {
             this.name = name;
             this.foreignName = foreignName;
+            this.authRequired = authRequired;
         }
 
         public boolean registered() {
@@ -116,7 +143,7 @@ public final class LightbitsTrustedHosts {
                 existing = client.findTrustedHostByNqn(hostNqn);
                 if (existing.isEmpty()) {
                     if (e.getKind() == LightbitsApiException.Kind.CONFLICT) {
-                        return new Registration(null, false);
+                        return new Registration(null, false, false);
                     }
                     throw e;
                 }
@@ -124,7 +151,9 @@ public final class LightbitsTrustedHosts {
         }
         String used = existing.map(h -> h.name).orElse(name);
         client.setTrustedHostSecret(used, key);
-        return new Registration(used, !used.equals(name));
+        // A trusted host the plugin creates has authRequired=true; one that existed keeps what it has.
+        boolean authRequired = existing.map(h -> !Boolean.FALSE.equals(h.authRequired)).orElse(true);
+        return new Registration(used, !used.equals(name), authRequired);
     }
 
     /**
@@ -138,7 +167,7 @@ public final class LightbitsTrustedHosts {
             if (!hostNqn.equals(h.hostNqn)) {
                 continue;
             }
-            if (h.name.startsWith(namePrefix(environment))) {
+            if (ownedBy(h.name, environment)) {
                 if (client.deleteTrustedHost(h.name)) {
                     deleted.add(h.name);
                 }

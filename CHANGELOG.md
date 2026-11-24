@@ -12,7 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on a command line. On host connect the management server registers the host as a trusted
   host of the pool's project with that key; it keeps only a fingerprint and never logs the
   key. Each host connect logs whether every host of the pool is registered and connects with
-  its key, which is when the cluster admin can turn in-band authentication on. Removing a host
+  its key. Enforcement is cluster-wide, so the cluster admin turns it on only when every pool
+  on the cluster logs that its hosts are ready and every client outside CloudStack has its
+  own key. Removing a host
   deletes the trusted host the plugin made. Pool creation with the option fails, with the
   `lbcli` command to run, when the cluster's InBandAuthentication feature flag is off.
 - Pool option `ipAcl=true`: each volume's IP ACL holds the data IPs of the hosts in its NQN
@@ -160,6 +162,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   elsewhere. Their volumes still work, because every pool registers the same per-host key.
 - With `inbandAuth=true`, a host whose agent is older than this plugin version reports no key
   and is not registered; the management log names it. Upgrade the agent on every host first.
+- With `inbandAuth=true`, a host that was already a trusted host of the project with
+  `authRequired=false` keeps that setting: the plugin sets its key but does not change it, so
+  the host may still connect without a key while enforcement is on. The management log names
+  such hosts; the cluster admin sets `--auth-required=true` when the staged rollout is done.
 - Turning `inbandAuth` off leaves the trusted hosts on the cluster and the key on the hosts;
   the cluster admin turns in-band authentication off first, or hosts keep needing their keys.
 - With `ipAcl=true`, a host whose agent is older than this plugin version does not report its

@@ -1115,10 +1115,17 @@ public class LightbitsApiClient {
     public static final class TrustedHost {
         public final String name;
         public final String hostNqn;
+        /** The trusted host's authRequired, or null when the cluster did not say. */
+        public final Boolean authRequired;
 
         public TrustedHost(String name, String hostNqn) {
+            this(name, hostNqn, null);
+        }
+
+        public TrustedHost(String name, String hostNqn, Boolean authRequired) {
             this.name = name;
             this.hostNqn = hostNqn;
+            this.authRequired = authRequired;
         }
 
         @Override
@@ -1142,7 +1149,10 @@ public class LightbitsApiClient {
                 for (JsonNode h : root.path("hosts")) {
                     String name = h.path("name").asText(null);
                     if (name != null) {
-                        out.add(new TrustedHost(name, h.path("hostNqn").asText(null)));
+                        // The cluster sends authRequired as a string ("true"/"false"); a boolean reads the same.
+                        String auth = h.path("authRequired").asText("");
+                        out.add(new TrustedHost(name, h.path("hostNqn").asText(null),
+                                "true".equalsIgnoreCase(auth) ? Boolean.TRUE : "false".equalsIgnoreCase(auth) ? Boolean.FALSE : null));
                     }
                 }
                 String next = root.path("nextOffset").asText("");
