@@ -327,8 +327,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
         }
         try {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
-                    org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
-            java.util.List<String> updated = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.refreshIps(cfg.newClient(),
+                    poolSecrets.apply(poolId);
+            java.util.List<String> updated = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.refreshIps(clients.apply(cfg),
                     cfg.getEnvironment(), poolId, nqn, ipResolver(poolId), ips);
             if (!updated.isEmpty()) {
                 LOG.info("Lightbits: updated the IP ACL of {} volume(s) of pool {} for host {}: {}", updated.size(), poolId,
@@ -372,7 +372,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
         setHostDetail(hostId, LightbitsTrustedHosts.CURRENT_KEY_DETAIL, fp);
         String ctrl = null;
         try {
-            LightbitsPoolConfig cfg = LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
+            LightbitsPoolConfig cfg = poolSecrets.apply(poolId);
             if (cfg.isInbandAuthTwoWay()) {
                 ctrl = answer.getDhchapCtrlKey();
                 if (ctrl == null) {
@@ -389,7 +389,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
             }
             com.cloud.host.HostVO host = hostDao.findById(hostId);
             String hostUuid = host == null ? String.valueOf(hostId) : host.getUuid();
-            org.apache.cloudstack.storage.datastore.client.LightbitsApiClient client = cfg.newClient();
+            org.apache.cloudstack.storage.datastore.client.LightbitsApiClient client = clients.apply(cfg);
             LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(client,
                     LightbitsTrustedHosts.name(cfg.getEnvironment(), hostUuid), nqn, key, ctrl,
                     java.util.Map.of("cloudstack-host", hostUuid));
@@ -449,8 +449,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
             // If the host is being removed, delete what this connect may have created, as on success.
             if (removing(hostId)) {
                 try {
-                    LightbitsPoolConfig cfg = LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
-                    LightbitsTrustedHosts.unregister(cfg.newClient(), cfg.getEnvironment(), nqn, new java.util.ArrayList<>());
+                    LightbitsPoolConfig cfg = poolSecrets.apply(poolId);
+                    LightbitsTrustedHosts.unregister(clients.apply(cfg), cfg.getEnvironment(), nqn, new java.util.ArrayList<>());
                     LOG.warn("Lightbits: host {} is being removed; deleted any trusted host the failed registration for pool {}"
                             + " may have created", hostId, poolId);
                 } catch (RuntimeException e2) {
@@ -686,6 +686,13 @@ public class LightbitsHostListener implements HypervisorHostListener {
         return true;
     }
 
+    /** A pool's configuration with its token (CloudStack's database encryption); tests swap it. */
+    java.util.function.LongFunction<LightbitsPoolConfig> poolSecrets = id -> LightbitsPoolSecret.load(storagePoolDetailsDao, id);
+
+    /** The API client for a pool's configuration; tests swap it for one aimed at a fake API. */
+    java.util.function.Function<LightbitsPoolConfig, org.apache.cloudstack.storage.datastore.client.LightbitsApiClient> clients =
+            LightbitsPoolConfig::newClient;
+
     /** The lock grants and host removal share; tests swap it for an in-process one. */
     org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.Locker hostGateLocker =
             org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.GLOBAL;
@@ -705,10 +712,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
             markRemoving(hostId);
             try {
                 org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
-                        org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());
+                        poolSecrets.apply(pool.getId());
                 java.util.List<String> pruned = new java.util.ArrayList<>();
                 Runnable prune = () -> pruned.addAll(org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(
-                        cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, cfg.isIpAcl() ? ipResolver(pool.getId()) : null,
+                        clients.apply(cfg), cfg.getEnvironment(), pool.getId(), nqnValue, cfg.isIpAcl() ? ipResolver(pool.getId()) : null,
                         () -> markRemoving(hostId)));
                 // With ipAcl, under the pool's IP ACL lock (inside the host's lock, as everywhere). The
                 // removal must not be held up: without the lock in time it removes the NQN only and
@@ -719,7 +726,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
                             + " its NQN only, the volumes' IP ACLs keep its address until their next attach, migration or"
                             + " host connect", pool.getName(), IP_ACL_LOCK_SECONDS, hostId);
                     pruned.addAll(org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(
-                            cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, null, () -> markRemoving(hostId)));
+                            clients.apply(cfg), cfg.getEnvironment(), pool.getId(), nqnValue, null, () -> markRemoving(hostId)));
                 } else if (!cfg.isIpAcl()) {
                     prune.run();
                 }
@@ -738,12 +745,12 @@ public class LightbitsHostListener implements HypervisorHostListener {
     /** Delete the trusted host the plugin made for a host that is being removed, for a pool with inbandAuth. */
     private void unregisterTrustedHost(long hostId, org.apache.cloudstack.storage.datastore.db.StoragePoolVO pool, String nqn) {
         try {
-            LightbitsPoolConfig cfg = LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());
+            LightbitsPoolConfig cfg = poolSecrets.apply(pool.getId());
             if (!cfg.isInbandAuth()) {
                 return;
             }
             java.util.List<String> others = new java.util.ArrayList<>();
-            java.util.List<String> deleted = LightbitsTrustedHosts.unregister(cfg.newClient(), cfg.getEnvironment(), nqn, others);
+            java.util.List<String> deleted = LightbitsTrustedHosts.unregister(clients.apply(cfg), cfg.getEnvironment(), nqn, others);
             if (!deleted.isEmpty()) {
                 LOG.info("Lightbits: host {} is being removed: deleted its trusted host(s) {} in project {} of pool {}", hostId,
                         deleted, cfg.getProject(), pool.getName());
