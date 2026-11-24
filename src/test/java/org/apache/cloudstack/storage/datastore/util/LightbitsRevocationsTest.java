@@ -87,4 +87,35 @@ class LightbitsRevocationsTest {
         assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty(), "the version looked at is dropped");
         assertEquals(nqn, LightbitsRevocations.nqnOf(nqn), "a record from before versions reads as its NQN");
     }
+
+    @Test
+    void aNewerRevocationKeptInMemoryIsNotDroppedByARetryThatLookedEarlier() {
+        String nqn = "nqn.2014-08.org.nvmexpress:uuid:unsaved-versioned";
+        long pool = 9103L;
+        StoragePoolDetailsDao dao = dao();
+        LightbitsRevocations.record(dao, pool, nqn);
+        String observed = LightbitsRevocations.recordValue(dao, pool, nqn);
+        failWrites = true;
+        LightbitsRevocations.record(dao, pool, nqn);   // a removal writes again; the database refuses it
+        LightbitsRevocations.clearIf(dao, pool, nqn, observed);
+        assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "the newer one, kept in memory, stays");
+        failWrites = false;
+        LightbitsRevocations.clearIf(dao, pool, nqn, LightbitsRevocations.recordValue(dao, pool, nqn));
+        assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty());
+    }
+
+    @Test
+    void revocationsKeptInMemoryAreListedWhenTheDetailsCannotBeRead() {
+        String nqn = "nqn.2014-08.org.nvmexpress:uuid:unreadable-details";
+        long pool = 9104L;
+        failWrites = true;
+        LightbitsRevocations.record(dao(), pool, nqn);
+        StoragePoolDetailsDao broken = (StoragePoolDetailsDao) Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[] {StoragePoolDetailsDao.class}, (p, m, a) -> {
+                    throw new IllegalStateException("database down");
+                });
+        assertEquals(List.of(nqn), LightbitsRevocations.pending(broken, pool));
+        failWrites = false;
+        LightbitsRevocations.clear(dao(), pool, nqn);
+    }
 }
