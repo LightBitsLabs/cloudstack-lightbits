@@ -212,7 +212,15 @@ public class LightbitsHostListener implements HypervisorHostListener {
         }
         // the other pools' generations as they are before the keys are made: a raise after this
         // read then costs at most one more rotation, never a skipped one
-        java.util.Map<Long, Integer> otherGenerations = rotate ? otherPoolGenerations(hostId, poolId, scope, false) : java.util.Map.of();
+        // Pools of the same cluster this host still keys host-wide (connected before the scope was
+        // known) share the cluster's trusted host with this pool: they move to the scope with it.
+        java.util.Map<Long, Integer> adoptable = wantAuth && scope != null ? hostWidePoolsOfScope(hostId, poolId, scope)
+                : java.util.Map.of();
+        java.util.Map<Long, Integer> otherGenerations = new java.util.LinkedHashMap<>(
+                rotate ? otherPoolGenerations(hostId, poolId, scope, false) : java.util.Map.of());
+        if (rotate) {
+            otherGenerations.putAll(adoptable);
+        }
         // the same for every in-band pool of the host, for an agent that turns out to know no scopes
         java.util.Map<Long, Integer> allGenerations = rotate && scope != null
                 ? otherPoolGenerations(hostId, poolId, null, true) : otherGenerations;
@@ -260,6 +268,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     // An agent that does not know scopes answers without one: its keys are host-wide and
                     // shared by every in-band pool of the host, whatever cluster each is on.
                     boolean hostWide = scope != null && report.getKeyScope() == null;
+                    if (!hostWide && !adoptable.isEmpty()) {
+                        adoptScope(hostId, adoptable.keySet(), scope, hostNqn, report, rotated);
+                    }
                     if (rotated) {
                         registerWithOtherPools(hostId, hostWide ? allGenerations : otherGenerations, hostNqn, report);
                     } else if (report.getDhchapKey() != null) {
@@ -706,6 +717,49 @@ public class LightbitsHostListener implements HypervisorHostListener {
             return HOST_WIDE.equals(recorded) ? null : recorded;
         }
         return keptScope(poolId);
+    }
+
+    /**
+     * The other in-band pools of the host whose kept scope is this one but which the host still
+     * keys host-wide (recorded so at their last connect), with their key generations.
+     */
+    private java.util.Map<Long, Integer> hostWidePoolsOfScope(long hostId, long poolId, String scope) {
+        java.util.Map<Long, Integer> out = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<Long, Integer> e : otherPoolGenerations(hostId, poolId, null, true).entrySet()) {
+            if (HOST_WIDE.equals(value(hostId, LightbitsTrustedHosts.perPool(HOST_SCOPE_DETAIL, e.getKey())))
+                    && scope.equals(keptScope(e.getKey()))) {
+                out.put(e.getKey(), e.getValue());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Give the agent each pool again with the scope, so its connects use the cluster's keys, and
+     * record the scope for the host; without a rotation, register the keys with each pool (with
+     * a rotation, the caller registers them with the generations). Their paths still hold the
+     * host-wide key, which the scoped one starts as a copy of (or, after a rotation, none: the
+     * rotation needed them idle).
+     */
+    private void adoptScope(long hostId, java.util.Set<Long> pools, String scope, String nqn, LightbitsGetHostNqnAnswer report,
+                            boolean rotated) {
+        for (Long other : pools) {
+            StoragePool p = (StoragePool) dataStoreMgr.getDataStore(other, DataStoreRole.Primary);
+            Answer a = agentMgr.easySend(hostId, new ModifyStoragePoolCommand(true, p, discoveryDetails(other, scope)));
+            if (a == null || !a.getResult()) {
+                LOG.warn("Lightbits: could not give pool {} to host {} with its cluster's key scope ({}); it moves at its next"
+                        + " connect", other, hostId, a == null ? "no answer" : a.getDetails());
+                continue;
+            }
+            setHostDetail(hostId, LightbitsTrustedHosts.perPool(HOST_SCOPE_DETAIL, other), scope);
+            LOG.info("Lightbits: host {} now uses its keys for the cluster of pool {} (shared with pool's trusted host)", hostId, other);
+            if (!rotated) {
+                org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig c = poolConfigOrNull(other);
+                if (c != null && (!c.isInbandAuthTwoWay() || report.getDhchapCtrlKey() != null)) {
+                    registerTrustedHost(hostId, other, nqn, report);
+                }
+            }
+        }
     }
 
     /** The pool's key scope as kept, without reading the cluster; null when not known yet. */

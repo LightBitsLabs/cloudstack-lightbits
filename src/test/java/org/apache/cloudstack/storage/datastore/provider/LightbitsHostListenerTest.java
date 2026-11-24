@@ -704,7 +704,7 @@ class LightbitsHostListenerTest {
     }
 
     @Test
-    void anotherPoolIsMatchedByTheScopeThisHostWasGivenForIt() throws Exception {
+    void aPoolOfTheSameClusterThisHostKeysHostWideMovesToTheClustersKeys() throws Exception {
         String sub = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
         poolDetails.put("lightbits.subsystemnqn", sub);
         option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
@@ -718,7 +718,13 @@ class LightbitsHostListenerTest {
         putDetail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other), "host-wide");
         putDetail(otherKey, "fingerprint-of-old-key");
         listener.hostConnect(HOST, POOL);
-        assertEquals("fingerprint-of-old-key", detail(otherKey), "scoped keys are not registered with a pool this host keys host-wide");
         assertEquals(sub, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", POOL)), "the scope this connect used is recorded");
+        // the other pool shares the cluster's trusted host: it is given to the agent again with the scope
+        assertEquals(2, sent.stream().filter(c -> c instanceof ModifyStoragePoolCommand
+                && sub.equals(((ModifyStoragePoolCommand) c).getDetails().get(
+                        com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE))).count(),
+                "the other pool is registered on the agent again, with the scope");
+        assertEquals(sub, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other)), "and the host records it");
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(otherKey), "and its records follow the cluster's key");
     }
 }
