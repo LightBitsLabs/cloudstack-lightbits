@@ -375,8 +375,12 @@ wording is nvme-cli's, the cause is DH-HMAC-CHAP). Check a host's registration w
 `lbcli list trusted-hosts --project-name=<project>`.
 
 To rotate a host's key, put the host in maintenance (its VMs migrate away), delete
-`/etc/nvme/lightbits/dhchap-key`, disconnect it from the cluster's subsystem as in step 4 and
-cancel maintenance: a new key is made and registered, and the new paths hold it. Do not
+`/etc/nvme/lightbits/dhchap-key`, disconnect it from the subsystem of **every** Lightbits
+cluster it uses (as in step 4, one `nvme disconnect -n` per `nqn.2016-01.com.lightbitslabs:`
+entry of `nvme list-subsys`) and cancel maintenance: a new key is made and registered with
+every `inbandAuth=true` pool the host is in, and the new paths hold it. The key is one per
+host, shared by all its pools; a cluster whose paths were not disconnected keeps them on the
+old key, and they fail at their next reconnect once that cluster enforces authentication. Do not
 replace the key of a host that keeps running VMs while enforcement is on: its connected
 paths keep the old key, which the cluster no longer accepts, so their next reconnect fails
 and a volume with no other path stops (its I/O waits for a path that never comes back). The

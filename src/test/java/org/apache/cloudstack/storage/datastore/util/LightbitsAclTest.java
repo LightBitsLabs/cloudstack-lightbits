@@ -189,6 +189,36 @@ class LightbitsAclTest {
     }
 
     @Test
+    void aGrantWithAnotherHostsIpsUnknownStillAddsTheGrantedHostsIps() {
+        LightbitsAcl.IpResolver unknown = nqns -> LightbitsHostIps.union(nqns, n -> STAYS.equals(n) ? List.of() : List.of("10.0.0.9"));
+        // the granted host's NQN is already in the list (a host sharing it): only its IPs are missing
+        stubOne("u1", NAME, List.of(STAYS, GONE), List.of("10.0.0.2"));
+        org.junit.jupiter.api.Assertions.assertTrue(LightbitsAcl.update(client, NAME, true,
+                acl -> acl.contains(GONE) ? false : acl.add(GONE), unknown, List.of("10.0.0.9")));
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1"))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values.length()", equalTo("2")))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("10.0.0.2")))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[1]", equalTo("10.0.0.9"))));
+
+        wm.resetAll();
+        stubOne("u1", NAME, List.of(STAYS), List.of("ALLOW_NONE"));
+        LightbitsAcl.update(client, NAME, true, acl -> acl.add(GONE), unknown, List.of("10.0.0.9"));
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1"))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values.length()", equalTo("1")))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("10.0.0.9"))));
+
+        wm.resetAll();
+        stubOne("u1", NAME, List.of(STAYS, GONE), List.of("10.0.0.2", "10.0.0.9"));
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsAcl.update(client, NAME, true, acl -> false, unknown,
+                List.of("10.0.0.9")), "already there: nothing sent");
+        wm.resetAll();
+        stubOne("u1", NAME, List.of(STAYS), List.of("ALLOW_ANY"));
+        LightbitsAcl.update(client, NAME, true, acl -> acl.add(GONE), unknown, List.of("10.0.0.9"));
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1")).withRequestBody(
+                com.github.tomakehurst.wiremock.client.WireMock.notMatching(".*IPAcl.*")));
+    }
+
+    @Test
     void refreshIpsTouchesOnlyThisPoolsVolumesOfTheHost() {
         String other = "cs-cs1-p2-bbbbbbbb-2222-3333-4444-555555555555";
         String otherPool = "cs-cs1-p20-dddddddd-2222-3333-4444-555555555555";

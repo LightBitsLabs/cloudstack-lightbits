@@ -145,33 +145,37 @@ public class LightbitsHostListener implements HypervisorHostListener {
      */
     private void ensureHostDetails(long hostId, long poolId) {
         org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
-        if (cfg == null || !cfg.isInbandAuth()) {
-            ensureHostDetails(hostId, poolId, cfg, false);
+        boolean wantIps = cfg != null && cfg.isIpAcl();
+        boolean wantAuth = cfg != null && cfg.isInbandAuth();
+        if (!wantIps && !wantAuth) {
+            ensureHostDetails(hostId, poolId, cfg, false, false);
             return;
         }
-        // The key request and its registration run under the host's in-band lock (held across
-        // management servers), so of two overlapping connects of one host the one that read the
-        // key last also writes it last, and an older key cannot overwrite a newer one. Without the
-        // lock in time this connect records the rest and leaves the registration to the next one.
-        if (!hostGateLocker.run(inbandLockName(hostId), INBAND_LOCK_SECONDS, () -> ensureHostDetails(hostId, poolId, cfg, true))) {
-            LOG.warn("Lightbits: the in-band authentication lock of host {} was busy for {} s; its key is registered for"
-                    + " pool {} at its next connect", hostId, INBAND_LOCK_SECONDS, poolId);
-            ensureHostDetails(hostId, poolId, cfg, false);
+        // The agent's report (data IPs, key) and what is done with it (stored IPs and IP ACLs,
+        // trusted-host registration) run under the host's report lock, held across management
+        // servers: of two overlapping connects of one host, the one that asked last also commits
+        // last, so an older report cannot overwrite a newer one. Without the lock in time this
+        // connect only records the host NQN, and the next connect reports again.
+        if (!hostGateLocker.run(reportLockName(hostId), REPORT_LOCK_SECONDS,
+                () -> ensureHostDetails(hostId, poolId, cfg, wantIps, wantAuth))) {
+            LOG.warn("Lightbits: the report lock of host {} was busy for {} s; its {} for pool {} are recorded at its next"
+                    + " connect", hostId, REPORT_LOCK_SECONDS,
+                    wantIps && wantAuth ? "data IPs and in-band key" : wantIps ? "data IPs" : "in-band key", poolId);
+            ensureHostDetails(hostId, poolId, cfg, false, false);
         }
     }
 
-    static final int INBAND_LOCK_SECONDS = 120;
+    static final int REPORT_LOCK_SECONDS = 120;
 
-    static String inbandLockName(long hostId) {
-        return "lightbits.host.inband." + hostId;
+    static String reportLockName(long hostId) {
+        return "lightbits.host.report." + hostId;
     }
 
     private void ensureHostDetails(long hostId, long poolId, org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg,
-                                   boolean wantAuth) {
+                                   boolean wantIps, boolean wantAuth) {
         String key = LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL;
         DetailVO existing = hostDetailsDao.findDetail(hostId, key);
         boolean hasNqn = existing != null && existing.getValue() != null && !existing.getValue().isBlank();
-        boolean wantIps = cfg != null && cfg.isIpAcl();
         if (hasNqn && !wantIps && !wantAuth) {
             LOG.debug("Lightbits: host {} already has '{}' = {}", hostId, key, existing.getValue());
             return;
@@ -341,9 +345,21 @@ public class LightbitsHostListener implements HypervisorHostListener {
             LightbitsPoolConfig cfg = LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
             com.cloud.host.HostVO host = hostDao.findById(hostId);
             String hostUuid = host == null ? String.valueOf(hostId) : host.getUuid();
-            LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(cfg.newClient(),
+            org.apache.cloudstack.storage.datastore.client.LightbitsApiClient client = cfg.newClient();
+            LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(client,
                     LightbitsTrustedHosts.name(cfg.getEnvironment(), hostUuid), nqn, key,
                     java.util.Map.of("cloudstack-host", hostUuid));
+            if (r.registered() && removing(hostId)) {
+                // The host's removal began while this connect registered it. The removal marks the
+                // host before it deletes the trusted host, so either its sweep runs after this write
+                // and deletes it, or this check sees the mark: the host never stays trusted.
+                LightbitsTrustedHosts.unregister(client, cfg.getEnvironment(), nqn, new java.util.ArrayList<>());
+                setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
+                setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
+                LOG.warn("Lightbits: host {} is being removed; deleted the trusted host this connect had registered for"
+                        + " pool {}", hostId, poolId);
+                return;
+            }
             if (!r.registered()) {
                 setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
                 setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
@@ -465,6 +481,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
     private org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ipResolver(long poolId) {
         return org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.resolver(hostDetailsDao,
                 LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL, poolId);
+    }
+
+    private boolean removing(long hostId) {
+        return hostDetailsDao.findDetail(hostId, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL) != null;
     }
 
     /** A host that connects is not being removed (a removal that did not go through). */

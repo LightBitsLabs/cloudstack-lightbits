@@ -713,7 +713,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
         org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ips = ipResolverFor(cfg, poolId);
-        if (ips != null && org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.of(hostDetailsDao, host.getId(), poolId).isEmpty()) {
+        List<String> hostIps = ips == null ? null
+                : org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.of(hostDetailsDao, host.getId(), poolId);
+        if (ips != null && hostIps.isEmpty()) {
             throw new CloudRuntimeException("host " + host.getId() + " has not reported its data IPs for Lightbits pool " + poolId
                     + ", which has ipAcl on; the cluster would refuse its connection. Upgrade the host's agent to this plugin"
                     + " version and reconnect the host (see the management server log for the host's last report).");
@@ -734,7 +736,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                             }
                             acl.add(nqn);
                             return true;
-                        }, ips)),
+                        }, ips, hostIps)),
                 () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
                         () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips)));
         if (dataObject instanceof VolumeInfo) {
