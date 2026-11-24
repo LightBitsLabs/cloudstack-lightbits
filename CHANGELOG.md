@@ -201,7 +201,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the value is corrected.
 - With `ipAcl=true`, a volume whose NQN ACL holds a host the plugin has no data IP for (a
   host added by hand on the cluster, or one that has not reconnected since the option was
-  turned on) keeps its IP ACL as it is, and the management log says so.
+  turned on) keeps its IP ACL as it is, and the management log says so. A grant (attach,
+  VM start, migration) to such a volume still adds the granted host's own addresses, removing
+  none, so the attach does not succeed while the cluster refuses the host; addresses of hosts
+  that left are removed at the next update that knows every host's addresses.
 - An offering change that keeps the volume's size and IOPS reaches the plugin only at the
   volume's next attach, VM start or migration (CloudStack does not call the storage plugin for
   it), so the plugin tries the new QoS policy then; a failed change is logged and tried again
