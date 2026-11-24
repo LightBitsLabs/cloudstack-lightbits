@@ -431,6 +431,39 @@ class LightbitsNvmeHost {
         return ports;
     }
 
+    /** The controller names of this host's Lightbits paths, any state. */
+    java.util.Set<String> pathNames() {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (Path p : paths()) {
+            out.add(p.controller);
+        }
+        return out;
+    }
+
+    /**
+     * Two-way: disconnect the Lightbits paths made since {@code before} that do not hold the
+     * current controller key (a data port the cluster advertised after the configuration was
+     * written gets the host key only, so the host would not check the cluster on it). Paths that
+     * were there before are left alone: they may carry volumes. Returns the controllers dropped.
+     */
+    List<String> dropNewPathsWithoutCtrlKey(java.util.Set<String> before, String currentCtrlKey) {
+        List<String> dropped = new ArrayList<>();
+        for (Path p : paths()) {
+            if (before.contains(p.controller)) {
+                continue;
+            }
+            String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_ctrl_secret");
+            if (secret == null || !secret.trim().equals(currentCtrlKey)) {
+                Result r = sys.run(30_000, "nvme", "disconnect", "-d", p.controller);
+                LOG.warn("Lightbits: dropped path {} ({}): it was made without this host's controller key, so the host would not"
+                        + " check the cluster on it (two-way); the next connect makes it again{}", p.controller, p.address,
+                        r.ok() ? "" : " (disconnect failed, exit " + r.exit + ": " + r.output + ")");
+                dropped.add(p.controller);
+            }
+        }
+        return dropped;
+    }
+
     List<Path> livePaths() {
         List<Path> out = new ArrayList<>();
         for (Path p : paths()) {
@@ -597,6 +630,9 @@ class LightbitsNvmeHost {
     }
 
     /** The real host. */
+    static final int MAX_MESSAGE_OUTPUT = 2000;
+    static final int MAX_DATA_OUTPUT = 1_000_000;
+
     static final class RealSys implements Sys {
         @Override
         public Result run(long timeoutMillis, String... argv) {
@@ -610,7 +646,10 @@ class LightbitsNvmeHost {
                         return new Result(124, argv[0] + " timed out after " + (timeoutMillis / 1000) + "s");
                     }
                     String text = new String(Files.readAllBytes(out.toPath()), StandardCharsets.UTF_8);
-                    return new Result(p.exitValue(), text.length() > 2000 ? text.substring(0, 2000) : text);
+                    // a failure's output goes into messages: keep it short; a success's output can be
+                    // data (the discovery log page as JSON): keep it whole, within a memory bound
+                    int limit = p.exitValue() == 0 ? MAX_DATA_OUTPUT : MAX_MESSAGE_OUTPUT;
+                    return new Result(p.exitValue(), text.length() > limit ? text.substring(0, limit) : text);
                 } finally {
                     Files.deleteIfExists(out.toPath());
                 }

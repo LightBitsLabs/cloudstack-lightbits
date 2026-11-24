@@ -177,7 +177,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // One connect at a time on this host: parallel VM starts would otherwise race each
         // other's connect-all against the same subsystem.
         synchronized (CONNECT_LOCK) {
-            nvme.connectWith(endpoints, LightbitsNvmeHost.CONNECT_TIMEOUT_MS, configFor);
+            connectPool(pool, endpoints, LightbitsNvmeHost.CONNECT_TIMEOUT_MS, configFor);
             // the host is connected: a failure an earlier lookup remembered for this pool is history
             lookupConnects.remove(pool.getUuid());
         }
@@ -223,7 +223,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             boolean answered;
             List<String> endpoints = discoveryEndpoints(pool);
             try {
-                answered = nvme.connectWith(endpoints, LOOKUP_CONNECT_TIMEOUT_MILLIS, configFor(pool));
+                answered = connectPool(pool, endpoints, LOOKUP_CONNECT_TIMEOUT_MILLIS, configFor(pool));
             } catch (CloudRuntimeException e) {
                 state.lastFailure = e.getMessage();
                 backOff(state);
@@ -271,6 +271,22 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      * is made on first use. A key that cannot be prepared fails the connect: without it the
      * host loses its paths once the cluster turns in-band authentication on.
      */
+    /**
+     * Connect a pool (the caller holds the connect lock). For a two-way pool, a path this connect
+     * made without the controller key is dropped again, so two-way never quietly runs one-way.
+     */
+    private boolean connectPool(KVMStoragePool pool, List<String> endpoints, long timeoutMillis,
+                                java.util.function.Function<String, java.nio.file.Path> configFor) {
+        boolean twoWay = pool.getDetails() != null && "true".equals(pool.getDetails().get(DETAIL_INBAND_AUTH))
+                && "true".equals(pool.getDetails().get(DETAIL_INBAND_TWO_WAY));
+        java.util.Set<String> before = twoWay ? nvme.pathNames() : null;
+        boolean answered = nvme.connectWith(endpoints, timeoutMillis, configFor);
+        if (twoWay) {
+            nvme.dropNewPathsWithoutCtrlKey(before, hostKey.ensureCtrlKey());
+        }
+        return answered;
+    }
+
     /**
      * Rotate this host's in-band authentication keys (host key and controller key): only when no
      * Lightbits volume is in use here. Under the connect lock, idle Lightbits connections are

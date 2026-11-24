@@ -200,6 +200,10 @@ public final class LightbitsTrustedHosts {
             }
         }
         String used = existing.map(h -> h.name).orElse(name);
+        // Read, then write: the caller holds the host's report lock (a GlobalLock, so across
+        // management servers) for the whole registration, and every registration of this host,
+        // for any pool, takes it; no other code writes a trusted host's secrets. So no two-way
+        // registration of the same trusted host can fall between the read and the write.
         String target = ctrlKey != null ? ctrlKey : existing.isPresent() ? client.getTrustedHostTargetSecret(used) : null;
         client.setTrustedHostSecret(used, key, target);
         // A trusted host the plugin creates has authRequired=true; one that existed keeps what it has.

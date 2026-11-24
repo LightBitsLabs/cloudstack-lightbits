@@ -566,4 +566,25 @@ class LightbitsNvmeHostTest {
         assertEquals(k, key.ensure(), "the keys are kept");
         assertTrue(sys.commands.stream().noneMatch(cmd -> cmd.startsWith("nvme disconnect")), "a subsystem in use is not touched");
     }
+
+    @Test
+    void newPathsWithoutTheControllerKeyAreDroppedOldOnesKept() {
+        String ctrl = "DHHC-1:00:ctrl:";
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");   // older one-way path, may carry volumes
+        java.util.Set<String> before = host.pathNames();
+        sys.controller("nvme2", "traddr=10.0.0.2,trsvcid=4420", "live");
+        sys.controller("nvme3", "traddr=10.0.0.3,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", ctrl);
+        sys.files.put("/sys/class/nvme/nvme3/dhchap_ctrl_secret", "none");
+        assertEquals(List.of("nvme3"), host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        assertTrue(sys.commands.contains("nvme disconnect -d nvme3"), sys.commands.toString());
+        assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -d nvme1")), "an older path is left alone");
+    }
+
+    @Test
+    void aSuccessfulCommandKeepsItsWholeOutputAFailureIsShortened() {
+        LightbitsNvmeHost.RealSys real = new LightbitsNvmeHost.RealSys();
+        assertEquals(5000, real.run(10_000, "sh", "-c", "head -c 5000 /dev/zero | tr '\\0' a").output.length());
+        assertEquals(LightbitsNvmeHost.MAX_MESSAGE_OUTPUT, real.run(10_000, "sh", "-c", "head -c 5000 /dev/zero | tr '\\0' a; exit 3").output.length());
+    }
 }

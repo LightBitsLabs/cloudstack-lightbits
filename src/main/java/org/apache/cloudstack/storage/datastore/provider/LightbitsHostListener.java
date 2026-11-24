@@ -481,7 +481,13 @@ public class LightbitsHostListener implements HypervisorHostListener {
         java.util.List<String> pendingRotation = new java.util.ArrayList<>();
         java.util.List<StoragePoolHostVO> refs = storagePoolHostDao.listByPoolId(poolId);
         org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
-        boolean twoWay = cfg != null && cfg.isInbandAuthTwoWay();
+        if (cfg == null) {
+            // without the options it is not known whether the pool is two-way: never say ready
+            LOG.warn("Lightbits: readiness of pool {} for in-band authentication is unknown: its options could not be read",
+                    poolId);
+            return;
+        }
+        boolean twoWay = cfg.isInbandAuthTwoWay();
         for (StoragePoolHostVO ref : refs) {
             long id = ref.getHostId();
             com.cloud.host.HostVO h = hostDao.findById(id);
@@ -502,7 +508,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 }
             }
             String gen = value(id, LightbitsTrustedHosts.generationDetailKey(poolId));
-            if (cfg != null && gen != null && generation(gen) < cfg.getInbandKeyGeneration()) {
+            if (gen != null && generation(gen) < cfg.getInbandKeyGeneration()) {
                 pendingRotation.add(label);
             }
             DetailVO k = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.KEYLESS_DETAIL);
