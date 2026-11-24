@@ -522,6 +522,24 @@ class LightbitsApiClientTest {
     }
 
     @Test
+    void updateAclWithIpsSendsBothListsInOneUpdate() {
+        stubEtagMovesAfterPut(VOLUMES + "/" + VOL_UUID, "4294967296");
+        client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), List.of("10.0.0.1"), "1");
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID))
+                .withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo("nqn.host.a")))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("10.0.0.1")))
+                .withHeader("If-Match", equalTo("1")));
+    }
+
+    @Test
+    void updateAclWithoutIpsLeavesTheIpAclOut() {
+        stubEtagMovesAfterPut(VOLUMES + "/" + VOL_UUID, "4294967296");
+        client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), "1");
+        wm.verify(1, com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor(urlEqualTo(VOLUMES + "/" + VOL_UUID))
+                .withRequestBody(matchingJsonPath("$.IPAcl", absent())));
+    }
+
+    @Test
     void updateAclSendsValues() {
         stubEtagMovesAfterPut(VOLUMES + "/" + VOL_UUID, "4294967296");
         client.updateVolumeAcl(VOL_UUID, List.of("nqn.host.a"), "1");
@@ -661,6 +679,24 @@ class LightbitsApiClientTest {
                 .withRequestBody(matchingJsonPath("$.labels[0].value", equalTo("v1")))
                 .withRequestBody(matchingJsonPath("$.placementRestrictions", absent()))
                 .withRequestBody(matchingJsonPath("$.unencrypted", absent())));
+    }
+
+    @Test
+    void ipAclNoneIsSentOnCreateAndKeptForAClone() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        client.createVolume("cs-abc", 4294967296L, 3, null, false, null, VolumeExtras.NONE.withIpAclNone());
+        client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null, false, null,
+                new VolumeExtras(null, List.of("fd-a"), true).withIpAclNone());
+        wm.verify(2, postRequestedFor(urlEqualTo(VOLUMES))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("ALLOW_NONE"))));
+        wm.verify(0, postRequestedFor(urlEqualTo(VOLUMES)).withRequestBody(matchingJsonPath("$.IPAcl", absent())));
+    }
+
+    @Test
+    void createVolumeWithoutIpAclLeavesTheClusterDefault() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        client.createVolume("cs-abc", 4294967296L, 3, null, false, null, new VolumeExtras(null, List.of(), false));
+        wm.verify(postRequestedFor(urlEqualTo(VOLUMES)).withRequestBody(matchingJsonPath("$.IPAcl", absent())));
     }
 
     @Test

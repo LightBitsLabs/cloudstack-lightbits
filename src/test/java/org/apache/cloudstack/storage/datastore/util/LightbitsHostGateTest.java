@@ -219,4 +219,72 @@ class LightbitsHostGateTest {
         assertFalse(acl.contains("nqn-host"), "the grant's write after the host was gone was taken out again");
         assertEquals(1, grantErrors.size());
     }
+
+    @Test
+    void aGrantForAnotherHostCannotWriteStaleIpsAfterTheRefresh() throws Exception {
+        // Host A is in the volume and moves from 10.0.0.1 to 10.0.0.2; a grant for host B resolves
+        // the IPs while A's refresh runs. Every writer holds the pool's IP ACL lock while it
+        // resolves and writes, so the grant either writes before the refresh (which then fixes
+        // the IPs) or resolves A's new IP. The volume never ends with A's old IP.
+        long pool = 3;
+        long hostA = 1;
+        long hostB = 2;
+        LightbitsHostGate.Locker locker = inProcess();
+        java.util.Map<Long, String> detail = new java.util.concurrent.ConcurrentHashMap<>(java.util.Map.of(hostA, "10.0.0.1",
+                hostB, "10.0.0.9"));
+        java.util.concurrent.atomic.AtomicReference<Set<String>> volumeIps = new java.util.concurrent.atomic.AtomicReference<>(
+                Set.of("10.0.0.1"));
+        CountDownLatch grantResolved = new CountDownLatch(1);
+        CountDownLatch refreshTried = new CountDownLatch(1);
+        List<Throwable> errors = new CopyOnWriteArrayList<>();
+
+        Thread grant = new Thread(() -> {
+            try {
+                LightbitsHostGate.grant(hostB, id -> false, locker,
+                        () -> LightbitsHostGate.underPoolIpAclLock(locker, pool, true, () -> {
+                            Set<String> resolved = Set.of(detail.get(hostA), detail.get(hostB));   // the IPs of A and B
+                            grantResolved.countDown();
+                            try {
+                                refreshTried.await(5, TimeUnit.SECONDS);
+                                Thread.sleep(100);   // the refresh is now waiting for the pool lock
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                            volumeIps.set(resolved);
+                        }), () -> { });
+            } catch (Throwable t) {
+                errors.add(t);
+            }
+        });
+        grant.start();
+        assertTrue(grantResolved.await(5, TimeUnit.SECONDS));
+
+        // Host A reports its new IP: host lock, then pool lock, store, refresh what is stale.
+        Thread refresh = new Thread(() -> locker.run(LightbitsHostGate.lockName(hostA), 5, () -> {
+            refreshTried.countDown();
+            assertTrue(locker.run(LightbitsHostGate.poolIpAclLockName(pool), 5, () -> {
+                detail.put(hostA, "10.0.0.2");
+                Set<String> want = Set.of(detail.get(hostA), detail.get(hostB));
+                if (!volumeIps.get().equals(want)) {
+                    volumeIps.set(want);
+                }
+            }));
+        }));
+        refresh.start();
+        grant.join(5000);
+        refresh.join(5000);
+
+        assertTrue(errors.isEmpty(), errors.toString());
+        assertEquals(Set.of("10.0.0.2", "10.0.0.9"), volumeIps.get());
+    }
+
+    @Test
+    void withoutIpAclNoPoolLockIsTakenAndWithoutTheLockNothingIsWritten() {
+        LightbitsHostGate.Locker never = (name, seconds, work) -> false;
+        List<String> ran = new CopyOnWriteArrayList<>();
+        LightbitsHostGate.underPoolIpAclLock(never, 3, false, () -> ran.add("write"));
+        assertEquals(List.of("write"), ran);
+        assertThrows(CloudRuntimeException.class, () -> LightbitsHostGate.underPoolIpAclLock(never, 3, true, () -> ran.add("x")));
+        assertEquals(List.of("write"), ran);
+    }
 }

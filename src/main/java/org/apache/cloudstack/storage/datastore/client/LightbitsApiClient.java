@@ -806,10 +806,23 @@ public class LightbitsApiClient {
      * Returns once the ACL change is applied (the volume is back to Available).
      */
     public void updateVolumeAcl(String uuid, List<String> nqns, String ifMatchEtag) {
+        updateVolumeAcl(uuid, nqns, null, ifMatchEtag);
+    }
+
+    /**
+     * Set a volume's host NQN list and, when {@code ips} is not null, its IP address list in
+     * one conditional update (an empty list of either is sent as ALLOW_NONE). With
+     * {@code ips} null the volume's IP list is left as it is.
+     */
+    public void updateVolumeAcl(String uuid, List<String> nqns, List<String> ips, String ifMatchEtag) {
         ObjectNode body = mapper.createObjectNode();
         body.put("projectName", project);
         ArrayNode values = body.putObject("acl").putArray("values");
         (nqns == null || nqns.isEmpty() ? List.of("ALLOW_NONE") : nqns).forEach(values::add);
+        if (ips != null) {
+            ArrayNode ipValues = body.putObject("IPAcl").putArray("values");
+            (ips.isEmpty() ? List.of("ALLOW_NONE") : ips).forEach(ipValues::add);
+        }
         requireRevision(ifMatchEtag, "ACL update of volume " + uuid);
         executeConditional("PUT", projectPath("volumes", uuid), body.toString(), ifMatchEtag);
         waitForVolume(uuid, ifMatchEtag);
@@ -972,6 +985,10 @@ public class LightbitsApiClient {
         }
         if (extras.isUnencrypted()) {
             body.put("unencrypted", true);
+        }
+        if (extras.isIpAclNone()) {
+            // no IP address may connect until a grant adds the host's data IPs
+            body.putObject("IPAcl").putArray("values").add("ALLOW_NONE");
         }
     }
 

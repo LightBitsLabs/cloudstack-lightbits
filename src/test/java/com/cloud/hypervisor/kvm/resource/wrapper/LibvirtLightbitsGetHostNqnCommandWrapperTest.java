@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import org.apache.cloudstack.storage.datastore.command.LightbitsGetHostNqnAnswer;
 import org.apache.cloudstack.storage.datastore.command.LightbitsGetHostNqnCommand;
@@ -106,5 +107,57 @@ class LibvirtLightbitsGetHostNqnCommandWrapperTest {
         LightbitsGetHostNqnAnswer answer = execute(w);
         assertTrue(answer.getResult());
         assertEquals(NQN, answer.getHostNqn());
+    }
+
+    @Test
+    void reportsTheSourceAddressTowardEachEndpointOnce() throws IOException {
+        LibvirtLightbitsGetHostNqnCommandWrapper w = new LibvirtLightbitsGetHostNqnCommandWrapper() {
+            @Override
+            protected Path hostNqnPath() {
+                return tmp.resolve("hostnqn");
+            }
+
+            @Override
+            protected String resolve(String host) throws java.net.UnknownHostException {
+                if ("nohost".equals(host)) {
+                    throw new java.net.UnknownHostException(host);
+                }
+                return host;
+            }
+
+            @Override
+            protected String routeSource(String address) {
+                return address.startsWith("10.19.") ? "10.19.31.17" : address.startsWith("fd00") ? "fd00::17" : null;
+            }
+        };
+        Files.writeString(tmp.resolve("hostnqn"), NQN);
+        Answer answer = w.execute(new LightbitsGetHostNqnCommand(
+                List.of("10.19.31.20:8009", "10.19.31.23:8009", "[fd00::1]:8009", "nohost:8009", "192.0.2.1:8009")), null);
+        assertTrue(answer.getResult());
+        assertEquals(List.of("10.19.31.17", "fd00::17"), ((LightbitsGetHostNqnAnswer) answer).getDataIps());
+        assertTrue(((LightbitsGetHostNqnAnswer) answer).isDataIpsPartial(), "two endpoints could not be looked up");
+
+        Answer complete = w.execute(new LightbitsGetHostNqnCommand(List.of("10.19.31.20:8009", "[fd00::1]:8009")), null);
+        assertEquals(List.of("10.19.31.17", "fd00::17"), ((LightbitsGetHostNqnAnswer) complete).getDataIps());
+        org.junit.jupiter.api.Assertions.assertFalse(((LightbitsGetHostNqnAnswer) complete).isDataIpsPartial());
+    }
+
+    @Test
+    void withoutEndpointsTheAnswerCarriesNoIps() throws IOException {
+        LibvirtLightbitsGetHostNqnCommandWrapper w = wrapper(null);
+        Files.createDirectories(w.hostNqnPath().getParent());
+        Files.writeString(w.hostNqnPath(), NQN);
+        assertEquals(List.of(), execute(w).getDataIps());
+    }
+
+    @Test
+    void endpointHostsAndRouteSourcesAreParsed() {
+        assertEquals("10.0.0.1", LibvirtLightbitsGetHostNqnCommandWrapper.hostOf("10.0.0.1:8009"));
+        assertEquals("fd00::1", LibvirtLightbitsGetHostNqnCommandWrapper.hostOf("[fd00::1]:8009"));
+        assertEquals("fd00::1", LibvirtLightbitsGetHostNqnCommandWrapper.hostOf("fd00::1"));
+        assertEquals("node1.lab", LibvirtLightbitsGetHostNqnCommandWrapper.hostOf("node1.lab"));
+        assertEquals("10.19.31.17", LibvirtLightbitsGetHostNqnCommandWrapper.parseRouteSource(
+                "10.19.31.20 dev ens785f0np0 src 10.19.31.17 uid 0 \\    cache "));
+        assertEquals(null, LibvirtLightbitsGetHostNqnCommandWrapper.parseRouteSource("RTNETLINK answers: Network is unreachable"));
     }
 }

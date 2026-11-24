@@ -115,4 +115,91 @@ class LightbitsAclTest {
 
         assertEquals(List.of(fine), LightbitsAcl.pruneHost(client, "cs1", 2, GONE));
     }
+
+    private static String volIps(String uuid, String name, String etag, List<String> acl, List<String> ips) {
+        return "{\"UUID\":\"" + uuid + "\",\"name\":\"" + name + "\",\"state\":\"Available\",\"ETag\":\"" + etag
+                + "\",\"acl\":{\"values\":[\"" + String.join("\",\"", acl) + "\"]},\"IPAcl\":{\"values\":[\""
+                + String.join("\",\"", ips) + "\"]}}";
+    }
+
+    private void stubOne(String uuid, String name, List<String> acl, List<String> ips) {
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).withQueryParam("name", equalTo(name)).atPriority(1).inScenario(uuid)
+                .whenScenarioStateIs(Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + volIps(uuid, name, "1", acl, ips) + "]}")));
+        wm.stubFor(put(urlEqualTo(VOLUMES + "/" + uuid)).inScenario(uuid).willSetStateTo("put")
+                .willReturn(aResponse().withStatus(200).withBody("{}")));
+        wm.stubFor(get(urlEqualTo(VOLUMES + "/" + uuid)).inScenario(uuid).whenScenarioStateIs("put")
+                .willReturn(aResponse().withStatus(200).withBody(volIps(uuid, name, "2", acl, ips))));
+    }
+
+    private static final String NAME = "cs-cs1-p2-aaaaaaaa-2222-3333-4444-555555555555";
+
+    @Test
+    void aGrantSetsTheIpAclToTheIpsOfTheHostsInTheSameUpdate() {
+        stubOne("u1", NAME, List.of(STAYS), List.of("10.0.0.2"));
+        java.util.Map<String, List<String>> ipsOf = java.util.Map.of(STAYS, List.of("10.0.0.2"), GONE, List.of("10.0.0.9"));
+        boolean sent = LightbitsAcl.update(client, NAME, true, acl -> acl.add(GONE),
+                nqns -> LightbitsHostIps.union(nqns, ipsOf::get));
+        org.junit.jupiter.api.Assertions.assertTrue(sent);
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1")).withHeader("If-Match", equalTo("1"))
+                .withRequestBody(matchingJsonPath("$.acl.values.length()", equalTo("2")))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("10.0.0.2")))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[1]", equalTo("10.0.0.9"))));
+    }
+
+    @Test
+    void theLastHostLeavingSetsTheIpAclToAllowNone() {
+        stubOne("u1", NAME, List.of(GONE), List.of("10.0.0.9"));
+        LightbitsAcl.update(client, NAME, false, acl -> acl.remove(GONE), nqns -> LightbitsHostIps.union(nqns, n -> List.of("10.0.0.9")));
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1"))
+                .withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo("ALLOW_NONE")))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("ALLOW_NONE"))));
+    }
+
+    @Test
+    void anIpAclOutOfLineIsCorrectedEvenWhenTheNqnsAreAlreadyRight() {
+        stubOne("u1", NAME, List.of(STAYS), List.of("ALLOW_ANY"));
+        boolean sent = LightbitsAcl.update(client, NAME, true, acl -> false, nqns -> List.of("10.0.0.2"));
+        org.junit.jupiter.api.Assertions.assertTrue(sent);
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1"))
+                .withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo(STAYS)))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("10.0.0.2"))));
+    }
+
+    @Test
+    void nothingIsSentWhenBothListsAreRight() {
+        stubOne("u1", NAME, List.of(STAYS), List.of("10.0.0.2"));
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsAcl.update(client, NAME, true, acl -> false, nqns -> List.of("10.0.0.2")));
+        wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u1")));
+    }
+
+    @Test
+    void withoutAResolverOrWithUnknownIpsTheIpAclIsLeftAlone() {
+        stubOne("u1", NAME, List.of(STAYS), List.of("10.0.0.2"));
+        LightbitsAcl.update(client, NAME, true, acl -> acl.add(GONE));
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1")).withRequestBody(
+                com.github.tomakehurst.wiremock.client.WireMock.notMatching(".*IPAcl.*")));
+        wm.resetRequests();
+        wm.resetScenarios();
+        // a host in the list has not reported its IPs: union is null, the IP ACL is not touched
+        LightbitsAcl.update(client, NAME, true, acl -> acl.add(GONE),
+                nqns -> LightbitsHostIps.union(nqns, n -> STAYS.equals(n) ? List.of("10.0.0.2") : List.of()));
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1")).withRequestBody(
+                com.github.tomakehurst.wiremock.client.WireMock.notMatching(".*IPAcl.*")));
+    }
+
+    @Test
+    void refreshIpsTouchesOnlyThisPoolsVolumesOfTheHost() {
+        String other = "cs-cs1-p2-bbbbbbbb-2222-3333-4444-555555555555";
+        String otherPool = "cs-cs1-p20-dddddddd-2222-3333-4444-555555555555";
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).atPriority(5).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":["
+                + volIps("u1", NAME, "1", List.of(GONE), List.of("10.0.0.1")) + ","
+                + volIps("u2", other, "1", List.of(STAYS), List.of("10.0.0.2")) + ","
+                + volIps("u3", otherPool, "1", List.of(GONE), List.of("10.0.0.1")) + "]}")));
+        stubOne("u1", NAME, List.of(GONE), List.of("10.0.0.1"));
+        assertEquals(List.of(NAME), LightbitsAcl.refreshIps(client, "cs1", 2, GONE, nqns -> List.of("10.0.0.9")));
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1")).withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("10.0.0.9"))));
+        wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u2")));
+        wm.verify(0, putRequestedFor(urlEqualTo(VOLUMES + "/u3")));
+    }
 }

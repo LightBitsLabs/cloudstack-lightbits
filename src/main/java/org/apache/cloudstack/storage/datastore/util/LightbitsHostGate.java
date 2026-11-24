@@ -76,8 +76,37 @@ public final class LightbitsHostGate {
     private LightbitsHostGate() {
     }
 
-    static String lockName(long hostId) {
+    public static String lockName(long hostId) {
         return "lightbits.host.acl." + hostId;
+    }
+
+    static final int POOL_IP_ACL_LOCK_SECONDS = 120;
+
+    /**
+     * The lock every IP ACL writer of a pool with ipAcl holds while it resolves hosts' data IPs
+     * and writes them: grants, revokes, the host removal sweep and the refresh after a host
+     * reports new data IPs. Without it a writer could resolve a host's old IPs, the refresh
+     * could find the volume already right and write nothing, and the writer could then put the
+     * old IPs back with a still-valid ETag. Lock order: a host's ACL lock (when taken) first,
+     * then this one; no writer holds two pool locks at once.
+     */
+    public static String poolIpAclLockName(long poolId) {
+        return "lightbits.pool.ipacl." + poolId;
+    }
+
+    /**
+     * Run an IP ACL write of a pool under its {@link #poolIpAclLockName} lock, or directly when
+     * the pool has no ipAcl. Fails without the lock in time, having written nothing.
+     */
+    public static void underPoolIpAclLock(Locker locker, long poolId, boolean ipAcl, Runnable work) {
+        if (!ipAcl) {
+            work.run();
+            return;
+        }
+        if (!locker.run(poolIpAclLockName(poolId), POOL_IP_ACL_LOCK_SECONDS, work)) {
+            throw new CloudRuntimeException("could not get the IP ACL lock of Lightbits pool " + poolId + " within "
+                    + POOL_IP_ACL_LOCK_SECONDS + " s (a host's data IPs are being recorded); retry the operation");
+        }
     }
 
     /**

@@ -263,6 +263,11 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         return filledFromTemplate(vol) ? extras.labelsOnly() : extras;
     }
 
+    /** With the pool option ipAcl a new volume lets no address connect until a grant. */
+    private static VolumeExtras withIpAcl(VolumeExtras extras, LightbitsPoolConfig cfg) {
+        return cfg.isIpAcl() ? extras.withIpAclNone() : extras;
+    }
+
     private boolean filledFromTemplate(VolumeInfo vol) {
         if (vol.getVolumeType() != com.cloud.storage.Volume.Type.ROOT || vol.getTemplateId() == null) {
             return false;
@@ -336,7 +341,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                         client.createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), vol.getUuid()),
                                 vol.getSize(), replicasFor(vol, cfg), null, compressionFor(vol, cfg),
-                                checkedQosPolicyNameFor(vol, cfg, client), createExtrasFor(vol, store));
+                                checkedQosPolicyNameFor(vol, cfg, client), withIpAcl(createExtrasFor(vol, store), cfg));
                 // path identifies the backing volume; the KVM adaptor resolves the NVMe
                 // device by this UUID (/dev/disk/by-id/nvme-uuid.<UUID>). The path must be
                 // returned inside a VolumeObjectTO so CloudStack persists it on the volume.
@@ -362,8 +367,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                         clientFor(cfg).createVolume(
                                 LightbitsUtil.volumeName(cfg.getEnvironment(), store.getId(), tmpl.getUuid()),
                                 size, cfg.getReplicaCount(), null, cfg.isCompression(), null,
-                                new VolumeExtras(java.util.Map.of(LABEL_TEMPLATE, tmpl.getUuid(), LABEL_POOL, store.getUuid()),
-                                        List.of(), false));
+                                withIpAcl(new VolumeExtras(java.util.Map.of(LABEL_TEMPLATE, tmpl.getUuid(), LABEL_POOL, store.getUuid()),
+                                        List.of(), false), cfg));
                 path = created.getUuid();
                 // The managed-template flow calls processEvent(OperationSucceeded) WITHOUT the
                 // answer, so the framework does not persist our path. Set install_path on the
@@ -587,7 +592,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
             // A clone shares its source's data: it keeps the source's placement and encryption,
             // and only takes the new volume's labels (see createVolumeFromSnapshot).
             created = client.createVolumeFromSnapshot(destName, snap.getUuid(), size, replicas, null,
-                    compressionFor(destVol, cfg), checkedQosPolicyNameFor(destVol, cfg, client), extrasFor(destVol, store));
+                    compressionFor(destVol, cfg), checkedQosPolicyNameFor(destVol, cfg, client),
+                    withIpAcl(extrasFor(destVol, store), cfg));
         } catch (RuntimeException e) {
             // Do not leave the clone-source snapshot we just took behind a failed clone. A clone
             // this call created has been removed, and that removal waited for, by the client.
@@ -706,6 +712,12 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
+        org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ips = ipResolverFor(cfg, poolId);
+        if (ips != null && org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.of(hostDetailsDao, host.getId(), poolId).isEmpty()) {
+            throw new CloudRuntimeException("host " + host.getId() + " has not reported its data IPs for Lightbits pool " + poolId
+                    + ", which has ipAcl on; the cluster would refuse its connection. Upgrade the host's agent to this plugin"
+                    + " version and reconnect the host (see the management server log for the host's last report).");
+        }
         // Under the host's ACL lock, refused while the host is being removed: see LightbitsHostGate.
         org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.grant(host.getId(),
                 // Being removed: the mark is set, or the host's details are already gone (CloudStack
@@ -713,14 +725,18 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 id -> hostDetailsDao.findDetail(id, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL) != null
                         || hostDetailsDao.findDetail(id, HOST_NQN_DETAIL) == null,
                 hostGateLocker,
-                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
-                    if (acl.contains(nqn)) {
-                        return false;
-                    }
-                    acl.add(nqn);
-                    return true;
-                }),
-                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn)));
+                // With ipAcl, also under the pool's IP ACL lock (after the host lock), so a refresh of
+                // another host's data IPs cannot run between resolving the IPs and writing them.
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
+                        () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
+                            if (acl.contains(nqn)) {
+                                return false;
+                            }
+                            acl.add(nqn);
+                            return true;
+                        }, ips)),
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
+                        () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips)));
         if (dataObject instanceof VolumeInfo) {
             // An offering change with the same size and IOPS never reaches resize: pick it up here.
             // Best effort like the change itself: a failed lookup must not fail the granted attach.
@@ -738,7 +754,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         return true;
     }
 
-    /** The lock grants and host removal share; tests swap it for an in-process one. */
+    /** The locks grants, revokes and host removal share (see LightbitsHostGate); tests swap it for an in-process one. */
     org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.Locker hostGateLocker =
             org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.GLOBAL;
 
@@ -749,7 +765,16 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
-        org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn));
+        org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ips = ipResolverFor(cfg, poolId);
+        org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips));
+    }
+
+    /** With the pool option ipAcl, the IP ACL of a volume follows its hosts' data IPs; else untouched. */
+    private org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ipResolverFor(LightbitsPoolConfig cfg, long poolId) {
+        return cfg.isIpAcl()
+                ? org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.resolver(hostDetailsDao, HOST_NQN_DETAIL, poolId)
+                : null;
     }
 
     private String hostNqn(Host host) {

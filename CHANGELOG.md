@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- Pool option `ipAcl=true`: each volume's IP ACL holds the data IPs of the hosts in its NQN
+  ACL, so a connection to the volume must come from one of those addresses (the union over
+  the volume's hosts; the cluster does not tie each NQN to its own address). The agent reports the
+  address it uses toward the pool's cluster on host connect; grants, revokes, migrations and
+  host removal update both lists in one conditional update, and new volumes start at
+  `ALLOW_NONE`. A host whose data IP changed updates the IP ACLs of its volumes when it
+  reconnects.
 - QoS follows the offering: a volume moved to an offering with another `lightbitsQosPolicy`
   is moved to that policy on the cluster. A policy named by an offering is checked when a
   volume is created, with the offering detail in the error when the project cannot see it.
@@ -130,6 +137,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   well as 4.22.1.0.
 
 ### Known limitations
+- With `ipAcl=true`, a host whose agent is older than this plugin version does not report its
+  data IP and is refused access to the pool's volumes (the attach fails and names the
+  host). Upgrade the agent on every host before turning the option on.
+- With `ipAcl=true`, removing a host while the pool's IP ACL lock stays busy for 120 s
+  takes its NQN out of the volume ACLs but leaves its address in their IP ACLs (addresses
+  read without the lock may be stale) until the volume's next attach, migration or host
+  connect; the management log says so. The NQN ACL still refuses the removed host.
+- Turning `ipAcl` off leaves the volumes' IP ACLs as they are (the plugin no longer changes
+  them), so a volume then attached on another host is refused by the cluster. Before turning
+  it off, have the cluster admin set `--ip-acl ALLOW_ANY` on the pool's volumes.
+- CloudStack stores `cmk update storagepool details[0].<option>=...` without asking the
+  plugin, so a value other than `true` or `false` for `ipAcl` or `qosFromIops` is not refused
+  there. The pool's volume operations then fail, with the option named in the error, until
+  the value is corrected.
+- With `ipAcl=true`, a volume whose NQN ACL holds a host the plugin has no data IP for (a
+  host added by hand on the cluster, or one that has not reconnected since the option was
+  turned on) keeps its IP ACL as it is, and the management log says so.
 - An offering change that keeps the volume's size and IOPS reaches the plugin only at the
   volume's next attach, VM start or migration (CloudStack does not call the storage plugin for
   it), so the plugin tries the new QoS policy then; a failed change is logged and tried again

@@ -61,11 +61,87 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
             if (!nqn.startsWith("nqn.")) {
                 return new LightbitsGetHostNqnAnswer(command, false, "unexpected host NQN '" + nqn + "'");
             }
-            return new LightbitsGetHostNqnAnswer(command, nqn);
+            if (command.getEndpoints() == null) {
+                return new LightbitsGetHostNqnAnswer(command, nqn, new java.util.ArrayList<>());
+            }
+            java.util.List<String> failed = new java.util.ArrayList<>();
+            java.util.List<String> ips = dataIps(command.getEndpoints(), failed);
+            return new LightbitsGetHostNqnAnswer(command, nqn, ips).withDataIpsPartial(!failed.isEmpty());
         } catch (Exception e) {
             LOG.warn("Lightbits: failed to determine host NQN", e);
             return new LightbitsGetHostNqnAnswer(command, false, "failed to determine host NQN: " + e.getMessage());
         }
+    }
+
+    /**
+     * The source address this host uses toward each endpoint (what the cluster sees a
+     * connection come from), without repeats. An endpoint that does not resolve or has no
+     * route is logged and skipped.
+     */
+    java.util.List<String> dataIps(java.util.List<String> endpoints) {
+        return dataIps(endpoints, new java.util.ArrayList<>());
+    }
+
+    /** As {@link #dataIps(java.util.List)}, adding each endpoint that could not be looked up to {@code failed}. */
+    java.util.List<String> dataIps(java.util.List<String> endpoints, java.util.List<String> failed) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String endpoint : endpoints) {
+            String host = hostOf(endpoint);
+            try {
+                String address = resolve(host);
+                String src = routeSource(address);
+                if (src == null) {
+                    LOG.warn("Lightbits: no route source toward {} ({})", endpoint, address);
+                    failed.add(endpoint);
+                } else if (!out.contains(src)) {
+                    out.add(src);
+                }
+            } catch (Exception e) {
+                LOG.warn("Lightbits: could not find the source address toward {}: {}", endpoint, e.getMessage());
+                failed.add(endpoint);
+            }
+        }
+        return out;
+    }
+
+    /** host of host:port, [v6]:port, or a bare host. */
+    static String hostOf(String endpoint) {
+        String e = endpoint.trim();
+        if (e.startsWith("[")) {
+            int close = e.indexOf(']');
+            return close > 0 ? e.substring(1, close) : e;
+        }
+        int colon = e.lastIndexOf(':');
+        return colon > 0 && e.indexOf(':') == colon ? e.substring(0, colon) : e;
+    }
+
+    protected String resolve(String host) throws java.net.UnknownHostException {
+        return java.net.InetAddress.getByName(host).getHostAddress();
+    }
+
+    /** The "src" of {@code ip -o route get <address>}, or null. */
+    protected String routeSource(String address) throws IOException, InterruptedException {
+        // output to a file, so the wait below bounds the whole lookup (reading a pipe blocks until EOF)
+        Path out = Files.createTempFile("lightbits-route", ".out");
+        try {
+            Process p = new ProcessBuilder("ip", "-o", "route", "get", address).redirectErrorStream(true)
+                    .redirectOutput(out.toFile()).start();
+            if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return null;
+            }
+            if (p.exitValue() != 0) {
+                return null;
+            }
+            return parseRouteSource(Files.readString(out));
+        } finally {
+            Files.deleteIfExists(out);
+        }
+    }
+
+    static String parseRouteSource(String ipRouteGetOutput) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\bsrc\\s+(\\S+)").matcher(ipRouteGetOutput == null ? "" : ipRouteGetOutput);
+        return m.find() ? m.group(1) : null;
     }
 
     private String readTrimmed(Path path) throws IOException {

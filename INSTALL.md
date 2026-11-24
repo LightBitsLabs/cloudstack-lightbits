@@ -105,7 +105,7 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
 - **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required),
   `&fingerprint=<SHA-256 fingerprint>` (needed for a Lightbits cluster, see
   [TLS](#tls-verifying-the-cluster-certificate)) and optional
-  `&replicas=1..3&compression=true&qosPolicy=<name>&qosFromIops=true&endpoints=<host[:port]>,...`
+  `&replicas=1..3&compression=true&qosPolicy=<name>&qosFromIops=true&ipAcl=true&endpoints=<host[:port]>,...`
 - **endpoints** — further API endpoints of the same cluster, comma-separated `host[:port]`
   (the port defaults to the pool's API port). List the other nodes so the storage keeps working
   when the node named in the URL is down. Read calls move to the next endpoint on a connection
@@ -261,6 +261,53 @@ limit. To apply the new policy at once, use one of these:
 
 Check the policy the cluster applies with `lbcli get volume` (`qosPolicyName`) or in the
 management server log ("QoS policy changed from ... to ...").
+
+### Volume IP ACL
+
+**Pool option `ipAcl=true`, off by default.** A Lightbits volume has two access lists: the
+host NQNs allowed to connect (the plugin always manages this one) and the IP addresses they
+may connect from (`IPAcl`, `ALLOW_ANY` by default). The cluster lets a host see a volume
+only when both allow it. With `ipAcl=true` the plugin also manages the IP list:
+- On every host connect the agent reports the source address it uses toward the pool's NVMe
+  discovery endpoints (what `ip route get <endpoint>` shows as `src`), kept as host detail
+  `lightbits.dataips.<pool id>`.
+- A volume is created with IP ACL `ALLOW_NONE`. Attach, VM start, migration and detach set
+  its IP ACL to the data IPs of the hosts in its NQN ACL, in the same conditional update.
+  Removing a host from CloudStack takes its address out with its NQN.
+- If a host's data IP changes (re-addressing, another NIC), change it, then reconnect the
+  host in CloudStack: the plugin records the new address and updates the IP ACL of the
+  pool's volumes that host is in. Until the reconnect the cluster refuses the host's new
+  connections to those volumes.
+- Every host connect also re-checks the IP ACLs of the volumes the host is in, so a volume
+  an earlier update could not reach is put right at the host's next connect, provided the
+  plugin knows the data IPs of every host in that volume's NQN ACL. If it does not (a host
+  added by hand on the cluster, or one that has not reconnected since `ipAcl=true` was set),
+  the volume's IP ACL is left as it is and the management log names the volume's hosts;
+  reconnect those hosts, or remove the hand-added NQN. If the agent
+  cannot look up one of the endpoints, it adds what it found to the host's addresses and drops
+  none.
+- A host reaching the cluster from several addresses (one per NIC) has all of them in its
+  volumes' IP ACLs; the management log warns when this happens.
+- The IP ACL is the union of the addresses of the volume's hosts, written only when every
+  one of them is known: the cluster does not tie each host NQN to its own address. During a
+  live migration both hosts are in both lists.
+
+Turn it on for a new pool in the URL (`&ipAcl=true`) or on an existing one:
+```bash
+cmk update storagepool id=<pool-id> details[0].ipAcl=true
+```
+then reconnect every host (`cmk reconnect host id=<host-id>`). CloudStack stores the value
+without asking the plugin: anything but `true` or `false` makes the pool's volume operations
+fail, naming the option, until it is corrected. Each reconnect records the
+host's data IP and sets the IP ACL of the volumes it has. Upgrade the agent on every host
+first: an older agent reports no data IP, and its host is refused access to the pool's
+volumes with an error naming the host. Check a host with
+`cmk list resourcedetails resourcetype=Host resourceid=<host-id> key=lightbits.dataips.<pool id>`
+and a volume with `lbcli get volume` (`IPAcl`).
+
+To turn it off, first have the cluster admin set `lbcli update volume --ip-acl ALLOW_ANY` on
+the pool's volumes, then remove the detail: with the option off the plugin no longer changes
+IP ACLs, and a volume left with one host's address refuses every other host.
 
 ## TLS: verifying the cluster certificate
 
