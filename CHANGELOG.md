@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 - In-band key rotation from CloudStack: raise the pool detail `inbandKeyGeneration`, then for
-  each host: maintenance, reconnect, cancel maintenance. At that reconnect the host drops its idle Lightbits paths and
+  each host: maintenance, cancel maintenance, reconnect. At that reconnect the host drops its idle Lightbits paths and
   makes new keys (host key and controller key), which are registered with every
   `inbandAuth=true` pool of the host; a host that still carries volumes refuses and is asked
   again at its next reconnect. The readiness log lists hosts still on an older generation.

@@ -47,7 +47,7 @@ Working today (KVM):
   the management server, which registers the host with it as a trusted host on the cluster
   and keeps only a fingerprint. The key is never logged. With `inbandAuthTwoWay=true` the
   host also checks the cluster (two-way, with a second, controller key). Keys are rotated from
-  CloudStack (pool detail `inbandKeyGeneration`, then maintenance and a reconnect per host). **Follow the rollout order in
+  CloudStack (pool detail `inbandKeyGeneration`, then a maintenance cycle and a reconnect per host). **Follow the rollout order in
   INSTALL.md ("In-band authentication") before the cluster admin enables enforcement:**
   enabling it while a host still has paths without its current key can freeze that host's VMs
 - Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and

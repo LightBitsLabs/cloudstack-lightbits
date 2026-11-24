@@ -532,7 +532,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
         String optionalNote = (optional.isEmpty() ? "" : " Trusted hosts with authRequired=false (they may still connect"
                 + " without a key; the cluster admin sets this): " + optional + ".")
                 + (pendingRotation.isEmpty() ? "" : " Hosts still on keys older than key generation "
-                + cfg.getInbandKeyGeneration() + " (each rotates when reconnected while in maintenance: cmk reconnect host): " + pendingRotation + ".");
+                + cfg.getInbandKeyGeneration() + " (each rotates at a reconnect right after a maintenance cycle: cmk reconnect host): " + pendingRotation + ".");
         if (unregistered.isEmpty() && keyless.isEmpty()) {
             LOG.info("Lightbits: the {} host(s) of pool {} are ready for in-band authentication: all are trusted hosts and"
                     + " connect with their keys{}.{} Enforcement is cluster-wide: the cluster admin turns it on (lbcli enable"

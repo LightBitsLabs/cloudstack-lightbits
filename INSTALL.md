@@ -405,42 +405,42 @@ each host (the host key, and the controller key for two-way) and works with enfo
    cmk update storagepool id=<pool-id> details[0].inbandKeyGeneration=<current + 1>
    ```
 2. For each host of the pool in turn: put it in maintenance (its VMs migrate away), wait
-   until it runs no VMs, reconnect it (`cmk reconnect host id=<host-id>`), then cancel
-   maintenance. Cancelling maintenance alone does not reconnect the agent, so the reconnect is
-   what rotates; done during maintenance, no VM can be placed on the host before it has its new
-   keys. At that reconnect the agent drops the host's idle Lightbits paths, makes new keys, and the management server registers them with every `inbandAuth=true` pool the
+   until it runs no VMs, cancel maintenance and right away reconnect it
+   (`cmk reconnect host id=<host-id>`). The reconnect is what rotates: cancelling maintenance
+   does not reconnect the agent, and CloudStack sends a host in maintenance no plugin command,
+   so it cannot rotate before maintenance ends. At that reconnect the agent drops the host's idle Lightbits paths, makes new keys, and the management server registers them with every `inbandAuth=true` pool the
    host is in (the keys are per host); the management log says "rotated its in-band
    authentication keys". The host's paths are made again, with the new keys, at the next
    attach or migration.
 3. Watch the readiness line: it lists the hosts still on keys older than the pool's key
-   generation. A host that reconnects while it still carries volumes (not in maintenance)
-   refuses to rotate, keeps its keys, and logs why; it is asked again at its next reconnect.
+   generation. A host that reconnects while it still carries volumes (a VM was placed on it
+   between the cancel and the reconnect, or it never went through maintenance) refuses to
+   rotate, keeps its keys (still registered, so nothing breaks), and logs why; repeat its
+   maintenance cycle.
    A host the plugin has no generation record for (keys of unknown age, for example from an
    earlier plugin version) rotates too once the pool's generation is above 0.
 
 A rolling rotation of all hosts of a cluster, one at a time. `prepare hostformaintenance`
-returns before the VMs have moved, so wait until the host runs none before the reconnect, and
-until it is Up again after it. Before cancelling maintenance, check that the host's new keys
-are registered: the loop stops for that.
+returns before the VMs have moved, so wait until the host runs none, then cancel and
+reconnect at once; the loop stops after each host for the check below.
 ```bash
 up() { [ "$(cmk list hosts id=$1 filter=state | jq -r '.host[0].state')" = Up ]; }
 for h in $(cmk list hosts clusterid=<cluster-id> type=Routing filter=id | jq -r '.host[].id'); do
   cmk prepare hostformaintenance id=$h
   until [ "$(cmk list virtualmachines hostid=$h listall=true filter=id | jq '.count // 0')" = 0 ]; do sleep 10; done
-  cmk reconnect host id=$h; sleep 10; until up $h; do sleep 10; done
-  read -p "Host $h: check the management log, then press Enter to cancel maintenance "
-  cmk cancel hostmaintenance id=$h; until up $h; do sleep 10; done
+  cmk cancel hostmaintenance id=$h && cmk reconnect host id=$h; sleep 10; until up $h; do sleep 10; done
+  read -p "Host $h: check the management log, then press Enter for the next host "
 done
 ```
 At the stop, the management log of that reconnect must show "host <id> rotated its in-band
 authentication keys" and, in the readiness line of each of its pools, the host neither under
-"Not registered" nor under the hosts still on an older key generation. If it is listed there,
-keep the host in maintenance and reconnect it again (a failed registration is retried at each
-connect) until it is not. If the host's trusted host belongs to another project, the plugin
-cannot set the new keys there: keep the host in maintenance until the cluster admin has set
-them, as described next, on every Lightbits cluster where that trusted host exists. Only then
-cancel maintenance; a host back in service with unregistered keys cannot attach volumes once
-enforcement is on.
+"Not registered" nor under the hosts still on an older key generation. If the host did not
+rotate (a VM was placed on it first), run its cycle again. If it rotated but is listed as not
+registered, reconnect it again (a failed registration is retried at each connect); until
+then it cannot attach volumes once enforcement is on, so keep VMs off it (maintenance) while
+you do. If the host's trusted host belongs to another project, the plugin cannot set the new
+keys there: put the host back in maintenance until the cluster admin has set them, as
+described next, on every Lightbits cluster where that trusted host exists.
 Then check the readiness line: no host should be left on an older key generation.
 
 The storage admin starts nothing: a rotation of CloudStack hosts is the CloudStack
@@ -448,7 +448,7 @@ operator's step above. To cut a host off at once, the cluster admin deletes its 
 (`lbcli delete trusted-host`); with enforcement on it can then no longer connect.
 
 A host whose trusted host belongs to another project (step 5) is not updated by the plugin.
-After it rotated (step 2) and before maintenance is cancelled, the cluster admin sets its new host key
+After it rotated (step 2), and with the host kept in maintenance until it is done, the cluster admin sets its new host key
 there on **every** Lightbits cluster where the host has such a trusted host (one
 `lbcli set trusted-host-secrets` per cluster; add `--target-secret-type=Enabled
 --target-secret=...` with the controller key for two-way); a cluster left out refuses the
