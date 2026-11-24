@@ -187,6 +187,9 @@ public class LightbitsHostKey {
             }
             // The directory's own mode exposes no key: a file readable only by root stays so, and a
             // file another user replaced through a writable directory is no longer root's (below).
+            // It is made root-only before its entries are listed and checked, so no other user can
+            // add or replace an entry between the checks and their use.
+            Files.setPosixFilePermissions(dir, DIR_MODE);
         }
         java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), configFile(), ctrlKeyFile()));
         if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
@@ -226,9 +229,6 @@ public class LightbitsHostKey {
             LOG.warn("Lightbits: this host's in-band authentication key files were readable by other users than root;"
                     + " they are root-only again, but the keys may have been copied. Rotate them (INSTALL.md, \"Rotating"
                     + " the keys\")");
-        }
-        if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
-            Files.setPosixFilePermissions(dir, DIR_MODE);
         }
         if (!untrusted) {
             for (Path f : files) {
