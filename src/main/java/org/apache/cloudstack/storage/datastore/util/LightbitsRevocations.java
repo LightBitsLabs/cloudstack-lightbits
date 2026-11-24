@@ -67,37 +67,49 @@ public final class LightbitsRevocations {
 
     /** Record a revocation of the NQN on the pool's cluster as pending. */
     public static void record(StoragePoolDetailsDao dao, long poolId, String nqn) {
+        // the value carries a version: a retry drops only the record it looked at, never one a
+        // removal wrote after that
+        save(dao, poolId, nqn, nqn + " " + Long.toHexString(System.currentTimeMillis())
+                + "-" + Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt()));
+    }
+
+    private static void save(StoragePoolDetailsDao dao, long poolId, String nqn, String value) {
         try {
-            // the value carries a version: a retry drops only the record it looked at, never one a
-            // removal wrote after that
-            dao.addDetail(poolId, detailKey(nqn), nqn + " " + Long.toHexString(System.currentTimeMillis())
-                    + "-" + Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt()), false);
-            unsaved(poolId).remove(nqn);
+            dao.addDetail(poolId, detailKey(nqn), value, false);
+            unsaved(poolId).remove(nqn, value);
         } catch (RuntimeException e) {
             // CloudStack removes the host whatever its listeners return, so the revocation cannot
-            // hold the removal up: keep it in memory, retried and saved again on each retry pass.
-            unsaved(poolId).add(nqn);
+            // hold the removal up: keep it in memory with its version, saved again on each retry pass.
+            unsaved(poolId).put(nqn, value);
             LOG.error("Lightbits: could not save the pending revocation of removed host {} on pool {} ({}); it is kept in"
                     + " memory and retried, but a management server restart before it is saved or confirmed loses it. Check"
                     + " that no volume ACL of the pool lists the NQN and that its trusted host is gone", nqn, poolId, e.getMessage());
         }
     }
 
-    /** Revocations whose record could not be saved, per pool; lost at a management server restart. */
-    private static final Map<Long, java.util.Set<String>> UNSAVED = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Revocations whose record could not be saved (NQN to versioned value), per pool; lost at a restart. */
+    private static final Map<Long, Map<String, String>> UNSAVED = new java.util.concurrent.ConcurrentHashMap<>();
 
-    private static java.util.Set<String> unsaved(long poolId) {
-        return UNSAVED.computeIfAbsent(poolId, k -> java.util.concurrent.ConcurrentHashMap.newKeySet());
+    private static Map<String, String> unsaved(long poolId) {
+        return UNSAVED.computeIfAbsent(poolId, k -> new java.util.concurrent.ConcurrentHashMap<>());
     }
 
     /** The NQNs whose revocation on the pool's cluster is pending. */
     public static List<String> pending(StoragePoolDetailsDao dao, long poolId) {
-        // a revocation kept in memory is saved now if the database takes it
-        for (String nqn : new ArrayList<>(unsaved(poolId))) {
-            record(dao, poolId, nqn);
+        // a revocation kept in memory is saved now, with its version, if the database takes it
+        for (Map.Entry<String, String> e : new java.util.HashMap<>(unsaved(poolId)).entrySet()) {
+            save(dao, poolId, e.getKey(), e.getValue());
         }
-        List<String> out = new ArrayList<>(unsaved(poolId));
-        Map<String, String> details = dao.listDetailsKeyPairs(poolId);
+        List<String> out = new ArrayList<>(unsaved(poolId).keySet());
+        Map<String, String> details;
+        try {
+            details = dao.listDetailsKeyPairs(poolId);
+        } catch (RuntimeException e) {
+            // the ones kept in memory are still retried
+            LOG.warn("Lightbits: could not read the pending revocations of pool {} ({}); retrying the {} kept in memory", poolId,
+                    e.getMessage(), out.size());
+            return out;
+        }
         if (details != null) {
             for (Map.Entry<String, String> e : details.entrySet()) {
                 if (e.getKey() != null && e.getKey().startsWith(DETAIL_PREFIX) && e.getValue() != null && !e.getValue().isBlank()) {
@@ -123,8 +135,15 @@ public final class LightbitsRevocations {
         return sp < 0 ? v : v.substring(0, sp);
     }
 
-    /** The record's value as stored now (with its version), or null. */
+    /**
+     * The record's current value (with its version), or null: one kept in memory is newer than the
+     * saved one (a successful save drops it), so it counts first.
+     */
     static String recordValue(StoragePoolDetailsDao dao, long poolId, String nqn) {
+        String kept = unsaved(poolId).get(nqn);
+        if (kept != null) {
+            return kept;
+        }
         Map<String, String> details = dao.listDetailsKeyPairs(poolId);
         return details == null ? null : details.get(detailKey(nqn));
     }
