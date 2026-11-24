@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
+- In-band key rotation from CloudStack: raise the pool detail `inbandKeyGeneration`, then for
+  each host: maintenance, cancel maintenance, reconnect. At that reconnect the host drops its idle Lightbits paths and
+  makes new keys (host key and controller key), which are registered with every
+  `inbandAuth=true` pool of the host; a host that still carries volumes refuses and is asked
+  again at its next reconnect. The readiness log lists hosts still on an older generation.
+- Pool option `inbandAuthTwoWay=true` (with `inbandAuth=true`): two-way in-band
+  authentication. Each host also makes a controller key, registered as the trusted host's
+  target secret, and connects the pool with a per-pool nvme-cli configuration built from the
+  discovery log page (per-port controller keys), so the host checks the cluster too. A
+  one-way pool keeps a target secret that a two-way pool of the same project set. The
+  readiness log covers the controller key for a two-way pool.
 - Pool option `inbandAuth=true`: NVMe in-band authentication (DH-HMAC-CHAP, host to cluster).
   **Read INSTALL.md ("In-band authentication") before enabling enforcement on the cluster:
   enabling it while a host has paths without its current key can freeze that host's VMs
@@ -153,9 +164,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   well as 4.22.1.0.
 
 ### Known limitations
-- `inbandAuth` is one-way: the cluster checks the host, the host does not check the cluster
-  (no target secret). nvme-cli `connect-all` cannot take a controller key on its command line,
-  and the configuration file needs one entry per cluster port for it.
+- `inbandAuth` alone is one-way (the host does not check the cluster); two-way needs
+  `inbandAuthTwoWay=true`. With two-way, a host whose agent is older than this plugin version
+  sends no controller key and is registered one-way (the management log names it), and the
+  connect reads the discovery log page first: an endpoint whose discovery does not answer is
+  skipped for the next one, as for any connect.
+- Two-way: nvme-cli takes the controller key only from the configuration file, which is
+  written from the discovery log page just before `connect-all`. A data port the cluster starts
+  advertising in between is connected with the host key only; the plugin disconnects such a
+  path right after `connect-all` (and fails the connect if it cannot), so it exists without the
+  host checking the cluster for those seconds only.
+- The readiness count of paths without the current controller key covers all the host's
+  Lightbits paths: a host that also uses a one-way pool on another cluster stays reported
+  NOT ready for its two-way pool. Make every pool of such hosts two-way.
 - With `inbandAuth=true`, NVMe/TCP paths a host made before the option was on hold no key,
   and paths made before its key was replaced hold the old one. They keep working until they
   reconnect, and once the cluster admin turns in-band authentication on, that reconnect fails

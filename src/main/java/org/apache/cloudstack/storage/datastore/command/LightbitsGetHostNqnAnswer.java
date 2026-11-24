@@ -40,6 +40,14 @@ public class LightbitsGetHostNqnAnswer extends Answer {
     private Integer keylessPaths;
     /** Why the key could not be prepared, when the command asked for it and that failed. */
     private String inbandAuthError;
+    /**
+     * This host's controller key, for two-way authentication, when the command asked for it;
+     * null from an older agent or when it could not be prepared. Never logged.
+     */
+    @LogLevel(Log4jLevel.Off)
+    private String dhchapCtrlKey;
+    /** Lightbits paths of this host whose controller key is not the current one; null when not asked or not known. */
+    private Integer pathsWithoutCtrlKey;
 
     protected LightbitsGetHostNqnAnswer() {
     }
@@ -64,6 +72,40 @@ public class LightbitsGetHostNqnAnswer extends Answer {
         this.keylessPaths = keylessPaths;
         this.inbandAuthError = error;
         return this;
+    }
+
+    /** Whether a requested key rotation was done; null when none was asked for (or an older agent). */
+    private Boolean keysRotated;
+    /** Why a requested key rotation was not done. */
+    private String rotateError;
+
+    public LightbitsGetHostNqnAnswer withRotation(boolean rotated, String error) {
+        this.keysRotated = rotated;
+        this.rotateError = error;
+        return this;
+    }
+
+    public Boolean getKeysRotated() {
+        return keysRotated;
+    }
+
+    public String getRotateError() {
+        return rotateError;
+    }
+
+    /** Adds the two-way outcome: the controller key and the count of paths without it. */
+    public LightbitsGetHostNqnAnswer withCtrlKey(String dhchapCtrlKey, Integer pathsWithoutCtrlKey) {
+        this.dhchapCtrlKey = dhchapCtrlKey;
+        this.pathsWithoutCtrlKey = pathsWithoutCtrlKey;
+        return this;
+    }
+
+    public String getDhchapCtrlKey() {
+        return dhchapCtrlKey;
+    }
+
+    public Integer getPathsWithoutCtrlKey() {
+        return pathsWithoutCtrlKey;
     }
 
     public String getDhchapKey() {

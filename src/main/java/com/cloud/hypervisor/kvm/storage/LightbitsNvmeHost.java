@@ -60,6 +60,8 @@ class LightbitsNvmeHost {
     private static final Pattern CONTROLLER_ENTRY = Pattern.compile("nvme[0-9]+");
     private static final String SUBSYSTEMS = "/sys/class/nvme-subsystem";
     private static final AtomicInteger ROTATION = new AtomicInteger();
+    /** Two-way: paths rejected for lacking the controller key that could not be disconnected (agent-wide). */
+    private static final java.util.Set<String> REJECTED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /** The host, as far as this class needs it. Replaced by a fake in unit tests. */
     interface Sys {
@@ -193,6 +195,17 @@ class LightbitsNvmeHost {
      * cluster with in-band authentication off ignores it.
      */
     boolean connect(List<String> endpoints, long endpointTimeoutMillis, java.nio.file.Path authConfig) {
+        return connectWith(endpoints, endpointTimeoutMillis, authConfig == null ? null : endpoint -> authConfig);
+    }
+
+    /**
+     * {@link #connect(List, long, java.nio.file.Path)} with the configuration file chosen per
+     * endpoint, just before that endpoint is used (two-way authentication writes the ports of
+     * that endpoint's discovery log page into it). A configuration that cannot be prepared
+     * counts as that endpoint failing, and the next endpoint is tried.
+     */
+    boolean connectWith(List<String> endpoints, long endpointTimeoutMillis,
+                        java.util.function.Function<String, java.nio.file.Path> configFor) {
         if (endpoints.isEmpty()) {
             throw new CloudRuntimeException("Lightbits: the storage pool has no NVMe discovery endpoint");
         }
@@ -208,8 +221,15 @@ class LightbitsNvmeHost {
             int colon = endpoint.lastIndexOf(':');
             List<String> argv = new ArrayList<>(Arrays.asList("nvme", "connect-all", "-t", "tcp",
                     "-a", endpoint.substring(0, colon), "-s", endpoint.substring(colon + 1)));
-            if (authConfig != null) {
-                argv.add("--config=" + authConfig);
+            if (configFor != null) {
+                java.nio.file.Path config;
+                try {
+                    config = configFor.apply(endpoint);
+                } catch (RuntimeException e) {
+                    failures.add(endpoint + " (" + e.getMessage() + ")");
+                    continue;
+                }
+                argv.add("--config=" + config);
             }
             Result r = sys.run(endpointTimeoutMillis, argv.toArray(new String[0]));
             if (r.ok()) {
@@ -339,6 +359,20 @@ class LightbitsNvmeHost {
      * {@link #paths()}, which skips what it cannot read.
      */
     int pathsWithoutKey(String currentKey) {
+        return pathsWithoutSecret("dhchap_secret", currentKey);
+    }
+
+    /**
+     * Lightbits paths whose controller key (the key the cluster proves itself with, two-way
+     * authentication) is not the given current one: none, or an old one. After the controller
+     * key changes, a path with the old one fails its next reconnect once the cluster answers
+     * with the new key. Same rules as {@link #pathsWithoutKey(String)}.
+     */
+    int pathsWithoutCtrlKey(String currentCtrlKey) {
+        return pathsWithoutSecret("dhchap_ctrl_secret", currentCtrlKey);
+    }
+
+    private int pathsWithoutSecret(String attribute, String current) {
         List<String> controllers = sys.listOrNull("/sys/class/nvme");
         if (controllers == null) {
             throw new CloudRuntimeException("could not list /sys/class/nvme to check this host's NVMe/TCP paths");
@@ -353,12 +387,120 @@ class LightbitsNvmeHost {
             if (!nqn.startsWith(LIGHTBITS_NQN_PREFIX)) {
                 continue;
             }
-            String secret = sys.read("/sys/class/nvme/" + ctrl + "/dhchap_secret");
-            if (secret == null || !secret.trim().equals(currentKey)) {
+            String secret = sys.read("/sys/class/nvme/" + ctrl + "/" + attribute);
+            if (secret == null || !secret.trim().equals(current)) {
                 n++;
             }
         }
         return n;
+    }
+
+    /**
+     * The data ports a discovery endpoint advertises ({@code nvme discover ... -o json}, which
+     * needs no key: the discovery service does not authenticate). Throws when the endpoint does
+     * not answer or the answer cannot be read.
+     */
+    List<LightbitsHostKey.Port> discover(String endpoint, long timeoutMillis) {
+        int colon = endpoint.lastIndexOf(':');
+        Result r = sys.run(timeoutMillis, "nvme", "discover", "-t", "tcp", "-a", endpoint.substring(0, colon),
+                "-s", endpoint.substring(colon + 1), "-o", "json");
+        if (!r.ok()) {
+            throw new CloudRuntimeException("'nvme discover' failed (exit " + r.exit + (r.output.isEmpty() ? "" : ": " + r.output) + ")");
+        }
+        return parseDiscovery(r.output);
+    }
+
+    /** The NVMe subsystem records (not referrals) of a discovery log page in nvme-cli's JSON. */
+    static List<LightbitsHostKey.Port> parseDiscovery(String output) {
+        int from = output == null ? -1 : output.indexOf('{');
+        int to = output == null ? -1 : output.lastIndexOf('}');
+        if (from < 0 || to < from) {
+            throw new CloudRuntimeException("'nvme discover' printed no JSON");
+        }
+        com.fasterxml.jackson.databind.JsonNode root;
+        try {
+            root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(output.substring(from, to + 1));
+        } catch (java.io.IOException e) {
+            throw new CloudRuntimeException("could not read the output of 'nvme discover': " + e.getMessage(), e);
+        }
+        List<LightbitsHostKey.Port> ports = new ArrayList<>();
+        for (com.fasterxml.jackson.databind.JsonNode rec : root.path("records")) {
+            if ("tcp".equals(rec.path("trtype").asText()) && "nvme subsystem".equals(rec.path("subtype").asText())) {
+                ports.add(new LightbitsHostKey.Port(rec.path("subnqn").asText(null), rec.path("traddr").asText(null),
+                        rec.path("trsvcid").asText(null)));
+            }
+        }
+        return ports;
+    }
+
+    /**
+     * How many Lightbits paths this host has, from a checked enumeration: throws when the
+     * controller list or a listed controller's subsystem NQN cannot be read, so an unknown count
+     * is never taken for zero (rotation deletes keys only on a known zero).
+     */
+    int lightbitsPathCount() {
+        List<String> controllers = sys.listOrNull("/sys/class/nvme");
+        if (controllers == null) {
+            throw new CloudRuntimeException("could not list /sys/class/nvme to count this host's NVMe/TCP paths");
+        }
+        int n = 0;
+        for (String ctrl : controllers) {
+            String nqn = sys.read("/sys/class/nvme/" + ctrl + "/subsysnqn");
+            if (nqn == null) {
+                throw new CloudRuntimeException("could not read the subsystem NQN of " + ctrl + " to count this host's NVMe/TCP paths");
+            }
+            if (nqn.startsWith(LIGHTBITS_NQN_PREFIX)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** The controller names of this host's Lightbits paths, any state. */
+    java.util.Set<String> pathNames() {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (Path p : paths()) {
+            out.add(p.controller);
+        }
+        return out;
+    }
+
+    /**
+     * Two-way: disconnect the Lightbits paths made since {@code before} that do not hold the
+     * current controller key (a data port the cluster advertised after the configuration was
+     * written gets the host key only, so the host would not check the cluster on it). Paths that
+     * were there before are left alone: they may carry volumes. Returns the controllers dropped.
+     */
+    List<String> dropNewPathsWithoutCtrlKey(java.util.Set<String> before, String currentCtrlKey) {
+        List<String> dropped = new ArrayList<>();
+        // a rejected controller that is gone is forgotten (the name can be reused); one that cannot
+        // be read is kept, and an unreadable listing fails the check
+        List<String> listed = sys.listOrNull("/sys/class/nvme");
+        if (listed == null) {
+            throw new CloudRuntimeException("Lightbits: could not list /sys/class/nvme to check this host's two-way paths");
+        }
+        REJECTED.retainAll(new java.util.HashSet<>(listed));
+        for (Path p : paths()) {
+            // a path an earlier connect rejected but could not disconnect stays rejected
+            if (before.contains(p.controller) && !REJECTED.contains(p.controller)) {
+                continue;
+            }
+            String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_ctrl_secret");
+            if (secret == null || !secret.trim().equals(currentCtrlKey)) {
+                Result r = sys.run(30_000, "nvme", "disconnect", "-d", p.controller);
+                if (!r.ok() || sys.exists("/sys/class/nvme/" + p.controller)) {
+                    REJECTED.add(p.controller);
+                    throw new CloudRuntimeException("Lightbits: path " + p.controller + " (" + p.address + ") was made without this"
+                            + " host's controller key (two-way) and could not be disconnected (exit " + r.exit + ": " + r.output
+                            + "); disconnect it by hand (nvme disconnect -d " + p.controller + ")");
+                }
+                LOG.warn("Lightbits: dropped path {} ({}): it was made without this host's controller key, so the host would not"
+                        + " check the cluster on it (two-way); the next connect makes it again", p.controller, p.address);
+                REJECTED.remove(p.controller);
+                dropped.add(p.controller);
+            }
+        }
+        return dropped;
     }
 
     List<Path> livePaths() {
@@ -527,6 +669,9 @@ class LightbitsNvmeHost {
     }
 
     /** The real host. */
+    static final int MAX_MESSAGE_OUTPUT = 2000;
+    static final int MAX_DATA_OUTPUT = 1_000_000;
+
     static final class RealSys implements Sys {
         @Override
         public Result run(long timeoutMillis, String... argv) {
@@ -540,7 +685,10 @@ class LightbitsNvmeHost {
                         return new Result(124, argv[0] + " timed out after " + (timeoutMillis / 1000) + "s");
                     }
                     String text = new String(Files.readAllBytes(out.toPath()), StandardCharsets.UTF_8);
-                    return new Result(p.exitValue(), text.length() > 2000 ? text.substring(0, 2000) : text);
+                    // a failure's output goes into messages: keep it short; a success's output can be
+                    // data (the discovery log page as JSON): keep it whole, within a memory bound
+                    int limit = p.exitValue() == 0 ? MAX_DATA_OUTPUT : MAX_MESSAGE_OUTPUT;
+                    return new Result(p.exitValue(), text.length() > limit ? text.substring(0, limit) : text);
                 } finally {
                     Files.deleteIfExists(out.toPath());
                 }

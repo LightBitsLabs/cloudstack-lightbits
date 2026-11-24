@@ -19,6 +19,7 @@
 package com.cloud.hypervisor.kvm.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -469,5 +470,156 @@ class LightbitsNvmeHostTest {
         assertThrows(CloudRuntimeException.class, () -> host.pathsWithoutKey(current),
                 "a listed controller whose NQN cannot be read is an unknown count, not skipped");
         assertEquals(2, host.livePaths().size(), "paths() still skips it for its other callers (nvme1, nvme4)");
+    }
+
+    private static final String DISCOVERY_JSON = "Warning: some nvme-cli notice\n{\"genctr\":7,\"records\":["
+            + "{\"trtype\":\"tcp\",\"subtype\":\"discovery subsystem referral\",\"traddr\":\"10.0.0.2\",\"trsvcid\":\"8009\","
+            + "\"subnqn\":\"nqn.2014-08.org.nvmexpress.discovery\"},"
+            + "{\"trtype\":\"tcp\",\"subtype\":\"nvme subsystem\",\"traddr\":\"10.0.0.1\",\"trsvcid\":\"4420\",\"subnqn\":\"" + NQN + "\"},"
+            + "{\"trtype\":\"tcp\",\"subtype\":\"nvme subsystem\",\"traddr\":\"10.0.0.2\",\"trsvcid\":\"4420\",\"subnqn\":\"" + NQN + "\"}]}";
+
+    @Test
+    void discoveryKeepsTheDataPortsAndDropsReferrals() {
+        sys.results.put("nvme discover -t tcp -a 10.0.0.1 -s 8009 -o json", new LightbitsNvmeHost.Result(0, DISCOVERY_JSON));
+        List<LightbitsHostKey.Port> ports = host.discover("10.0.0.1:8009", 1000);
+        assertEquals(2, ports.size());
+        assertEquals("10.0.0.1", ports.get(0).address);
+        assertEquals("4420", ports.get(1).service);
+        assertEquals(NQN, ports.get(1).subsystemNqn);
+
+        sys.results.put("nvme discover -t tcp -a 10.0.0.9", new LightbitsNvmeHost.Result(1, "failed to connect"));
+        assertThrows(CloudRuntimeException.class, () -> host.discover("10.0.0.9:8009", 1000));
+        assertThrows(CloudRuntimeException.class, () -> LightbitsNvmeHost.parseDiscovery("no json here"));
+    }
+
+    @Test
+    void aConfigThatCannotBePreparedCountsAsThatEndpointFailing() {
+        java.nio.file.Path cfg = java.nio.file.Path.of("/etc/nvme/lightbits/auth-x.json");
+        List<String> asked = new ArrayList<>();
+        boolean answered = host.connectWith(List.of("10.0.0.1:8009", "10.0.0.2:8009"), 1000, endpoint -> {
+            asked.add(endpoint);
+            if (asked.size() == 1) {
+                throw new CloudRuntimeException("'nvme discover' failed");
+            }
+            return cfg;
+        });
+        assertTrue(answered);
+        assertEquals(2, asked.size(), "the second endpoint is tried after the first one's configuration failed");
+        List<String> connects = sys.commands.stream().filter(c -> c.startsWith("nvme connect-all")).collect(java.util.stream.Collectors.toList());
+        assertEquals(1, connects.size());
+        assertTrue(connects.get(0).endsWith("--config=" + cfg), connects.get(0));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.contains("DHHC-1")), "no key on any command line");
+    }
+
+    @Test
+    void pathsWithoutTheCurrentControllerKeyAreCounted() {
+        String ctrl = "DHHC-1:00:ctrl:";
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.controller("nvme2", "traddr=10.0.0.2,trsvcid=4420", "live");
+        sys.controller("nvme3", "traddr=10.0.0.3,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme1/dhchap_ctrl_secret", "none");
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", ctrl + "\n");
+        sys.files.put("/sys/class/nvme/nvme3/dhchap_ctrl_secret", "DHHC-1:00:old:");
+        assertEquals(2, host.pathsWithoutCtrlKey(ctrl));
+    }
+
+    private LightbitsHostKey keyIn(java.nio.file.Path tmp) throws java.io.IOException {
+        java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
+        return new LightbitsHostKey(tmp.resolve("lightbits"), tmp, (Integer) java.nio.file.Files.getAttribute(tmp, "unix:uid"));
+    }
+
+    @Test
+    void anIdleHostRotatesItsKeysAfterDroppingItsIdlePaths(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        LightbitsHostKey key = keyIn(tmp);
+        String k = key.ensure();
+        String c = key.ensureCtrlKey();
+        key.ensureTwoWayConfig("387e455e-bb68-498f-9ef3-04c463815e5d", List.of());
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        // the disconnect removes the controller with its subsystem, as the kernel does
+        LightbitsNvmeHost nvme = new LightbitsNvmeHost(new FakeSys() {
+            { files.putAll(sys.files); }
+            @Override
+            public LightbitsNvmeHost.Result run(long t, String... argv) {
+                LightbitsNvmeHost.Result r = super.run(t, argv);
+                if (String.join(" ", argv).startsWith("nvme disconnect")) {
+                    files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme3/"));
+                }
+                return r;
+            }
+        });
+        LightbitsStorageAdaptor.rotateInbandKeys(nvme, key);
+        assertNotEquals(k, key.ensure(), "a new host key");
+        assertNotEquals(c, key.ensureCtrlKey(), "a new controller key");
+        assertTrue(java.nio.file.Files.list(tmp.resolve("lightbits")).noneMatch(f -> f.getFileName().toString().startsWith("auth-")),
+                "the old two-way configurations are gone");
+    }
+
+    @Test
+    void aHostWithAVolumeInUseRefusesToRotate(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        LightbitsHostKey key = keyIn(tmp);
+        String k = key.ensure();
+        subsystem("nvme-subsys3", NQN, "nvme3", "nvme3n2");
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> LightbitsStorageAdaptor.rotateInbandKeys(host, key));
+        assertTrue(e.getMessage().contains("maintenance"), e.getMessage());
+        assertEquals(k, key.ensure(), "the keys are kept");
+        assertTrue(sys.commands.stream().noneMatch(cmd -> cmd.startsWith("nvme disconnect")), "a subsystem in use is not touched");
+    }
+
+    @Test
+    void anUnknownPathCountRefusesTheRotation(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        LightbitsHostKey key = keyIn(tmp);
+        String k = key.ensure();
+        sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.unreadable.add("/sys/class/nvme/nvme3/subsysnqn");
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> LightbitsStorageAdaptor.rotateInbandKeys(host, key));
+        assertTrue(e.getMessage().contains("could not be counted"), e.getMessage());
+        assertEquals(k, key.ensure(), "the keys are kept");
+        sys.unreadable.clear();
+        sys.unreadable.add("/sys/class/nvme");
+        assertThrows(CloudRuntimeException.class, () -> LightbitsStorageAdaptor.rotateInbandKeys(host, key));
+        assertEquals(k, key.ensure());
+    }
+
+    @Test
+    void newPathsWithoutTheControllerKeyAreDroppedOldOnesKept() {
+        String ctrl = "DHHC-1:00:ctrl:";
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");   // older one-way path, may carry volumes
+        java.util.Set<String> before = host.pathNames();
+        sys.controller("nvme2", "traddr=10.0.0.2,trsvcid=4420", "live");
+        sys.controller("nvme3", "traddr=10.0.0.3,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", ctrl);
+        sys.files.put("/sys/class/nvme/nvme3/dhchap_ctrl_secret", "none");
+        assertEquals(List.of("nvme3"), host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        assertTrue(sys.commands.contains("nvme disconnect -d nvme3"), sys.commands.toString());
+        assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -d nvme1")), "an older path is left alone");
+
+        sys.results.put("nvme disconnect -d nvme3", new LightbitsNvmeHost.Result(1, "failed"));
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        assertTrue(e.getMessage().contains("could not be disconnected"), e.getMessage());
+        // an unreadable listing fails the check and forgets nothing
+        sys.unreadable.add("/sys/class/nvme");
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        sys.unreadable.clear();
+        // nor does a controller whose subsystem NQN cannot be read for a moment
+        sys.unreadable.add("/sys/class/nvme/nvme3/subsysnqn");
+        host.dropNewPathsWithoutCtrlKey(host.pathNames(), ctrl);
+        sys.unreadable.clear();
+        // the next connect sees nvme3 among the paths that were already there: it stays rejected
+        java.util.Set<String> next = host.pathNames();
+        assertTrue(next.contains("nvme3"));
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(next, ctrl));
+        sys.results.remove("nvme disconnect -d nvme3");
+        assertEquals(List.of("nvme3"), host.dropNewPathsWithoutCtrlKey(next, ctrl), "dropped once the disconnect works");
+        // (the fake keeps nvme3 in sysfs) once dropped it is no longer rejected: an old path again, left alone
+        assertEquals(List.of(), host.dropNewPathsWithoutCtrlKey(next, ctrl));
+    }
+
+    @Test
+    void aSuccessfulCommandKeepsItsWholeOutputAFailureIsShortened() {
+        LightbitsNvmeHost.RealSys real = new LightbitsNvmeHost.RealSys();
+        assertEquals(5000, real.run(10_000, "sh", "-c", "head -c 5000 /dev/zero | tr '\\0' a").output.length());
+        assertEquals(LightbitsNvmeHost.MAX_MESSAGE_OUTPUT, real.run(10_000, "sh", "-c", "head -c 5000 /dev/zero | tr '\\0' a; exit 3").output.length());
     }
 }

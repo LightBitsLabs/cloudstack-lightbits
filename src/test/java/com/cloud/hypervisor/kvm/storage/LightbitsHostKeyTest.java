@@ -29,6 +29,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
+import java.util.List;
 
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
@@ -198,5 +199,71 @@ class LightbitsHostKeyTest {
         Files.delete(nvme.resolve("hostnqn"));
         CloudRuntimeException e = assertThrows(CloudRuntimeException.class, key::ensure);
         assertTrue(e.getMessage().contains("hostnqn"));
+    }
+
+    private static final String POOL = "387e455e-bb68-498f-9ef3-04c463815e5d";
+    private static final String SUB = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+
+    @Test
+    void theControllerKeyIsMadeRootOnlyKeptAndDistinct() throws IOException {
+        String hostKey = key.ensure();
+        String ctrl = key.ensureCtrlKey();
+        assertTrue(LightbitsHostKey.valid(ctrl));
+        assertNotEquals(hostKey, ctrl);
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.ctrlKeyFile())));
+        assertEquals(ctrl, key.ensureCtrlKey(), "kept");
+        assertEquals(hostKey, key.ensure(), "the host key is not touched");
+    }
+
+    @Test
+    void theTwoWayConfigNamesEveryPortWithBothKeysAndSkipsOddValues() throws IOException {
+        java.nio.file.Path f = key.ensureTwoWayConfig(POOL, List.of(
+                new LightbitsHostKey.Port(SUB, "10.0.0.1", "4420"),
+                new LightbitsHostKey.Port(SUB, "10.0.0.2", "4420"),
+                new LightbitsHostKey.Port(SUB, "10.0.0.3\",\"x", "4420"),
+                new LightbitsHostKey.Port("not-an-nqn", "10.0.0.4", "4420")));
+        String k = key.ensure();
+        String c = key.ensureCtrlKey();
+        assertEquals(nvme.resolve("lightbits").resolve("auth-" + POOL + ".json"), f);
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(f)));
+        String json = Files.readString(f);
+        com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        com.fasterxml.jackson.databind.JsonNode h = root.get(0);
+        assertEquals(NQN, h.get("hostnqn").asText());
+        assertEquals(k, h.get("dhchap_key").asText());
+        com.fasterxml.jackson.databind.JsonNode ports = h.get("subsystems").get(0).get("ports");
+        assertEquals(SUB, h.get("subsystems").get(0).get("nqn").asText());
+        assertEquals(2, ports.size(), "the port with an odd address and the one with no NQN are left out");
+        assertEquals("10.0.0.2", ports.get(1).get("traddr").asText());
+        assertEquals(k, ports.get(0).get("dhchap_key").asText());
+        assertEquals(c, ports.get(0).get("dhchap_ctrl_key").asText());
+        assertThrows(CloudRuntimeException.class, () -> key.ensureTwoWayConfig("../etc", List.of()), "the pool UUID is checked");
+    }
+
+    @Test
+    void anUntrustedTwoWayConfigRotatesEveryKey() throws IOException {
+        String k = key.ensure();
+        String c = key.ensureCtrlKey();
+        java.nio.file.Path f = key.ensureTwoWayConfig(POOL, List.of(new LightbitsHostKey.Port(SUB, "10.0.0.1", "4420")));
+        java.nio.file.Path planted = Files.writeString(tmp.resolve("planted.json"), Files.readString(f));
+        Files.delete(f);
+        Files.createSymbolicLink(f, planted);
+        String k2 = key.ensure();
+        assertNotEquals(k, k2, "the host key is replaced");
+        assertNotEquals(c, key.ensureCtrlKey(), "the controller key is replaced");
+        assertFalse(Files.exists(f, java.nio.file.LinkOption.NOFOLLOW_LINKS), "the linked configuration is removed");
+    }
+
+    @Test
+    void deletingTheKeysMakesNewOnesNextTime() throws IOException {
+        String k = key.ensure();
+        String c = key.ensureCtrlKey();
+        key.ensureTwoWayConfig(POOL, List.of(new LightbitsHostKey.Port(SUB, "10.0.0.1", "4420")));
+        key.deleteKeys();
+        try (var files = Files.list(nvme.resolve("lightbits"))) {
+            assertEquals(0, files.count(), "no key or configuration file is left");
+        }
+        assertNotEquals(k, key.ensure());
+        assertNotEquals(c, key.ensureCtrlKey());
     }
 }

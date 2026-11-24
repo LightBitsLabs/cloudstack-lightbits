@@ -1204,12 +1204,51 @@ public class LightbitsApiClient {
      * never logged: a failure reports the cluster's answer, which does not echo it.
      */
     public void setTrustedHostSecret(String name, String hostSecret) {
+        setTrustedHostSecret(name, hostSecret, null);
+    }
+
+    /**
+     * Set a trusted host's host secret and, when {@code targetSecret} is given, its target secret
+     * ({@code targetSecretType=Enabled}): the cluster then proves itself to the host with it,
+     * two-way authentication. Without one the target secret is disabled. Idempotent; the secrets
+     * are never logged.
+     */
+    public void setTrustedHostSecret(String name, String hostSecret, String targetSecret) {
         ObjectNode body = mapper.createObjectNode();
         body.put("projectName", project);
         body.put("name", name);
         body.put("hostSecret", hostSecret);
-        body.put("targetSecretType", "Disabled");
+        if (targetSecret == null) {
+            body.put("targetSecretType", "Disabled");
+        } else {
+            body.put("targetSecretType", "Enabled");
+            body.put("targetSecret", targetSecret);
+        }
         execute("PUT", projectColl("trustedHostSecrets") + "/" + urlenc(name), body.toString());
+    }
+
+    /**
+     * A trusted host's target secret ({@code GET .../trustedHostSecrets/{name}}), or null when it
+     * has none (target secret disabled) or no secrets are set. Kept in memory only, never logged.
+     */
+    public String getTrustedHostTargetSecret(String name) {
+        String resp;
+        try {
+            resp = execute("GET", projectColl("trustedHostSecrets") + "/" + urlenc(name), null);
+        } catch (LightbitsApiException e) {
+            if (e.getKind() == Kind.NOT_FOUND) {
+                return null;
+            }
+            throw e;
+        }
+        try {
+            JsonNode root = mapper.readTree(resp);
+            String type = root.path("targetSecretType").asText("");
+            String target = root.path("targetSecret").asText("");
+            return target.isEmpty() || "Disabled".equalsIgnoreCase(type) ? null : target;
+        } catch (java.io.IOException e) {
+            throw new com.cloud.utils.exception.CloudRuntimeException("Lightbits: could not read the secrets of trusted host " + name);
+        }
     }
 
     /** Delete a trusted host of this project; false when it was not there. */

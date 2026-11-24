@@ -70,7 +70,19 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
                 answer = new LightbitsGetHostNqnAnswer(command, nqn, ips).withDataIpsPartial(!failed.isEmpty());
             }
             if (command.isInbandAuth()) {
+                if (command.isRotateKeys()) {
+                    try {
+                        rotateKeys();
+                        answer.withRotation(true, null);
+                    } catch (RuntimeException e) {
+                        LOG.warn("Lightbits: {}", e.getMessage());
+                        answer.withRotation(false, e.getMessage());
+                    }
+                }
                 inbandAuth(answer);
+                if (command.isTwoWay() && answer.getDhchapKey() != null) {
+                    ctrlKey(answer);
+                }
             }
             return answer;
         } catch (Exception e) {
@@ -101,6 +113,39 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
             keyless = null;
         }
         answer.withInbandAuth(key, keyless, null);
+    }
+
+    /**
+     * This host's controller key (made if missing), for two-way authentication, and how many of
+     * its Lightbits paths do not hold it. A failure leaves the key out (the host is registered
+     * one-way) and is logged; the rest of the answer stands.
+     */
+    void ctrlKey(LightbitsGetHostNqnAnswer answer) {
+        String ctrl;
+        try {
+            ctrl = hostKey().ensureCtrlKey();
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not prepare this host's in-band authentication controller key: {}", e.getMessage());
+            return;
+        }
+        Integer without;
+        try {
+            without = pathsWithoutCtrlKey(ctrl);
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not count this host's NVMe/TCP paths without its current controller key: {}", e.getMessage());
+            without = null;
+        }
+        answer.withCtrlKey(ctrl, without);
+    }
+
+    /** Paths whose controller key is none or an old one. */
+    protected int pathsWithoutCtrlKey(String currentCtrlKey) {
+        return com.cloud.hypervisor.kvm.storage.LightbitsHostKey.pathsWithoutCtrlKey(currentCtrlKey);
+    }
+
+    /** Rotate this host's keys if no Lightbits volume is in use here; throws with the reason otherwise. */
+    protected void rotateKeys() {
+        com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.rotateInbandKeys();
     }
 
     protected com.cloud.hypervisor.kvm.storage.LightbitsHostKey hostKey() {

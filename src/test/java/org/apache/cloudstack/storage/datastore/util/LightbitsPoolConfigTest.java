@@ -270,4 +270,31 @@ class LightbitsPoolConfigTest {
                 () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandAuth=yes", "jwt"));
         assertTrue(e.getMessage().contains("inbandAuth"));
     }
+
+    @Test
+    void twoWayNeedsInbandAuthAndSurvivesTheDetailsRoundTrip() {
+        LightbitsPoolConfig both = LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandAuth=true&inbandAuthTwoWay=true", "jwt");
+        assertTrue(both.isInbandAuthTwoWay());
+        assertTrue(LightbitsPoolConfig.fromDetails(both.toDetailsWithoutSecret(), "jwt").isInbandAuthTwoWay());
+        IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandAuthTwoWay=true", "jwt"));
+        assertTrue(e.getMessage().contains("inbandAuth=true"), e.getMessage());
+        java.util.Map<String, String> d = new java.util.HashMap<>(
+                LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1", "jwt").toDetailsWithoutSecret());
+        d.put(LightbitsPoolConfig.KEY_INBAND_AUTH_TWO_WAY, "true");
+        org.junit.jupiter.api.Assertions.assertFalse(LightbitsPoolConfig.fromDetails(d, "jwt").isInbandAuthTwoWay(),
+                "set on an existing pool without inbandAuth it has no effect");
+    }
+
+    @Test
+    void theKeyGenerationIsAWholeNumberAndSurvivesTheDetailsRoundTrip() {
+        assertEquals(0, LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1", "jwt").getInbandKeyGeneration());
+        LightbitsPoolConfig g = LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandAuth=true&inbandKeyGeneration=3", "jwt");
+        assertEquals(3, LightbitsPoolConfig.fromDetails(g.toDetailsWithoutSecret(), "jwt").getInbandKeyGeneration());
+        for (String bad : new String[] {"-1", "two", "1.5"}) {
+            IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandKeyGeneration=" + bad, "jwt"));
+            assertTrue(e.getMessage().contains("inbandKeyGeneration"), e.getMessage());
+        }
+    }
 }
