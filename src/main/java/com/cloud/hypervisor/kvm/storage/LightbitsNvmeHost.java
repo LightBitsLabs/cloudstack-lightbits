@@ -333,9 +333,13 @@ class LightbitsNvmeHost {
      * such as one from before the key was rotated or its file deleted. The registered key is the
      * current one, so once the cluster turns in-band authentication on, such a path fails at its
      * next reconnect, and a volume reachable only through it hangs. The secrets are compared in
-     * memory and never logged.
+     * memory and never logged. Throws when the controller list cannot be read (the caller then
+     * reports the count as unknown), so a failed read is never taken for "no such path".
      */
     int pathsWithoutKey(String currentKey) {
+        if (sys.listOrNull("/sys/class/nvme") == null) {
+            throw new CloudRuntimeException("could not list /sys/class/nvme to check this host's NVMe/TCP paths");
+        }
         int n = 0;
         for (Path p : paths()) {
             String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_secret");

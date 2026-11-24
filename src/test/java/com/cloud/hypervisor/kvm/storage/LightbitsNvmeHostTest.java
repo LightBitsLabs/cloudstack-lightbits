@@ -459,5 +459,9 @@ class LightbitsNvmeHostTest {
         sys.files.put("/sys/class/nvme/nvme4/dhchap_secret", "DHHC-1:00:old:");
         sys.files.put("/sys/class/nvme/nvme9/subsysnqn", "nqn.2014-08.org.example:other");
         assertEquals(3, host.pathsWithoutKey(current));
+
+        sys.unreadable.add("/sys/class/nvme");
+        assertThrows(CloudRuntimeException.class, () -> host.pathsWithoutKey(current),
+                "an unreadable controller list is an unknown count, not zero");
     }
 }
