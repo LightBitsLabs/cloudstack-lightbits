@@ -620,4 +620,24 @@ class LightbitsHostListenerTest {
         assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)),
                 "a host records its NQN under the NQN's lock");
     }
+
+    @Test
+    void aHostWhoseNqnLockStaysBusyRecordsNothingForItThisConnect() {
+        nqnLockBusy = true;
+        listener.hostConnect(HOST, POOL);
+        assertNull(detail("nvme.hostnqn"), "deferred to the next connect");
+        nqnLockBusy = false;
+        listener.hostConnect(HOST, POOL);
+        assertEquals(NQN, detail("nvme.hostnqn"));
+    }
+
+    @Test
+    void aRemovalRecordsItsPendingRevocationUnderTheNqnLock() throws Exception {
+        putDetail("nvme.hostnqn", NQN);
+        wm.stubFor(get(urlPathEqualTo(P + "/volumes")).willReturn(aResponse().withStatus(503).withBody("{}")));
+        lockNames.clear();
+        assertTrue(listener.hostAboutToBeRemoved(HOST));
+        assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)));
+        assertTrue(poolDetails.containsValue(NQN), "recorded");
+    }
 }

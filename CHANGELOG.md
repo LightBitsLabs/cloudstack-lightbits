@@ -18,8 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   logged as an error; a management server restart before it is saved or confirmed loses it.
 - A host added back with the NQN of a removed host records it under a lock that pending
   revocations of that NQN also take, so a retry cannot take the new host out. If that lock stays
-  busy for 60 s the host records its NQN without it; a retry running at that moment may then
-  remove it from volume ACLs, and it is added back at its next attach or host connect.
+  busy for 60 s the host records nothing for that NQN in that connect and does so at its next
+  connect; until then volumes cannot be attached to it.
 
 ## [0.1.0-rc.1] - 2026-11-24
 
