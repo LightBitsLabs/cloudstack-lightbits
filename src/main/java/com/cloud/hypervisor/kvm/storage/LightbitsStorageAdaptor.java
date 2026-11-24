@@ -283,6 +283,9 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     private boolean connectPool(KVMStoragePool pool, List<String> endpoints, long timeoutMillis,
                                 java.util.function.Function<String, java.nio.file.Path> configFor) {
         boolean twoWay = twoWay(pool);
+        if (twoWay) {
+            nvme.forgetVanishedRejections();   // before connect-all can reuse a rejected controller's name
+        }
         java.util.Set<String> before = twoWay ? nvme.pathNames() : null;
         boolean answered;
         try {
