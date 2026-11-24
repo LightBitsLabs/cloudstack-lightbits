@@ -14,7 +14,9 @@ contains both the management-side storage provider and the agent-side `StorageAd
 
 To try the plugin, you need only the core steps below; everything in
 [5. Optional security features](#5-optional-security-features) is off by default and can be
-added later, when and if you need it.
+added later, when and if you need it. One exception: on a cluster installed in explicit-allow
+mode, a volume created without an IP ACL gets `ALLOW_NONE` and no host can connect to it, so
+add `&ipAcl=true` to the pool URL there (see [Volume IP ACL](#volume-ip-acl)).
 
 1. Check the [prerequisites](#prerequisites) (CloudStack with KVM hosts, a Lightbits cluster
    reachable from them, `nvme-cli` on the hosts) and
@@ -22,7 +24,8 @@ added later, when and if you need it.
 2. [Install the jar](#1-install-the-jar) on the management server and every KVM host.
 3. [Add a primary storage pool](#3-add-the-primary-storage-pool). The minimum URL is
    `lightbits://<api-host>/<project>?environment=<name>&fingerprint=<SHA-256 fingerprint>`
-   (add `&replicas=1` on a single-node cluster); see
+   (the default is 3 replicas: on a cluster with fewer nodes add `&replicas=1`, or
+   `&replicas=2` on two nodes); see
    [TLS](#tls-verifying-the-cluster-certificate) for the fingerprint.
 4. [Create an offering](#4-use-it) with storage tag `lightbits` and deploy a VM with it.
    Snapshots, revert, volume from snapshot, grow and live migration then work as on any
@@ -284,9 +287,12 @@ management server log ("QoS policy changed from ... to ...").
 
 ## 5. Optional security features
 
-None of these is needed to run the plugin or to try it. On their own, Lightbits volumes are
-already reachable only by the hosts CloudStack attaches them to (the host NQN ACL the plugin
-always manages), and the API connection is always TLS-verified. The options below add further
+None of these is needed to run the plugin or to try it (except `ipAcl=true` on a cluster
+installed in explicit-allow mode, see below). On their own, Lightbits volumes accept only the
+NQNs of the hosts CloudStack attaches them to (the host NQN ACL the plugin always manages).
+An NQN is an identifier, not a credential: a machine on the storage network that copies an
+allowed NQN is let in, which the IP ACL and in-band authentication below address. The API
+connection is always TLS-verified. The options below add further
 layers. Each one has a value and an operational cost, so turn on the ones that fit your
 environment and security needs.
 
@@ -337,9 +343,10 @@ without asking the plugin: anything but `true` or `false` makes the pool's volum
 fail, naming the option, until it is corrected. Each reconnect records the
 host's data IP and sets the IP ACL of the volumes it has. Upgrade the agent on every host
 first: an older agent reports no data IP, and its host is refused access to the pool's
-volumes with an error naming the host. Each host connect logs the host's addresses in the
-management server log ("Lightbits: host <id> data IPs for pool <pool id>: ..."); check a volume
-with `lbcli get volume` (`IPAcl`).
+volumes with an error naming the host. The management server logs a host's addresses when it
+first records them and whenever they change ("Lightbits: host <id> data IPs for pool <pool
+id>: ... (were ...)"); a reconnect with unchanged addresses logs nothing. After a reconnect,
+check a volume with `lbcli get volume` (`IPAcl`).
 
 To turn it off, first have the cluster admin set `lbcli update volume --ip-acl ALLOW_ANY` on
 the pool's volumes, then remove the detail: with the option off the plugin no longer changes

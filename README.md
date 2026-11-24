@@ -25,7 +25,8 @@ Two communication paths:
 To try it, follow [Quick start: a first trial](INSTALL.md#quick-start-a-first-trial) in
 INSTALL.md: install one jar on the management server and the KVM hosts, add a pool, create an
 offering, deploy a VM. The security options listed below as optional are off by default and
-are not needed for a trial.
+are not needed for a trial, except the volume IP ACL (`ipAcl=true`) on a cluster installed in
+explicit-allow mode.
 
 ## Scope
 
