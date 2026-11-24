@@ -135,6 +135,11 @@ class LibvirtLightbitsGetHostNqnCommandWrapperTest {
                 List.of("10.19.31.20:8009", "10.19.31.23:8009", "[fd00::1]:8009", "nohost:8009", "192.0.2.1:8009")), null);
         assertTrue(answer.getResult());
         assertEquals(List.of("10.19.31.17", "fd00::17"), ((LightbitsGetHostNqnAnswer) answer).getDataIps());
+        assertTrue(((LightbitsGetHostNqnAnswer) answer).isDataIpsPartial(), "two endpoints could not be looked up");
+
+        Answer complete = w.execute(new LightbitsGetHostNqnCommand(List.of("10.19.31.20:8009", "[fd00::1]:8009")), null);
+        assertEquals(List.of("10.19.31.17", "fd00::17"), ((LightbitsGetHostNqnAnswer) complete).getDataIps());
+        org.junit.jupiter.api.Assertions.assertFalse(((LightbitsGetHostNqnAnswer) complete).isDataIpsPartial());
     }
 
     @Test

@@ -84,6 +84,20 @@ public final class LightbitsHostIps {
     }
 
     /**
+     * The data IPs to store from a host's report: the reported ones, or for a partial report
+     * (the agent could not look up every endpoint) the stored ones with the reported ones added,
+     * so an address that was not looked up this time is not dropped.
+     */
+    public static List<String> merge(String stored, List<String> reported, boolean partial) {
+        Set<String> out = new LinkedHashSet<>();
+        if (partial && stored != null) {
+            out.addAll(parse(stored));
+        }
+        out.addAll(reported);
+        return new ArrayList<>(out);
+    }
+
+    /**
      * The resolver for a pool's volume IP ACLs, from the host details. {@code nqnDetail} is
      * the host detail holding a host's NQN.
      */
@@ -98,7 +112,12 @@ public final class LightbitsHostIps {
             List<String> ips = union(nqns, nqn -> {
                 List<String> found = new ArrayList<>();
                 for (Long hostId : hostsByNqn.getOrDefault(nqn, List.of())) {
-                    found.addAll(of(dao, hostId, poolId));
+                    List<String> own = of(dao, hostId, poolId);
+                    if (own.isEmpty()) {
+                        // several hosts with one NQN (a cloned host): all of them must be known
+                        return null;
+                    }
+                    found.addAll(own);
                 }
                 return found;
             });

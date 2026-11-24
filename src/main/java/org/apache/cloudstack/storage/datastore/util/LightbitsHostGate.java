@@ -76,7 +76,7 @@ public final class LightbitsHostGate {
     private LightbitsHostGate() {
     }
 
-    static String lockName(long hostId) {
+    public static String lockName(long hostId) {
         return "lightbits.host.acl." + hostId;
     }
 

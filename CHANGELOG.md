@@ -7,7 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 - Pool option `ipAcl=true`: each volume's IP ACL holds the data IPs of the hosts in its NQN
-  ACL, so a host can connect to a volume only from its own address. The agent reports the
+  ACL, so a connection to the volume must come from one of those addresses (the union over
+  the volume's hosts; the cluster does not tie each NQN to its own address). The agent reports the
   address it uses toward the pool's cluster on host connect; grants, revokes, migrations and
   host removal update both lists in one conditional update, and new volumes start at
   `ALLOW_NONE`. A host whose data IP changed updates the IP ACLs of its volumes when it
