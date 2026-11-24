@@ -14,6 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   onto the host) only when every path of the volume's subsystem holds the host's current
   controller key and none is a path it rejected but could not disconnect; otherwise it
   refuses with how to move the host onto two-way paths. Running VMs are not affected.
+- Removing a host no longer forgets a revocation the cluster could not take: each pool records
+  it as pending before it removes the host from the volume ACLs and deletes its trusted host,
+  and clears it only when the cluster confirms both. Pending revocations are retried at the
+  storage statistics poll and at host connects, and logged until they complete; one for a
+  machine added back to CloudStack is dropped.
 
 ## [0.1.0-rc.1] - 2026-11-24
 

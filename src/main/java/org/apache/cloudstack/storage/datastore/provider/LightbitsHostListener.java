@@ -112,6 +112,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
         // expires on its own (LightbitsHostGate.MARK_HOLD_MILLIS), so no connect can drop the mark
         // of an active removal, and an abandoned one does not undo this connect's registration.
         ensureHostDetails(hostId, poolId);
+        retryRevocations(poolId);
         return true;
     }
 
@@ -723,6 +724,14 @@ public class LightbitsHostListener implements HypervisorHostListener {
             // has no overall deadline, so the mark is kept fresh for as long as the removal runs (one
             // volume update, with its retries, takes far less than the mark's 30 min).
             markRemoving(hostId);
+            // Recorded before anything is sent, and cleared only when the cluster confirms the
+            // revocation below: an outage now is retried later instead of being forgotten.
+            try {
+                org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.record(storagePoolDetailsDao, pool.getId(), nqnValue);
+            } catch (RuntimeException e) {
+                LOG.warn("Lightbits: could not record the pending revocation of host {} on pool {}: {}", hostId, pool.getName(),
+                        e.getMessage());
+            }
             try {
                 org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                         poolSecrets.apply(pool.getId());
@@ -752,6 +761,30 @@ public class LightbitsHostListener implements HypervisorHostListener {
                         + " removed: {}", pool.getName(), hostId, e.getMessage());
             }
             unregisterTrustedHost(hostId, pool, nqnValue);
+            try {
+                LightbitsPoolConfig cfg = poolSecrets.apply(pool.getId());
+                if (org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.revokeOrKeep(storagePoolDetailsDao,
+                        clients.apply(cfg), cfg, pool.getId(), nqnValue)) {
+                    LOG.info("Lightbits: host {} is revoked on the cluster of pool {}", hostId, pool.getName());
+                }
+            } catch (RuntimeException e) {
+                LOG.warn("Lightbits: the revocation of host {} on pool {} stays pending and is retried: {}", hostId,
+                        pool.getName(), e.getMessage());
+            }
+        }
+    }
+
+    /** Retry the pool's pending revocations of removed hosts (cheap when there are none). */
+    private void retryRevocations(long poolId) {
+        try {
+            if (org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.pending(storagePoolDetailsDao, poolId).isEmpty()) {
+                return;
+            }
+            LightbitsPoolConfig cfg = poolSecrets.apply(poolId);
+            org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.retry(storagePoolDetailsDao, hostDetailsDao,
+                    LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL, poolId, cfg, clients.apply(cfg));
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not retry the pending revocations of pool {}: {}", poolId, e.getMessage());
         }
     }
 
