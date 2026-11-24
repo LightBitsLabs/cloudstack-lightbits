@@ -299,7 +299,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                     org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
             java.util.List<String> updated = org.apache.cloudstack.storage.datastore.util.LightbitsAcl.refreshIps(cfg.newClient(),
-                    cfg.getEnvironment(), poolId, nqn, ipResolver(poolId));
+                    cfg.getEnvironment(), poolId, nqn, ipResolver(poolId), ips);
             if (!updated.isEmpty()) {
                 LOG.info("Lightbits: updated the IP ACL of {} volume(s) of pool {} for host {}: {}", updated.size(), poolId,
                         hostId, updated);

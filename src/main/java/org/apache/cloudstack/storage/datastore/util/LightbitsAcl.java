@@ -195,13 +195,23 @@ public final class LightbitsAcl {
      */
     public static List<String> refreshIps(LightbitsApiClient client, String environment, long poolId, String hostNqn,
                                           IpResolver ips) {
+        return refreshIps(client, environment, poolId, hostNqn, ips, null);
+    }
+
+    /**
+     * {@link #refreshIps(LightbitsApiClient, String, long, String, IpResolver)}; where another
+     * host's IPs are unknown, {@code hostIps} (the refreshing host's addresses) are added to the
+     * IP ACL, removing none, as a grant does.
+     */
+    public static List<String> refreshIps(LightbitsApiClient client, String environment, long poolId, String hostNqn,
+                                          IpResolver ips, List<String> hostIps) {
         List<String> updated = new ArrayList<>();
         for (Volume v : client.listVolumes()) {
             if (v.getName() == null || !LightbitsUtil.isPoolObject(environment, poolId, v.getName()) || !hosts(v).contains(hostNqn)) {
                 continue;
             }
             try {
-                if (update(client, v.getName(), false, acl -> false, ips)) {
+                if (update(client, v.getName(), false, acl -> false, ips, hostIps)) {
                     updated.add(v.getName());
                 }
             } catch (RuntimeException e) {
