@@ -150,9 +150,8 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
             </plugin>
-            <!-- Quality gate: line coverage >= 60%, enforced on `mvn verify`.
-                 (JaCoCo skips the check while no tests exist yet; it becomes a
-                 hard gate the moment the first test lands in M1.) -->
+            <!-- Quality gate: line and branch coverage >= 60% over all the plugin's code,
+                 enforced on `mvn verify` (so in CI). No package is excluded. -->
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
@@ -187,19 +186,14 @@
                                             <value>COVEREDRATIO</value>
                                             <minimum>0.60</minimum>
                                         </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.60</minimum>
+                                        </limit>
                                     </limits>
                                 </rule>
                             </rules>
-                            <!-- throw-only SPI stubs are excluded until their M1
-                                 implementations land; every class with behavior counts -->
-                            <excludes>
-                                <exclude>**/storage/datastore/driver/**</exclude>
-                                <exclude>**/storage/datastore/lifecycle/**</exclude>
-                                <exclude>**/storage/datastore/provider/**</exclude>
-                                <!-- agent-side KVM adaptor: exercised by live/Marvin tests,
-                                     not unit tests (needs a real host + nvme device) -->
-                                <exclude>**/hypervisor/kvm/storage/**</exclude>
-                            </excludes>
                         </configuration>
                     </execution>
                 </executions>
