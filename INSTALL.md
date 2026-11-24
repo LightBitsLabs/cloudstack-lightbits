@@ -404,9 +404,11 @@ each host (the host key, and the controller key for two-way) and works with enfo
    ```bash
    cmk update storagepool id=<pool-id> details[0].inbandKeyGeneration=<current + 1>
    ```
-2. For each host of the pool in turn: put it in maintenance (its VMs migrate away), then
-   cancel maintenance. At that reconnect the agent drops the host's idle Lightbits paths, makes
-   new keys, and the management server registers them with every `inbandAuth=true` pool the
+2. For each host of the pool in turn: put it in maintenance (its VMs migrate away), wait
+   until it runs no VMs, reconnect it (`cmk reconnect host id=<host-id>`), then cancel
+   maintenance. Cancelling maintenance alone does not reconnect the agent, so the reconnect is
+   what rotates; done during maintenance, no VM can be placed on the host before it has its new
+   keys. At that reconnect the agent drops the host's idle Lightbits paths, makes new keys, and the management server registers them with every `inbandAuth=true` pool the
    host is in (the keys are per host); the management log says "rotated its in-band
    authentication keys". The host's paths are made again, with the new keys, at the next
    attach or migration.
@@ -417,14 +419,15 @@ each host (the host key, and the controller key for two-way) and works with enfo
    earlier plugin version) rotates too once the pool's generation is above 0.
 
 A rolling rotation of all hosts of a cluster, one at a time. `prepare hostformaintenance`
-returns before the VMs have moved, so wait until the host runs none before cancelling, and
-until it is Up again before the next host:
+returns before the VMs have moved, so wait until the host runs none before the reconnect, and
+until it is Up again after it:
 ```bash
+up() { [ "$(cmk list hosts id=$1 filter=state | jq -r '.host[0].state')" = Up ]; }
 for h in $(cmk list hosts clusterid=<cluster-id> type=Routing filter=id | jq -r '.host[].id'); do
   cmk prepare hostformaintenance id=$h
   until [ "$(cmk list virtualmachines hostid=$h listall=true filter=id | jq '.count // 0')" = 0 ]; do sleep 10; done
-  cmk cancel hostmaintenance id=$h
-  until [ "$(cmk list hosts id=$h filter=state | jq -r '.host[0].state')" = Up ]; do sleep 10; done
+  cmk reconnect host id=$h; sleep 10; until up $h; do sleep 10; done
+  cmk cancel hostmaintenance id=$h; until up $h; do sleep 10; done
 done
 ```
 Then check the readiness line: no host should be left on an older key generation.
