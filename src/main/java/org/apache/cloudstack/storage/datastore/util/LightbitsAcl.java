@@ -183,6 +183,7 @@ public final class LightbitsAcl {
     public static List<String> pruneHost(LightbitsApiClient client, String environment, long poolId, String hostNqn,
                                          IpResolver ips, Runnable beforeEach) {
         List<String> pruned = new ArrayList<>();
+        beforeEach.run();   // also before the listing
         for (Volume v : client.listVolumes()) {
             if (v.getName() == null || !LightbitsUtil.isPoolObject(environment, poolId, v.getName()) || !hosts(v).contains(hostNqn)) {
                 continue;

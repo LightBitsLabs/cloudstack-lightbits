@@ -171,7 +171,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - After a removal of a host that did not go through, the host's grants and in-band
   registration stay refused for 30 minutes from the removal mark's last renewal (the
   removal renews it as it sweeps each volume, so count from when the removal stopped, as
-  the management log shows); a host connect after that registers it again.
+  the management log shows); a host connect after that registers it again. The mark is
+  renewed before each pool's volume listing and before each volume update; a single listing
+  of one pool's volumes that took more than 30 minutes would let it lapse, and a connect in
+  that window could register the host again in a pool already swept.
 - With `inbandAuth=true`, a host whose agent is older than this plugin version reports no key
   and is not registered; the management log names it. Upgrade the agent on every host first.
 - With `inbandAuth=true`, a host that was already a trusted host of the project with

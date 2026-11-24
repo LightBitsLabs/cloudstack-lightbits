@@ -397,8 +397,10 @@ valid key it finds there):
 (umask 077; nvme gen-dhchap-key --nqn="$(cat /etc/nvme/hostnqn)" > /etc/nvme/lightbits/dhchap-key.new \
   && mv -f /etc/nvme/lightbits/dhchap-key.new /etc/nvme/lightbits/dhchap-key)
 ```
-then have the cluster admin set it in the other project, and only then disconnect the paths
-and cancel maintenance as above. `lbcli set trusted-host-secrets` takes the key only on its
+then have the cluster admin set it in the other project on **every** Lightbits cluster where
+the host has such a trusted host (one `lbcli set trusted-host-secrets` per cluster), and only
+then disconnect the paths and cancel maintenance as above; a cluster left out refuses the
+host's new key. `lbcli set trusted-host-secrets` takes the key only on its
 command line (`--host-secret`; it has no file or standard-input option), so keep it out of
 shell history and files, for example:
 ```bash

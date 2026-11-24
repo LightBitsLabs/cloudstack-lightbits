@@ -125,7 +125,7 @@ class LightbitsAclTest {
             now[0] += 20 * 60 * 1000L;   // this volume's update takes 20 min
         });
         assertEquals(3, pruned.size());
-        assertEquals(List.of(true, true, true), markCountedAtEachUpdate, "the mark counted before every volume of the sweep");
+        assertEquals(List.of(true, true, true, true), markCountedAtEachUpdate, "the mark counted before the listing and every volume");
         org.junit.jupiter.api.Assertions.assertTrue(now[0] > LightbitsHostGate.MARK_HOLD_MILLIS, "the sweep outlasted one mark period");
     }
 
