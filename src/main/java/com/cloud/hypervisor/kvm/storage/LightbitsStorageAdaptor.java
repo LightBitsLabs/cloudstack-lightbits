@@ -184,6 +184,9 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // Throws with a diagnosis (paths, ACL hint) rather than returning false: the caller
         // would turn false into a generic "failed to connect disks".
         String device = nvme.waitForDevice(uuid, DEFAULT_WAIT_SECS, nvme.hostNqn());
+        if (twoWay(pool)) {
+            nvme.requireTwoWayPaths(nvme.verifyIdentity(uuid), hostKey.ensureCtrlKey());
+        }
         LOG.info("Lightbits volume {} verified at {}", uuid, device);
         nvme.warnOnDegradedPaths(endpoints.size());
         return true;
@@ -277,8 +280,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      */
     private boolean connectPool(KVMStoragePool pool, List<String> endpoints, long timeoutMillis,
                                 java.util.function.Function<String, java.nio.file.Path> configFor) {
-        boolean twoWay = pool.getDetails() != null && "true".equals(pool.getDetails().get(DETAIL_INBAND_AUTH))
-                && "true".equals(pool.getDetails().get(DETAIL_INBAND_TWO_WAY));
+        boolean twoWay = twoWay(pool);
         java.util.Set<String> before = twoWay ? nvme.pathNames() : null;
         boolean answered;
         try {
@@ -298,6 +300,12 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             nvme.dropNewPathsWithoutCtrlKey(before, hostKey.ensureCtrlKey());
         }
         return answered;
+    }
+
+    /** The pool uses two-way in-band authentication (both details from the management server). */
+    static boolean twoWay(KVMStoragePool pool) {
+        Map<String, String> d = pool == null ? null : pool.getDetails();
+        return d != null && "true".equals(d.get(DETAIL_INBAND_AUTH)) && "true".equals(d.get(DETAIL_INBAND_TWO_WAY));
     }
 
     /**
@@ -388,6 +396,9 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         }
         // never hand out a path whose namespace was not matched against the volume
         String kernelName = nvme.verifyIdentity(uuid);
+        if (twoWay(pool)) {
+            nvme.requireTwoWayPaths(kernelName, hostKey.ensureCtrlKey());
+        }
         KVMPhysicalDisk disk = new KVMPhysicalDisk(LightbitsNvmeHost.BY_ID_PREFIX + uuid, volumePath, pool);
         disk.setFormat(PhysicalDiskFormat.RAW);
         disk.setSize(nvme.sizeBytes(kernelName));

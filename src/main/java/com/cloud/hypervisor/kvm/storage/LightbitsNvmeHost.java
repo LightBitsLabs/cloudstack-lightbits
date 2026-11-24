@@ -456,6 +456,47 @@ class LightbitsNvmeHost {
         return n;
     }
 
+    /**
+     * Two-way: before a namespace is handed to a VM, every path of its subsystem on this host must
+     * hold the current controller key, and none may be one a connect rejected but could not
+     * disconnect. Otherwise I/O could go over a path on which the host does not check the cluster;
+     * the handoff is refused with what to do. Paths the host cannot read make it refuse too.
+     */
+    void requireTwoWayPaths(String kernelName, String currentCtrlKey) {
+        String subsystem = sys.read("/sys/block/" + kernelName + "/device/subsysnqn");
+        if (subsystem == null) {
+            throw new CloudRuntimeException("Lightbits: could not read the subsystem of " + kernelName
+                    + " to check its two-way authentication paths");
+        }
+        List<String> controllers = sys.listOrNull("/sys/class/nvme");
+        if (controllers == null) {
+            throw new CloudRuntimeException("Lightbits: could not list /sys/class/nvme to check this host's two-way paths");
+        }
+        List<String> unsafe = new ArrayList<>();
+        for (String ctrl : controllers) {
+            String nqn = sys.read("/sys/class/nvme/" + ctrl + "/subsysnqn");
+            if (nqn == null) {
+                throw new CloudRuntimeException("Lightbits: could not read the subsystem NQN of " + ctrl
+                        + " to check this host's two-way paths");
+            }
+            if (!subsystem.trim().equals(nqn.trim())) {
+                continue;
+            }
+            String secret = sys.read("/sys/class/nvme/" + ctrl + "/dhchap_ctrl_secret");
+            if (secret == null || !secret.trim().equals(currentCtrlKey) || REJECTED.contains(ctrl)) {
+                String address = sys.read("/sys/class/nvme/" + ctrl + "/address");
+                unsafe.add(ctrl + (address == null ? "" : " (" + address + ")"));
+            }
+        }
+        if (!unsafe.isEmpty()) {
+            throw new CloudRuntimeException("Lightbits: the pool uses two-way in-band authentication, but path(s) " + unsafe
+                    + " of subsystem " + subsystem.trim() + " on this host do not hold its current controller key, so the host"
+                    + " would not check the cluster on them; the volume is not handed over. Move the host onto two-way paths:"
+                    + " put it in maintenance, disconnect its Lightbits paths (nvme disconnect -n " + subsystem.trim()
+                    + "), cancel maintenance (INSTALL.md, \"In-band authentication\"). Running VMs are not affected.");
+        }
+    }
+
     /** The controller names of this host's Lightbits paths, any state. */
     java.util.Set<String> pathNames() {
         java.util.Set<String> out = new java.util.HashSet<>();

@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   and kept (so the host keeps working), but are now flagged as possibly copied: the agent
   reports it, the management log warns, and the readiness line lists the host until its keys
   are rotated.
+- Two-way in-band authentication: the agent hands a volume to a VM (attach, VM start, migration
+  onto the host) only when every path of the volume's subsystem holds the host's current
+  controller key and none is a path it rejected but could not disconnect; otherwise it
+  refuses with how to move the host onto two-way paths. Running VMs are not affected.
 
 ## [0.1.0-rc.1] - 2026-11-24
 
