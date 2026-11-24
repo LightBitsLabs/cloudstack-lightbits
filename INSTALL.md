@@ -283,7 +283,8 @@ only when both allow it. With `ipAcl=true` the plugin also manages the IP list:
   plugin knows the data IPs of every host in that volume's NQN ACL. If it does not (a host
   added by hand on the cluster, or one that has not reconnected since `ipAcl=true` was set),
   the volume's IP ACL is left as it is and the management log names the volume's hosts;
-  reconnect those hosts, or remove the hand-added NQN. If the agent
+  reconnect those hosts, or remove the hand-added NQN. A grant still adds the granted host's
+  own addresses to it (removing none), so the host it attaches to is never left out. If the agent
   cannot look up one of the endpoints, it adds what it found to the host's addresses and drops
   none.
 - A host reaching the cluster from several addresses (one per NIC) has all of them in its

@@ -72,6 +72,21 @@ public final class LightbitsAcl {
         return v.getIpAcl().getValues();
     }
 
+    /** The IP ACL values with {@code add} added; null (no change) when it allows any address already. */
+    static List<String> withAdded(List<String> current, List<String> add) {
+        if (current.contains("ALLOW_ANY")) {
+            return null;
+        }
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        for (String ip : current) {
+            if (!"ALLOW_NONE".equals(ip)) {
+                out.add(ip);
+            }
+        }
+        out.addAll(add);
+        return new ArrayList<>(out);
+    }
+
     private static boolean sameIps(Volume v, List<String> wanted) {
         java.util.Set<String> want = new java.util.HashSet<>(wanted.isEmpty() ? List.of("ALLOW_NONE") : wanted);
         return want.equals(new java.util.HashSet<>(ips(v)));
@@ -95,6 +110,18 @@ public final class LightbitsAcl {
      */
     public static boolean update(LightbitsApiClient client, String name, boolean mustExist, Predicate<List<String>> change,
                                  IpResolver ips) {
+        return update(client, name, mustExist, change, ips, null);
+    }
+
+    /**
+     * {@link #update(LightbitsApiClient, String, boolean, Predicate, IpResolver)} for a grant:
+     * when {@code ips} cannot resolve every host (one has not reported its IPs), the IP ACL is
+     * not left as it is but gets {@code mustInclude}, the granted host's own addresses, added to
+     * what it holds. Nothing is removed, so no host loses access; the full list is written at
+     * the next update that resolves every host.
+     */
+    public static boolean update(LightbitsApiClient client, String name, boolean mustExist, Predicate<List<String>> change,
+                                 IpResolver ips, List<String> mustInclude) {
         for (int attempt = 1; ; attempt++) {
             Optional<Volume> found = client.getVolumeByName(name);
             if (found.isEmpty()) {
@@ -107,6 +134,9 @@ public final class LightbitsAcl {
             List<String> acl = hosts(v);
             boolean nqnsChanged = change.test(acl);
             List<String> wantedIps = ips == null ? null : ips.ipsFor(acl);
+            if (ips != null && wantedIps == null && mustInclude != null && !mustInclude.isEmpty()) {
+                wantedIps = withAdded(ips(v), mustInclude);
+            }
             if (wantedIps != null && sameIps(v, wantedIps)) {
                 wantedIps = null;
             }
