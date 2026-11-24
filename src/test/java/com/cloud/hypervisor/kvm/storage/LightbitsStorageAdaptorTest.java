@@ -323,7 +323,8 @@ class LightbitsStorageAdaptorTest {
     @Test
     void onlyAPoolWithInbandAuthConnectsWithTheHostKey(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
         java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
-        LightbitsStorageAdaptor a = new LightbitsStorageAdaptor(new LightbitsNvmeHost(sys), new LightbitsHostKey(tmp.resolve("lightbits"), tmp));
+        LightbitsStorageAdaptor a = new LightbitsStorageAdaptor(new LightbitsNvmeHost(sys), new LightbitsHostKey(tmp.resolve("lightbits"), tmp,
+                (Integer) java.nio.file.Files.getAttribute(tmp, "unix:uid")));
         assertNull(a.authConfig(poolA));
         assertFalse(java.nio.file.Files.exists(tmp.resolve("lightbits")), "no key is made for a pool without the option");
         KVMStoragePool auth = a.createStoragePool(POOL_B, "10.0.1.1", 443, "/proj", null, StoragePoolType.IscsiLUN,

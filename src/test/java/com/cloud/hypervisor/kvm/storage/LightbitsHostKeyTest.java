@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -46,13 +47,15 @@ class LightbitsHostKeyTest {
     Path tmp;
     private Path nvme;
     private LightbitsHostKey key;
+    private int uid;
 
     @BeforeEach
     void setUp() throws IOException {
         nvme = Files.createDirectories(tmp.resolve("nvme"));
         Files.writeString(nvme.resolve("hostnqn"), NQN + "\n");
         Files.writeString(nvme.resolve("hostid"), HOST_ID + "\n");
-        key = new LightbitsHostKey(nvme.resolve("lightbits"), nvme);
+        uid = (Integer) Files.getAttribute(tmp, "unix:uid");
+        key = new LightbitsHostKey(nvme.resolve("lightbits"), nvme, uid);
     }
 
     @Test
@@ -101,6 +104,36 @@ class LightbitsHostKeyTest {
         assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.keyFile())));
         assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.configFile())));
         assertEquals(LightbitsHostKey.config(NQN, HOST_ID, KNOWN), Files.readString(key.configFile()));
+    }
+
+    @Test
+    void aDirectoryOwnedByAnotherUserIsRefused() throws IOException {
+        Files.createDirectories(nvme.resolve("lightbits"));
+        Files.writeString(key.keyFile(), KNOWN + "\n");
+        LightbitsHostKey other = new LightbitsHostKey(nvme.resolve("lightbits"), nvme, uid + 4242);
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, other::ensure);
+        assertTrue(e.getMessage().contains("not root"), e.getMessage());
+        assertEquals(KNOWN, Files.readString(key.keyFile()).trim(), "nothing is read or changed");
+    }
+
+    @Test
+    void aKeyFileOwnedByAnotherUserOrALinkIsNotReused() throws IOException {
+        Path dir = Files.createDirectories(nvme.resolve("lightbits"));
+        Path elsewhere = Files.writeString(tmp.resolve("planted"), KNOWN + "\n");
+        Files.createSymbolicLink(key.keyFile(), elsewhere);
+        String k = key.ensure();
+        assertNotEquals(KNOWN, k, "a linked key is not reused");
+        assertFalse(Files.isSymbolicLink(key.keyFile()));
+        assertEquals(KNOWN, Files.readString(elsewhere).trim(), "the link target is not written");
+
+        Assumptions.assumeTrue(uid == 0, "changing a file's owner needs root");
+        Files.writeString(key.keyFile(), KNOWN + "\n");
+        Files.setAttribute(key.keyFile(), "unix:uid", 4242);
+        String fresh = key.ensure();
+        assertNotEquals(KNOWN, fresh, "a key owned by another user is not reused");
+        assertEquals(0, (int) (Integer) Files.getAttribute(key.keyFile(), "unix:uid"));
+        assertTrue(Files.readString(key.configFile()).contains(fresh));
+        assertEquals("rwx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(dir)));
     }
 
     @Test

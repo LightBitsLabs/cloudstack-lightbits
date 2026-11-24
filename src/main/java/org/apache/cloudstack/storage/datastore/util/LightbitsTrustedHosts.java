@@ -46,12 +46,26 @@ public final class LightbitsTrustedHosts {
     public static final String DETAIL_PREFIX = "lightbits.inband.";
     /** Host detail: how many Lightbits paths of the host do not hold its current key (none, or an old one), as the agent last reported. */
     public static final String KEYLESS_DETAIL = "lightbits.keylesspaths";
+    /**
+     * Host detail: the fingerprint of the host's current key, as the agent last reported it. A
+     * pool counts the host as registered only when its {@link #detailKey} holds this value, so
+     * a registration of an earlier key does not count after the key is replaced.
+     */
+    public static final String CURRENT_KEY_DETAIL = "lightbits.inbandkey";
 
     private LightbitsTrustedHosts() {
     }
 
     public static String detailKey(long poolId) {
         return DETAIL_PREFIX + poolId;
+    }
+
+    /**
+     * Whether a pool's registration (its {@link #detailKey} value) is of the host's current key
+     * (its {@link #CURRENT_KEY_DETAIL} value). Null on either side is not.
+     */
+    public static boolean holdsCurrentKey(String registeredFingerprint, String currentFingerprint) {
+        return registeredFingerprint != null && registeredFingerprint.equals(currentFingerprint);
     }
 
     /** Host detail, set to "true" while the host's trusted host for the pool has authRequired=false. */

@@ -32,6 +32,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -206,5 +207,19 @@ class LightbitsTrustedHostsTest {
         assertEquals(fp, LightbitsTrustedHosts.fingerprint(KEY));
         assertFalse(KEY.contains(fp));
         assertFalse(fp.equals(LightbitsTrustedHosts.fingerprint(KEY.replace("AAEC", "AAED"))));
+    }
+
+    @Test
+    void aRegistrationCountsOnlyWhenItHoldsTheHostsCurrentKey() {
+        String k1 = LightbitsTrustedHosts.fingerprint("DHHC-1:00:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+KfiaR:");
+        String k2 = LightbitsTrustedHosts.fingerprint("DHHC-1:00:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=:");
+        assertNotEquals(k1, k2);
+        assertTrue(LightbitsTrustedHosts.holdsCurrentKey(k1, k1));
+        assertFalse(LightbitsTrustedHosts.holdsCurrentKey(k1, k2), "a registration of an earlier key does not count");
+        assertFalse(LightbitsTrustedHosts.holdsCurrentKey(k1, null), "no current key known: not ready");
+        assertFalse(LightbitsTrustedHosts.holdsCurrentKey(null, k1));
+        assertFalse(LightbitsTrustedHosts.holdsCurrentKey(null, null));
+        assertFalse(LightbitsTrustedHosts.CURRENT_KEY_DETAIL.startsWith(LightbitsTrustedHosts.DETAIL_PREFIX),
+                "the host-wide detail is not read as a pool's registration");
     }
 }

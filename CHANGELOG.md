@@ -167,6 +167,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `authRequired=false` keeps that setting: the plugin sets its key but does not change it, so
   the host may still connect without a key while enforcement is on. The management log names
   such hosts; the cluster admin sets `--auth-required=true` when the staged rollout is done.
+- With `inbandAuth=true`, a host whose `/etc/nvme/hostnqn` no longer matches the NQN
+  CloudStack keeps for it is not registered (the volume ACLs name the kept NQN); the
+  management log names both and the pool is reported NOT ready until they are reconciled.
+- The agent refuses a key directory (`/etc/nvme/lightbits`) not owned by root, and replaces a
+  key or `auth.json` owned by another user, or a symbolic link, with a new key; the host is
+  then reported NOT ready for its pools until it reconnects and the new key is registered.
+  After a key change, a pool whose registration still holds the earlier key is reported NOT
+  ready for that host.
 - Turning `inbandAuth` off leaves the trusted hosts on the cluster and the key on the hosts;
   the cluster admin turns in-band authentication off first, or hosts keep needing their keys.
 - With `ipAcl=true`, a host whose agent is older than this plugin version does not report its

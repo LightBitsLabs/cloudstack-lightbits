@@ -167,7 +167,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
                         ((LightbitsGetHostNqnAnswer) answer).isDataIpsPartial());
             }
             if (wantAuth) {
-                registerTrustedHost(hostId, poolId, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
+                if (hasNqn && !existing.getValue().trim().equals(nqn.trim())) {
+                    refuseMismatchedNqn(hostId, poolId, existing.getValue(), nqn);
+                } else {
+                    registerTrustedHost(hostId, poolId, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
+                }
             }
         } else {
             String detail = answer == null ? "no answer" : answer.getDetails();
@@ -302,12 +306,15 @@ public class LightbitsHostListener implements HypervisorHostListener {
             setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
             setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
             setHostDetail(hostId, LightbitsTrustedHosts.KEYLESS_DETAIL, null);
+            setHostDetail(hostId, LightbitsTrustedHosts.CURRENT_KEY_DETAIL, null);
             reportInbandReadiness(poolId);
             return;
         }
         setHostDetail(hostId, LightbitsTrustedHosts.KEYLESS_DETAIL,
                 answer.getKeylessPaths() == null ? null : String.valueOf(answer.getKeylessPaths()));
         String fp = LightbitsTrustedHosts.fingerprint(key);
+        // host-wide: a pool whose registration holds another fingerprint no longer counts this host as ready
+        setHostDetail(hostId, LightbitsTrustedHosts.CURRENT_KEY_DETAIL, fp);
         try {
             LightbitsPoolConfig cfg = LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
             com.cloud.host.HostVO host = hostDao.findById(hostId);
@@ -351,8 +358,25 @@ public class LightbitsHostListener implements HypervisorHostListener {
     }
 
     /**
+     * The agent reports a host NQN other than the one CloudStack keeps for the host (its
+     * /etc/nvme/hostnqn changed). The volume ACLs name the kept NQN, so registering the key
+     * under either one would be wrong: the host is left unregistered for the pool, and the log
+     * says how to reconcile.
+     */
+    private void refuseMismatchedNqn(long hostId, long poolId, String kept, String reported) {
+        setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
+        setHostDetail(hostId, LightbitsTrustedHosts.keyOptionalDetailKey(poolId), null);
+        LOG.error("Lightbits: host {} now reports host NQN {}, but CloudStack keeps {} for it (host detail '{}') and the"
+                + " pool's volume ACLs name that one; its in-band authentication key is not registered for pool {}. Restore"
+                + " the host's /etc/nvme/hostnqn, or put the host in maintenance, update the host detail and the volumes'"
+                + " ACLs to the new NQN, then reconnect it", hostId, reported, kept,
+                LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL, poolId);
+        reportInbandReadiness(poolId);
+    }
+
+    /**
      * One log line per host connect on whether the pool's hosts are ready for in-band
-     * authentication: every host of the pool registered, and none with paths that do not hold its current key.
+     * authentication: every host of the pool registered with its current key, and none with paths that do not hold it.
      * This covers only this pool's hosts; enforcement is cluster-wide, so the log says so.
      */
     private void reportInbandReadiness(long poolId) {
@@ -364,8 +388,12 @@ public class LightbitsHostListener implements HypervisorHostListener {
             long id = ref.getHostId();
             com.cloud.host.HostVO h = hostDao.findById(id);
             String label = h == null ? String.valueOf(id) : h.getName();
-            if (hostDetailsDao.findDetail(id, LightbitsTrustedHosts.detailKey(poolId)) == null) {
+            DetailVO reg = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.detailKey(poolId));
+            DetailVO current = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.CURRENT_KEY_DETAIL);
+            if (reg == null) {
                 unregistered.add(label);
+            } else if (!LightbitsTrustedHosts.holdsCurrentKey(reg.getValue(), current == null ? null : current.getValue())) {
+                unregistered.add(label + " (registered with an earlier key)");
             } else if (hostDetailsDao.findDetail(id, LightbitsTrustedHosts.keyOptionalDetailKey(poolId)) != null) {
                 optional.add(label);
             }

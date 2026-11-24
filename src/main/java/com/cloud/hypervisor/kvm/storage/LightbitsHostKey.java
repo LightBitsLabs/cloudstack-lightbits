@@ -44,7 +44,8 @@ import com.cloud.utils.exception.CloudRuntimeException;
  *
  * <p>The key is made on first use and kept in {@code /etc/nvme/lightbits/dhchap-key}; the
  * configuration file next to it ({@code auth.json}) names this host's NQN, host ID and key.
- * The directory is 0700 and both files 0600 (root only). The key is made here, from
+ * The directory is 0700 and both files 0600, all owned by root; a key file owned by another
+ * user is not reused. The key is made here, from
  * {@link SecureRandom}, in the format of {@code nvme gen-dhchap-key} (32 bytes, no
  * transformation), so it never passes through a command line or a command's output. It
  * leaves the host only to the management server, which registers it with the cluster.
@@ -65,14 +66,17 @@ public class LightbitsHostKey {
 
     private final Path dir;
     private final Path nvmeDir;
+    /** The owner the directory and files must have: root (tests use their own UID). */
+    private final int ownerUid;
 
     public LightbitsHostKey() {
-        this(Path.of("/etc/nvme/lightbits"), Path.of("/etc/nvme"));
+        this(Path.of("/etc/nvme/lightbits"), Path.of("/etc/nvme"), 0);
     }
 
-    LightbitsHostKey(Path dir, Path nvmeDir) {
+    LightbitsHostKey(Path dir, Path nvmeDir, int ownerUid) {
         this.dir = dir;
         this.nvmeDir = nvmeDir;
+        this.ownerUid = ownerUid;
     }
 
     Path keyFile() {
@@ -121,19 +125,35 @@ public class LightbitsHostKey {
     }
 
     /**
-     * Make an existing directory 0700 and existing key and configuration files 0600 before
-     * anything is read, so files from an earlier version, or copied or made by hand with a
-     * wider mode, are root-only again. New files are made with these modes.
+     * Before anything is read: an existing directory must be owned by root and is made 0700;
+     * an existing key or configuration file owned by root is made 0600 (files from an earlier
+     * version, or copied or made by hand with a wider mode, are root-only again), and one owned
+     * by another user, or a symbolic link, is removed, so a new key is made: another user may
+     * have read the old one. New files are made with these modes.
      */
     private void restrict() throws IOException {
         if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            int uid = uid(dir);
+            if (uid != ownerUid) {
+                throw new CloudRuntimeException("Lightbits: " + dir + " is owned by UID " + uid + ", not root; another user"
+                        + " could read or replace this host's in-band authentication key. Remove the directory (a new key"
+                        + " is made) and reconnect the host");
+            }
             Files.setPosixFilePermissions(dir, DIR_MODE);
         }
         for (Path f : new Path[] {keyFile(), configFile()}) {
-            if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.isSymbolicLink(f) || Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS) && uid(f) != ownerUid) {
+                Files.delete(f);
+                LOG.warn("Lightbits: {} was not a file owned by root; removed it, and a new in-band authentication key"
+                        + " is made (register it by reconnecting the host)", f);
+            } else if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
                 Files.setPosixFilePermissions(f, FILE_MODE);
             }
         }
+    }
+
+    private static int uid(Path p) throws IOException {
+        return (Integer) Files.getAttribute(p, "unix:uid", LinkOption.NOFOLLOW_LINKS);
     }
 
     private String readKey() throws IOException {
