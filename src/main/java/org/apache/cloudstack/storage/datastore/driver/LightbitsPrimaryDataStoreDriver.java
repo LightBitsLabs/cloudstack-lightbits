@@ -725,14 +725,18 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 id -> hostDetailsDao.findDetail(id, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL) != null
                         || hostDetailsDao.findDetail(id, HOST_NQN_DETAIL) == null,
                 hostGateLocker,
-                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
-                    if (acl.contains(nqn)) {
-                        return false;
-                    }
-                    acl.add(nqn);
-                    return true;
-                }, ips),
-                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips));
+                // With ipAcl, also under the pool's IP ACL lock (after the host lock), so a refresh of
+                // another host's data IPs cannot run between resolving the IPs and writing them.
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
+                        () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
+                            if (acl.contains(nqn)) {
+                                return false;
+                            }
+                            acl.add(nqn);
+                            return true;
+                        }, ips)),
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
+                        () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips)));
         if (dataObject instanceof VolumeInfo) {
             // An offering change with the same size and IOPS never reaches resize: pick it up here.
             // Best effort like the change itself: a failed lookup must not fail the granted attach.
@@ -750,7 +754,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         return true;
     }
 
-    /** The lock grants and host removal share; tests swap it for an in-process one. */
+    /** The locks grants, revokes and host removal share (see LightbitsHostGate); tests swap it for an in-process one. */
     org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.Locker hostGateLocker =
             org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.GLOBAL;
 
@@ -761,8 +765,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsPoolConfig cfg = configForPool(poolId);
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
-        org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn),
-                ipResolverFor(cfg, poolId));
+        org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ips = ipResolverFor(cfg, poolId);
+        org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
+                () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips));
     }
 
     /** With the pool option ipAcl, the IP ACL of a volume follows its hosts' data IPs; else untouched. */
