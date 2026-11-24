@@ -20,9 +20,16 @@ Two communication paths:
 - **Control path** — the CloudStack management server calls the Lightbits REST/gRPC API (volume lifecycle, snapshots, clones, ACLs, capacity).
 - **Data path** — KVM hosts connect to volumes with NVMe/TCP (`nvme-tcp` kernel module + `nvme-cli`) and hand the raw block device to QEMU.
 
+## Getting started
+
+To try it, follow [Quick start: a first trial](INSTALL.md#quick-start-a-first-trial) in
+INSTALL.md: install one jar on the management server and the KVM hosts, add a pool, create an
+offering, deploy a VM. The security options listed below as optional are off by default and
+are not needed for a trial.
+
 ## Scope
 
-Working today (KVM):
+Core (KVM, no option needed):
 - Volume create/delete, attach/detach via per-host NQN ACLs (host NQN auto-registered)
 - VM root disks from templates via native snapshot+clone (template cached once per pool)
 - Volume snapshots: take / revert (native in-place rollback) / delete, and create-volume-from-snapshot
@@ -38,6 +45,20 @@ Working today (KVM):
   A changed offering moves the volume to its policy at the next resize, attach, VM start or
   migration; a failed change is logged and tried again at a later one (see INSTALL.md,
   "QoS policy": until then the limit may be the old or the new one)
+- Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and
+  cluster-side cleanup only ever touches the pool's own objects. Several pools can share one
+  Lightbits project **operationally** (a per-pool volume-name prefix keeps names, stats, and
+  cleanup collision-free), but that is not a security boundary: a pool's JWT can read every
+  volume in its project, so tenant-level isolation requires **one Lightbits project per pool**
+- VM live migration between KVM hosts (the destination host's NQN is added to each volume's
+  ACL during migration prepare and the source's is pruned after), including host maintenance
+  evacuation
+- Cluster-wide and zone-wide storage pools; full cluster-side cleanup on teardown
+- TLS verification of the Lightbits API (fingerprint pinning or a CA-signed certificate), API
+  endpoint failover
+
+Optional security features, off by default (see INSTALL.md, "5. Optional security features",
+for what each adds, what it costs to run, and when to consider it):
 - Volume IP ACL (pool option `ipAcl=true`): each volume accepts connections only from the
   data IPs of the hosts it is granted to, on top of the host NQN ACL (see INSTALL.md,
   "Volume IP ACL")
@@ -49,15 +70,6 @@ Working today (KVM):
   CloudStack (pool detail `inbandKeyGeneration`, then a maintenance cycle and a reconnect per host). **Follow the rollout order in
   INSTALL.md ("In-band authentication") before the cluster admin enables enforcement:**
   enabling it while a host still has paths without its current key can freeze that host's VMs
-- Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and
-  cluster-side cleanup only ever touches the pool's own objects. Several pools can share one
-  Lightbits project **operationally** (a per-pool volume-name prefix keeps names, stats, and
-  cleanup collision-free) — but that is not a security boundary: a pool's JWT can read every
-  volume in its project, so tenant-level isolation requires **one Lightbits project per pool**
-- VM live migration between KVM hosts (the destination host's NQN is added to each volume's
-  ACL during migration prepare and the source's is pruned after), including host maintenance
-  evacuation
-- Cluster-wide and zone-wide storage pools; full cluster-side cleanup on teardown
 
 See [docs/architecture.md](docs/architecture.md) for the design sketch.
 
@@ -69,8 +81,8 @@ credential rotation.
 
 ## Requirements (target)
 
-- Apache CloudStack 4.22+
-- Lightbits cluster running LightOS ≥ 3.x, reachable from the management server (API, port 443) and KVM hosts (NVMe/TCP, port 4420). Any cluster size works — from a single node (use `replicas=1`) up to a full multi-node cluster; three nodes are **not** required.
+- Apache CloudStack 4.22 or 4.23 (KVM)
+- Lightbits cluster (3.x), reachable from the management server (API, port 443) and KVM hosts (NVMe/TCP, port 4420). Any cluster size works, from a single node (use `replicas=1`) up to a full multi-node cluster; three nodes are **not** required.
 - A **project-scoped** LightOS JWT per storage pool (`<project>:admin` role) — **not** the cluster-wide system JWT. Minting instructions: [INSTALL.md](INSTALL.md#creating-a-project-scoped-jwt).
 - KVM hosts: `nvme-cli`, `nvme_tcp` kernel module
 
