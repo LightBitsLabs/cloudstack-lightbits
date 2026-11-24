@@ -387,12 +387,28 @@ To rotate a host's key, put the host in maintenance (its VMs migrate away), dele
 `/etc/nvme/lightbits/dhchap-key`, disconnect it from the subsystem of **every** Lightbits
 cluster it uses (as in step 4, one `nvme disconnect -n` per `nqn.2016-01.com.lightbitslabs:`
 entry of `nvme list-subsys`) and cancel maintenance: a new key is made and registered with
-every `inbandAuth=true` pool the host is in, and the new paths hold it. A host whose trusted
-host belongs to another project (step 5) is not updated by the plugin: before cancelling
-maintenance, the cluster admin sets the new key there,
-`lbcli set trusted-host-secrets --project-name=<other project> --name=<trusted host>
---host-secret=<new key>`, with the new key read from `/etc/nvme/lightbits/dhchap-key` on the
-host (handle it as a secret: it shows on that command line). The key is one per
+every `inbandAuth=true` pool the host is in, and the new paths hold it.
+
+A host whose trusted host belongs to another project (step 5) is not updated by the plugin,
+so its new key must be set there before the host leaves maintenance. While the host is in
+maintenance, make the new key on the host instead of deleting the old one (the plugin uses a
+valid key it finds there):
+```bash
+(umask 077; nvme gen-dhchap-key --nqn="$(cat /etc/nvme/hostnqn)" > /etc/nvme/lightbits/dhchap-key.new \
+  && mv -f /etc/nvme/lightbits/dhchap-key.new /etc/nvme/lightbits/dhchap-key)
+```
+then have the cluster admin set it in the other project, and only then disconnect the paths
+and cancel maintenance as above. `lbcli set trusted-host-secrets` takes the key only on its
+command line (`--host-secret`; it has no file or standard-input option), so keep it out of
+shell history and files, for example:
+```bash
+set +o history
+K="$(ssh root@<host> cat /etc/nvme/lightbits/dhchap-key)"
+lbcli set trusted-host-secrets --project-name=<other project> --name=<trusted host> --host-secret="$K"
+unset K; set -o history
+```
+While that command runs, its arguments, the key included, are visible to other users of
+that machine (`ps`), so run it where only cluster admins can log in. The key is one per
 host, shared by all its pools; a cluster whose paths were not disconnected keeps them on the
 old key, and they fail at their next reconnect once that cluster enforces authentication. Do not
 replace the key of a host that keeps running VMs while enforcement is on: its connected

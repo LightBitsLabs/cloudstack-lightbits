@@ -554,15 +554,17 @@ public class LightbitsHostListener implements HypervisorHostListener {
     private void sweepHostFromAcls(long hostId, String nqnValue) {
         for (org.apache.cloudstack.storage.datastore.db.StoragePoolVO pool : primaryDataStoreDao.findPoolsByProvider(
                 org.apache.cloudstack.storage.datastore.util.LightbitsUtil.PROVIDER_NAME)) {
-            // Renew the removal mark for each pool: the sweep has no overall deadline (a lock wait per
-            // pool, cluster calls), so the mark is kept fresh for as long as the removal runs.
+            // Renew the removal mark for each pool, and pruneHost renews it before each volume: the sweep
+            // has no overall deadline, so the mark is kept fresh for as long as the removal runs (one
+            // volume update, with its retries, takes far less than the mark's 30 min).
             markRemoving(hostId);
             try {
                 org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                         org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());
                 java.util.List<String> pruned = new java.util.ArrayList<>();
                 Runnable prune = () -> pruned.addAll(org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(
-                        cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, cfg.isIpAcl() ? ipResolver(pool.getId()) : null));
+                        cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, cfg.isIpAcl() ? ipResolver(pool.getId()) : null,
+                        () -> markRemoving(hostId)));
                 // With ipAcl, under the pool's IP ACL lock (inside the host's lock, as everywhere). The
                 // removal must not be held up: without the lock in time it removes the NQN only and
                 // leaves the IP ACLs as they are, since IPs resolved outside the lock may be stale. The
@@ -572,7 +574,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
                             + " its NQN only, the volumes' IP ACLs keep its address until their next attach, migration or"
                             + " host connect", pool.getName(), IP_ACL_LOCK_SECONDS, hostId);
                     pruned.addAll(org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(
-                            cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, null));
+                            cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, null, () -> markRemoving(hostId)));
                 } else if (!cfg.isIpAcl()) {
                     prune.run();
                 }
