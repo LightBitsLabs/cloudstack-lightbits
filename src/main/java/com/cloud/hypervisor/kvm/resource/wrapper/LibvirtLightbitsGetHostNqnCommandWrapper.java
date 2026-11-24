@@ -70,6 +70,7 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
                 answer = new LightbitsGetHostNqnAnswer(command, nqn, ips).withDataIpsPartial(!failed.isEmpty());
             }
             if (command.isInbandAuth()) {
+                answer.withKeyScope(command.getKeyScope());   // tells the management server the keys are this scope's
                 if (command.isRotateKeys()) {
                     try {
                         rotateKeys(command.getKeyScope());

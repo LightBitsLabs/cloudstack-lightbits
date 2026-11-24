@@ -90,7 +90,10 @@ public class LightbitsHostListener implements HypervisorHostListener {
         // connectPhysicalDisk can resolve it. Managed, per-volume NVMe/TCP: no pool mount.
         // The agent gets the cluster's NVMe discovery endpoints with the pool, and nothing
         // else: no credentials ever travel to a hypervisor.
-        ModifyStoragePoolCommand cmd = new ModifyStoragePoolCommand(true, pool, discoveryDetails(poolId));
+        // The key scope is read once for the whole connect: the pool registration on the agent,
+        // the key request and the propagation to other pools all use the same one.
+        String scope = inbandKeyScope(poolId);
+        ModifyStoragePoolCommand cmd = new ModifyStoragePoolCommand(true, pool, discoveryDetails(poolId, scope));
         Answer answer = agentMgr.easySend(hostId, cmd);
         if (answer == null || !answer.getResult()) {
             String detail = answer == null ? "no answer" : answer.getDetails();
@@ -111,12 +114,18 @@ public class LightbitsHostListener implements HypervisorHostListener {
         // A removal mark is never cleared here: it counts while a removal can be active and then
         // expires on its own (LightbitsHostGate.MARK_HOLD_MILLIS), so no connect can drop the mark
         // of an active removal, and an abandoned one does not undo this connect's registration.
-        ensureHostDetails(hostId, poolId);
+        ensureHostDetails(hostId, poolId, scope);
         retryRevocations(poolId);
         return true;
     }
 
-    private java.util.Map<String, String> discoveryDetails(long poolId) {
+    /** The pool's key scope when it has inbandAuth on, else null (no cluster read). */
+    private String inbandKeyScope(long poolId) {
+        org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
+        return cfg != null && cfg.isInbandAuth() ? keyScope(poolId) : null;
+    }
+
+    private java.util.Map<String, String> discoveryDetails(long poolId, String scope) {
         java.util.Map<String, String> out = new java.util.HashMap<>();
         out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_PLUGIN_VERSION,
                 org.apache.cloudstack.storage.datastore.util.LightbitsVersion.version());
@@ -128,7 +137,6 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     String.join(",", cfg.discoveryEndpoints()));
             if (cfg.isInbandAuth()) {
                 out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true");
-                String scope = keyScope(poolId);
                 if (scope != null) {
                     out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE, scope);
                 }
@@ -153,12 +161,12 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * With the pool option ipAcl the agent is asked on every connect, also for its data IPs
      * toward the pool's cluster (see {@link #recordDataIps}).
      */
-    private void ensureHostDetails(long hostId, long poolId) {
+    private void ensureHostDetails(long hostId, long poolId, String scope) {
         org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
         boolean wantIps = cfg != null && cfg.isIpAcl();
         boolean wantAuth = cfg != null && cfg.isInbandAuth();
         if (!wantIps && !wantAuth) {
-            ensureHostDetails(hostId, poolId, cfg, false, false);
+            ensureHostDetails(hostId, poolId, cfg, false, false, scope);
             return;
         }
         // The agent's report (data IPs, key) and what is done with it (stored IPs and IP ACLs,
@@ -167,11 +175,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
         // last, so an older report cannot overwrite a newer one. Without the lock in time this
         // connect only records the host NQN, and the next connect reports again.
         if (!hostGateLocker.run(reportLockName(hostId), REPORT_LOCK_SECONDS,
-                () -> ensureHostDetails(hostId, poolId, cfg, wantIps, wantAuth))) {
+                () -> ensureHostDetails(hostId, poolId, cfg, wantIps, wantAuth, scope))) {
             LOG.warn("Lightbits: the report lock of host {} was busy for {} s; its {} for pool {} are recorded at its next"
                     + " connect", hostId, REPORT_LOCK_SECONDS,
                     wantIps && wantAuth ? "data IPs and in-band key" : wantIps ? "data IPs" : "in-band key", poolId);
-            ensureHostDetails(hostId, poolId, cfg, false, false);
+            ensureHostDetails(hostId, poolId, cfg, false, false, scope);
         }
     }
 
@@ -182,7 +190,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
     }
 
     private void ensureHostDetails(long hostId, long poolId, org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg,
-                                   boolean wantIps, boolean wantAuth) {
+                                   boolean wantIps, boolean wantAuth, String scope) {
         String key = LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL;
         DetailVO existing = hostDetailsDao.findDetail(hostId, key);
         boolean hasNqn = existing != null && existing.getValue() != null && !existing.getValue().isBlank();
@@ -204,12 +212,15 @@ public class LightbitsHostListener implements HypervisorHostListener {
         }
         // the other pools' generations as they are before the keys are made: a raise after this
         // read then costs at most one more rotation, never a skipped one
-        java.util.Map<Long, Integer> otherGenerations = rotate ? otherPoolGenerations(hostId, poolId) : java.util.Map.of();
+        java.util.Map<Long, Integer> otherGenerations = rotate ? otherPoolGenerations(hostId, poolId, scope, false) : java.util.Map.of();
+        // the same for every in-band pool of the host, for an agent that turns out to know no scopes
+        java.util.Map<Long, Integer> allGenerations = rotate && scope != null
+                ? otherPoolGenerations(hostId, poolId, null, true) : otherGenerations;
         // a rotation also asks for the controller key: the new keys go to every pool of the host,
         // two-way ones included
         Answer answer = agentMgr.easySend(hostId, new LightbitsGetHostNqnCommand(wantIps ? cfg.discoveryEndpoints() : null, wantAuth,
                 wantAuth && (cfg.isInbandAuthTwoWay() || rotate)).withRotateKeys(rotate)
-                .withKeyScope(wantAuth ? keyScope(poolId) : null));
+                .withKeyScope(wantAuth ? scope : null));
         boolean rotated = false;
         if (rotate && answer instanceof LightbitsGetHostNqnAnswer && answer.getResult()) {
             rotated = recordRotation(hostId, poolId, cfg.getInbandKeyGeneration(), (LightbitsGetHostNqnAnswer) answer);
@@ -239,9 +250,18 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 if (hasNqn && !existing.getValue().trim().equals(nqn.trim())) {
                     refuseMismatchedNqn(hostId, poolId, existing.getValue(), nqn);
                 } else {
-                    registerTrustedHost(hostId, poolId, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
+                    LightbitsGetHostNqnAnswer report = (LightbitsGetHostNqnAnswer) answer;
+                    String hostNqn = hasNqn ? existing.getValue() : nqn;
+                    registerTrustedHost(hostId, poolId, hostNqn, report);
+                    // An agent that does not know scopes answers without one: its keys are host-wide and
+                    // shared by every in-band pool of the host, whatever cluster each is on.
+                    boolean hostWide = scope != null && report.getKeyScope() == null;
                     if (rotated) {
-                        registerWithOtherPools(hostId, otherGenerations, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
+                        registerWithOtherPools(hostId, hostWide ? allGenerations : otherGenerations, hostNqn, report);
+                    } else if (report.getDhchapKey() != null) {
+                        // the keys changed without a rotation (files replaced on the host): the other
+                        // pools of the same keys still hold the old ones, so register them again
+                        registerWhereKeysChanged(hostId, poolId, hostWide ? null : scope, hostWide, hostNqn, report);
                     }
                 }
             }
@@ -646,9 +666,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
     static final String KEY_SCOPE_DETAIL = "lightbits.subsystemnqn";
 
     /** The key generation of every other inbandAuth Lightbits pool of the host on the same cluster, by pool id. */
-    private java.util.Map<Long, Integer> otherPoolGenerations(long hostId, long rotatingPoolId) {
+    private java.util.Map<Long, Integer> otherPoolGenerations(long hostId, long rotatingPoolId, String scope, boolean anyScope) {
         java.util.Map<Long, Integer> out = new java.util.LinkedHashMap<>();
-        String scope = keyScope(rotatingPoolId);
         for (StoragePoolHostVO ref : storagePoolHostDao.listByHostId(hostId)) {
             long other = ref.getPoolId();
             if (other == rotatingPoolId) {
@@ -660,11 +679,41 @@ public class LightbitsHostListener implements HypervisorHostListener {
             }
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig c = poolConfigOrNull(other);
             // only pools of the same cluster share the rotated keys; other clusters keep theirs
-            if (c != null && c.isInbandAuth() && java.util.Objects.equals(scope, keyScope(other))) {
+            // the other pool's kept scope, not a fresh cluster read: the scope its agent was given
+            if (c != null && c.isInbandAuth() && (anyScope || java.util.Objects.equals(scope, keptScope(other)))) {
                 out.put(other, c.getInbandKeyGeneration());
             }
         }
         return out;
+    }
+
+    /** The pool's key scope as kept, without reading the cluster; null when not known yet. */
+    private String keptScope(long poolId) {
+        String kept = storagePoolDetailsDao.listDetailsKeyPairs(poolId).get(KEY_SCOPE_DETAIL);
+        return kept == null || kept.isBlank() ? null : kept.trim();
+    }
+
+    /**
+     * Register the host again with each other in-band pool of the same keys whose recorded
+     * current key (or controller key) differs from the one just reported, so their readiness
+     * follows the keys the host now has.
+     */
+    private void registerWhereKeysChanged(long hostId, long poolId, String scope, boolean anyScope, String nqn,
+                                          LightbitsGetHostNqnAnswer answer) {
+        String fp = LightbitsTrustedHosts.fingerprint(answer.getDhchapKey());
+        String ctrlFp = answer.getDhchapCtrlKey() == null ? null : LightbitsTrustedHosts.fingerprint(answer.getDhchapCtrlKey());
+        for (Long other : otherPoolGenerations(hostId, poolId, scope, anyScope).keySet()) {
+            org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig c = poolConfigOrNull(other);
+            if (c != null && c.isInbandAuthTwoWay() && ctrlFp == null) {
+                continue;   // this report has no controller key: the pool's own connect registers it
+            }
+            String known = value(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other));
+            String knownCtrl = value(hostId, LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, other));
+            if (known != null && !known.equals(fp) || ctrlFp != null && knownCtrl != null && !knownCtrl.equals(ctrlFp)) {
+                LOG.info("Lightbits: host {} has new in-band keys; registering them with pool {} too", hostId, other);
+                registerTrustedHost(hostId, other, nqn, answer);
+            }
+        }
     }
 
     private void registerWithOtherPools(long hostId, java.util.Map<Long, Integer> generations, String nqn,

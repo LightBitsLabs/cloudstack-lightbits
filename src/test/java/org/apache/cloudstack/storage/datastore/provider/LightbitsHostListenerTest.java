@@ -654,4 +654,32 @@ class LightbitsHostListenerTest {
         assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)),
                 "a host records its NQN under the NQN's lock");
     }
+
+    @Test
+    void theKeyScopeIsReadOnceForTheWholeConnect() {
+        String sub = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+        wm.stubFor(get(urlEqualTo("/api/v2/clusterinfo")).inScenario("ci").whenScenarioStateIs(
+                com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED).willSetStateTo("up")
+                .willReturn(aResponse().withStatus(400).withBody("{}")));
+        wm.stubFor(get(urlEqualTo("/api/v2/clusterinfo")).inScenario("ci").whenScenarioStateIs("up")
+                .willReturn(aResponse().withStatus(200).withBody("{\"UUID\":\"c1\",\"subsystemNQN\":\"" + sub + "\"}")));
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        listener.hostConnect(HOST, POOL);
+        ModifyStoragePoolCommand modify = (ModifyStoragePoolCommand) sent.get(0);
+        assertNull(modify.getDetails().get(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE));
+        assertNull(nqnCommands().get(0).getKeyScope(), "the key request uses the scope the pool registration got");
+        wm.verify(1, getRequestedFor(urlEqualTo("/api/v2/clusterinfo")));
+    }
+
+    @Test
+    void newKeysAreRegisteredWithTheOtherPoolsOfTheSameKeys() throws Exception {
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        long other = POOL + 1;
+        refs.add(new StoragePoolHostVO(other, HOST, ""));
+        putDetail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other), "fingerprint-of-old-key");
+        listener.hostConnect(HOST, POOL);
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY),
+                detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other)),
+                "the other pool's record follows the host's new key");
+    }
 }
