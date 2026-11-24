@@ -46,9 +46,9 @@ public final class LightbitsHostGate {
     static final int GRANT_LOCK_SECONDS = 120;
     public static final int REMOVAL_LOCK_SECONDS = 600;
     /**
-     * How long a removal mark stays in force against a host connect: longer than a removal can
-     * take (its lock wait plus the sweep), so a connect during an active removal cannot clear it,
-     * while the mark of a removal that did not go through is cleared at a later connect.
+     * How long a removal mark counts: longer than a removal can take (its lock wait plus the
+     * sweep), so it holds for the whole of an active removal, while the mark of a removal that
+     * did not go through stops counting on its own.
      */
     public static final long MARK_HOLD_MILLIS = 30L * 60 * 1000;
 
@@ -85,7 +85,21 @@ public final class LightbitsHostGate {
      * the removal listeners have run, so the mark alone stops answering after the removal).
      */
     public static RemovingCheck removingCheck(com.cloud.host.dao.HostDetailsDao dao, String nqnDetail) {
-        return hostId -> dao.findDetail(hostId, REMOVING_DETAIL) != null || dao.findDetail(hostId, nqnDetail) == null;
+        return removingCheck(dao, nqnDetail, System::currentTimeMillis);
+    }
+
+    /**
+     * {@link #removingCheck(com.cloud.host.dao.HostDetailsDao, String)} with a clock. The mark
+     * counts only while it is younger than {@link #MARK_HOLD_MILLIS}: a mark is never deleted
+     * by a host connect (a read-then-delete could remove a mark a new removal just renewed), it
+     * simply stops counting once a removal that did not go through is long over.
+     */
+    static RemovingCheck removingCheck(com.cloud.host.dao.HostDetailsDao dao, String nqnDetail,
+                                       java.util.function.LongSupplier clock) {
+        return hostId -> {
+            com.cloud.host.DetailVO mark = dao.findDetail(hostId, REMOVING_DETAIL);
+            return mark != null && !markExpired(mark.getValue(), clock.getAsLong()) || dao.findDetail(hostId, nqnDetail) == null;
+        };
     }
 
     /** The removal mark's value: when the removal began (epoch milliseconds). */
@@ -94,11 +108,11 @@ public final class LightbitsHostGate {
     }
 
     /**
-     * Whether a host connect may clear a removal mark: only once it is older than
-     * {@link #MARK_HOLD_MILLIS}. A mark from an earlier version ("true") has no time and may be
-     * cleared, as before.
+     * Whether a removal mark no longer counts: once it is older than {@link #MARK_HOLD_MILLIS}.
+     * A mark from an earlier version ("true") has no time and does not count (that version
+     * cleared it at the host's next connect).
      */
-    public static boolean markClearable(String value, long nowMillis) {
+    public static boolean markExpired(String value, long nowMillis) {
         long since;
         try {
             since = Long.parseLong(value == null ? "" : value.trim());

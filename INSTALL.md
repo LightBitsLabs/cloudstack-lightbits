@@ -372,10 +372,11 @@ this order:
    including pools of other projects and other CloudStack environments), and every client
    outside CloudStack, which needs its own trusted host and key. A pool whose hosts are
    already trusted hosts of another project cannot register them and reports them NOT
-   ready; for those hosts the cluster admin checks the other project's trusted hosts
-   (`lbcli list trusted-hosts --project-name=<other project>`): each must hold the host's
-   current key (the key in `/etc/nvme/lightbits/dhchap-key` on the host) and have
-   `authRequired=true`. Then the cluster admin turns enforcement on: `lbcli enable in-band-auth`.
+   ready; for those hosts the cluster admin checks the other project's trusted hosts: find
+   the host's entry with `lbcli list trusted-hosts --project-name=<other project>` (it must
+   have `authRequired=true`), then compare the `hostSecret` of
+   `lbcli get trusted-host-secrets --project-name=<other project> --name=<trusted host>`
+   with the key in `/etc/nvme/lightbits/dhchap-key` on the host: they must be equal. Then the cluster admin turns enforcement on: `lbcli enable in-band-auth`.
 
 A path that fails authentication shows in the host's kernel log, and nvme-cli reports
 "could not add new controller: pre-shared TLS key is missing" for a host with no key (the
@@ -386,7 +387,12 @@ To rotate a host's key, put the host in maintenance (its VMs migrate away), dele
 `/etc/nvme/lightbits/dhchap-key`, disconnect it from the subsystem of **every** Lightbits
 cluster it uses (as in step 4, one `nvme disconnect -n` per `nqn.2016-01.com.lightbitslabs:`
 entry of `nvme list-subsys`) and cancel maintenance: a new key is made and registered with
-every `inbandAuth=true` pool the host is in, and the new paths hold it. The key is one per
+every `inbandAuth=true` pool the host is in, and the new paths hold it. A host whose trusted
+host belongs to another project (step 5) is not updated by the plugin: before cancelling
+maintenance, the cluster admin sets the new key there,
+`lbcli set trusted-host-secrets --project-name=<other project> --name=<trusted host>
+--host-secret=<new key>`, with the new key read from `/etc/nvme/lightbits/dhchap-key` on the
+host (handle it as a secret: it shows on that command line). The key is one per
 host, shared by all its pools; a cluster whose paths were not disconnected keeps them on the
 old key, and they fail at their next reconnect once that cluster enforces authentication. Do not
 replace the key of a host that keeps running VMs while enforcement is on: its connected

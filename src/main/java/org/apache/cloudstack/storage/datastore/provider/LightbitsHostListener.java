@@ -108,10 +108,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
             LOG.info("Lightbits pool {} registered on host {}", poolId, hostId);
         }
 
-        // An expired mark (a removal that did not go through) is cleared before registration, so
-        // the post-registration removal check does not undo this connect's registration; a mark of
-        // an active removal is kept and that check still applies.
-        clearRemovingMark(hostId);
+        // A removal mark is never cleared here: it counts while a removal can be active and then
+        // expires on its own (LightbitsHostGate.MARK_HOLD_MILLIS), so no connect can drop the mark
+        // of an active removal, and an abandoned one does not undo this connect's registration.
         ensureHostDetails(hostId, poolId);
         return true;
     }
@@ -505,26 +504,6 @@ public class LightbitsHostListener implements HypervisorHostListener {
     private boolean removing(long hostId) {
         return org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.removingCheck(hostDetailsDao,
                 LightbitsPrimaryDataStoreDriver.HOST_NQN_DETAIL).isRemoving(hostId);
-    }
-
-    /**
-     * A host that connects after its removal mark has expired is not being removed (a removal that
-     * did not go through): clear the mark. A younger mark is kept, so a connect during an active
-     * removal cannot clear it under the removal's feet (see LightbitsHostGate.MARK_HOLD_MILLIS).
-     */
-    private void clearRemovingMark(long hostId) {
-        DetailVO mark = hostDetailsDao.findDetail(hostId, org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.REMOVING_DETAIL);
-        if (mark == null) {
-            return;
-        }
-        if (org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.markClearable(mark.getValue(), System.currentTimeMillis())) {
-            hostDetailsDao.remove(mark.getId());
-            LOG.info("Lightbits: host {} connected again; cleared its removal mark", hostId);
-        } else {
-            LOG.warn("Lightbits: host {} connected while its removal began less than {} min ago; its removal mark is kept"
-                    + " (grants and in-band registration stay refused until it expires)", hostId,
-                    org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.MARK_HOLD_MILLIS / 60000);
-        }
     }
 
     @Override

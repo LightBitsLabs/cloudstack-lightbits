@@ -168,9 +168,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   elsewhere. Their volumes still work, because every pool registers the same per-host key.
   Such a pool reports those hosts NOT ready; before enforcement the cluster admin checks the
   other project's trusted hosts as INSTALL.md, step 5, describes.
-- A host connect within 30 minutes of a removal of that host that did not go through keeps
-  the removal mark: the host's grants and in-band registration stay refused until a connect
-  after the mark expires.
+- After a removal of a host that did not go through, the host's grants and in-band
+  registration stay refused for 30 minutes from when the removal began (the removal mark
+  then expires on its own); a host connect after that registers it again.
 - With `inbandAuth=true`, a host whose agent is older than this plugin version reports no key
   and is not registered; the management log names it. Upgrade the agent on every host first.
 - With `inbandAuth=true`, a host that was already a trusted host of the project with
