@@ -501,12 +501,15 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 Runnable prune = () -> pruned.addAll(org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(
                         cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, cfg.isIpAcl() ? ipResolver(pool.getId()) : null));
                 // With ipAcl, under the pool's IP ACL lock (inside the host's lock, as everywhere). The
-                // removal must not be held up: without the lock in time it prunes anyway, and the next
-                // connect of a host whose IPs it got wrong puts them right.
+                // removal must not be held up: without the lock in time it removes the NQN only and
+                // leaves the IP ACLs as they are, since IPs resolved outside the lock may be stale. The
+                // removed host's address then stays until the next locked write of that volume's IP ACL.
                 if (cfg.isIpAcl() && !hostGateLocker.run(ipAclLockName(pool.getId()), IP_ACL_LOCK_SECONDS, prune)) {
-                    LOG.warn("Lightbits: the IP ACL lock of pool {} was busy for {} s while host {} is being removed; pruning"
-                            + " without it", pool.getName(), IP_ACL_LOCK_SECONDS, hostId);
-                    prune.run();
+                    LOG.warn("Lightbits: the IP ACL lock of pool {} was busy for {} s while host {} is being removed; removing"
+                            + " its NQN only, the volumes' IP ACLs keep its address until their next attach, migration or"
+                            + " host connect", pool.getName(), IP_ACL_LOCK_SECONDS, hostId);
+                    pruned.addAll(org.apache.cloudstack.storage.datastore.util.LightbitsAcl.pruneHost(
+                            cfg.newClient(), cfg.getEnvironment(), pool.getId(), nqnValue, null));
                 } else if (!cfg.isIpAcl()) {
                     prune.run();
                 }

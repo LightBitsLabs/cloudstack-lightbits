@@ -180,6 +180,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - With `ipAcl=true`, a host whose agent is older than this plugin version does not report its
   data IP and is refused access to the pool's volumes (the attach fails and names the
   host). Upgrade the agent on every host before turning the option on.
+- With `ipAcl=true`, removing a host while the pool's IP ACL lock stays busy for 120 s
+  takes its NQN out of the volume ACLs but leaves its address in their IP ACLs (addresses
+  read without the lock may be stale) until the volume's next attach, migration or host
+  connect; the management log says so. The NQN ACL still refuses the removed host.
 - Turning `ipAcl` off leaves the volumes' IP ACLs as they are (the plugin no longer changes
   them), so a volume then attached on another host is refused by the cluster. Before turning
   it off, have the cluster admin set `--ip-acl ALLOW_ANY` on the pool's volumes.
