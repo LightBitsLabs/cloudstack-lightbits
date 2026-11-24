@@ -667,4 +667,43 @@ class LightbitsNvmeHostTest {
         host.dropNewPathsWithoutCtrlKey(java.util.Set.of(), ctrl);
         host.requireTwoWayPaths("nvme3n1", ctrl);
     }
+
+    @Test
+    void aControllerNameReusedForANewKeyedPathIsNotTheRejectedOne() {
+        String ctrl = "DHHC-1:00:ctrl:";
+        sys.files.put("/sys/block/nvme3n1/device/subsysnqn", NQN);
+        java.util.Set<String> before = host.pathNames();
+        sys.controller("nvme4", "traddr=10.0.0.4,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme4/cntlid", "17");
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", "none");
+        sys.results.put("nvme disconnect -d nvme4", new LightbitsNvmeHost.Result(1, "failed"));
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        // the same controller showing the key later stays rejected
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", ctrl);
+        assertThrows(CloudRuntimeException.class, () -> host.requireTwoWayPaths("nvme3n1", ctrl));
+        // disconnected by hand; the next connect makes a new controller with the right key under the same name
+        sys.files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme4/"));
+        host.forgetVanishedRejections();
+        sys.controller("nvme4", "traddr=10.0.0.4,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme4/cntlid", "18");
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", ctrl);
+        host.requireTwoWayPaths("nvme3n1", ctrl);
+    }
+
+    @Test
+    void aReusedNameWithANewControllerIdIsNotRejectedEvenWithoutAPruneInBetween() {
+        String ctrl = "DHHC-1:00:ctrl:";
+        sys.files.put("/sys/block/nvme3n1/device/subsysnqn", NQN);
+        java.util.Set<String> before = host.pathNames();
+        sys.controller("nvme4", "traddr=10.0.0.4,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme4/cntlid", "17");
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", "none");
+        sys.results.put("nvme disconnect -d nvme4", new LightbitsNvmeHost.Result(1, "failed"));
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        sys.files.put("/sys/class/nvme/nvme4/cntlid", "18");
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", ctrl);
+        host.requireTwoWayPaths("nvme3n1", ctrl);
+        sys.files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme4/"));
+        host.forgetVanishedRejections();
+    }
 }
