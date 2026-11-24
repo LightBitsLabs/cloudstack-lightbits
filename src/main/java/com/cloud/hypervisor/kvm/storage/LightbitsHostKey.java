@@ -271,11 +271,24 @@ public class LightbitsHostKey {
             }
         }
         if (untrusted) {
+            // the clusters that had keys or marks here: after the cleanup each makes its own new keys,
+            // never copies of host-wide keys made again in the meantime
+            java.util.Set<String> scopes = new java.util.HashSet<>();
+            for (Path f : files) {
+                java.util.regex.Matcher m = SCOPED_FILE.matcher(f.getFileName().toString());
+                if (m.matches()) {
+                    scopes.add(m.group(1));
+                }
+            }
             for (Path f : files) {
                 if (Files.deleteIfExists(f)) {
                     LOG.warn("Lightbits: removed {}: a key, configuration or mark file was not a file owned by root, so new"
                             + " in-band authentication keys are made (register them by reconnecting the host)", f);
                 }
+            }
+            for (String sfx : scopes) {
+                Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
+                Files.move(tmp, dir.resolve("own-keys" + sfx), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             }
         } else if (wider) {
             // Making the files root-only again does not take back a copy someone made while they
@@ -316,6 +329,10 @@ public class LightbitsHostKey {
     }
 
     /** A key file name: host or controller key, host-wide or one cluster's (group 1: the suffix). */
+    /** A file of one cluster's keys: key, configuration, rotation or own-keys mark (group 1: the suffix). */
+    private static final Pattern SCOPED_FILE = Pattern.compile(
+            "(?:dhchap-(?:ctrl-)?key|auth|rotation-required|own-keys)(-[0-9a-f]{12})(?:\\.json)?");
+
     private static final Pattern KEY_FILE = Pattern.compile("dhchap-(?:ctrl-)?key(|-[0-9a-f]{12})");
 
     /** Marks a cluster whose keys were rotated at least once: they are no longer copied from the host-wide ones. */

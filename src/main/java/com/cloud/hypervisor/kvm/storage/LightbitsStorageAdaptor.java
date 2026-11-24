@@ -294,7 +294,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             // a connect that failed may still have made paths: they get the same check
             if (twoWay) {
                 try {
-                    nvme.dropNewPathsWithoutCtrlKey(before, keys(pool).ensureCtrlKey());
+                    nvme.dropNewPathsWithoutCtrlKey(before, keys(pool).ensureCtrlKey(), keyScope(pool));
                 } catch (RuntimeException cleanup) {
                     e.addSuppressed(cleanup);
                 }
@@ -302,7 +302,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             throw e;
         }
         if (twoWay) {
-            nvme.dropNewPathsWithoutCtrlKey(before, keys(pool).ensureCtrlKey());
+            nvme.dropNewPathsWithoutCtrlKey(before, keys(pool).ensureCtrlKey(), keyScope(pool));
         }
         return answered;
     }

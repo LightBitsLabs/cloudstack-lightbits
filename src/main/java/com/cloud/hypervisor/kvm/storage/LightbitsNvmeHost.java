@@ -561,6 +561,15 @@ class LightbitsNvmeHost {
      * were there before are left alone: they may carry volumes. Returns the controllers dropped.
      */
     List<String> dropNewPathsWithoutCtrlKey(java.util.Set<String> before, String currentCtrlKey) {
+        return dropNewPathsWithoutCtrlKey(before, currentCtrlKey, null);
+    }
+
+    /**
+     * As {@link #dropNewPathsWithoutCtrlKey(java.util.Set, String)}, limited to the paths of one
+     * subsystem when it is given: with keys per cluster, another cluster's paths hold another
+     * controller key and are that cluster's connects' business.
+     */
+    List<String> dropNewPathsWithoutCtrlKey(java.util.Set<String> before, String currentCtrlKey, String subsystem) {
         List<String> dropped = new ArrayList<>();
         // a rejected controller that is gone is forgotten (the name can be reused); one that cannot
         // be read is kept, and an unreadable listing fails the check
@@ -570,6 +579,12 @@ class LightbitsNvmeHost {
         }
         REJECTED.keySet().retainAll(new java.util.HashSet<>(listed));
         for (Path p : paths()) {
+            if (subsystem != null) {
+                String nqn = sys.read("/sys/class/nvme/" + p.controller + "/subsysnqn");
+                if (nqn != null && !subsystem.trim().equals(nqn.trim())) {
+                    continue;
+                }
+            }
             // a path an earlier connect rejected but could not disconnect stays rejected
             if (before.contains(p.controller) && !rejected(p.controller)) {
                 continue;

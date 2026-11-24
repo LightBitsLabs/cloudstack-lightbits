@@ -324,6 +324,21 @@ class LightbitsHostKeyTest {
     }
 
     @Test
+    void aClusterThatRotatedKeepsItsOwnKeysAfterAnUntrustedFileCleanup() throws IOException {
+        String hostWide = key.ensure();
+        LightbitsHostKey a = key.forScope(SUB);
+        a.ensure();
+        a.deleteKeys();   // cluster A rotated: its keys are its own from now on
+        a.ensure();
+        Path elsewhere = Files.writeString(tmp.resolve("planted.json"), LightbitsHostKey.config(NQN, HOST_ID, KNOWN));
+        Files.delete(key.configFile());
+        Files.createSymbolicLink(key.configFile(), elsewhere);
+        String newHostWide = key.ensure();   // the cleanup replaces every key, host-wide ones made again first
+        assertNotEquals(hostWide, newHostWide);
+        assertNotEquals(newHostWide, a.ensure(), "cluster A makes new keys of its own, not a copy of the new host-wide ones");
+    }
+
+    @Test
     void anExposureMarkCoversEveryClustersKeys() throws IOException {
         key.ensure();
         LightbitsHostKey a = key.forScope(SUB);

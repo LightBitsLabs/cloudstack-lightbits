@@ -724,4 +724,23 @@ class LightbitsNvmeHostTest {
         sys.files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme4/"));
         host.forgetVanishedRejections();
     }
+
+    @Test
+    void aClustersCleanupLeavesAnotherClustersRejectedPathAlone() {
+        String ctrlA = "DHHC-1:00:ctrlA:";
+        String ctrlB = "DHHC-1:00:ctrlB:";
+        String other = "nqn.2016-01.com.lightbitslabs:uuid:0b0b0b0b-1111-2222-3333-444444444444";
+        java.util.Set<String> before = host.pathNames();
+        sys.controller("nvme4", "traddr=10.0.0.4,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme4/cntlid", "21");
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", "none");
+        sys.results.put("nvme disconnect -d nvme4", new LightbitsNvmeHost.Result(1, "failed"));
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrlA, NQN));
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", ctrlA);
+        // cluster B's connect: nvme4 belongs to cluster A and is not checked against B's key
+        java.util.Set<String> beforeB = host.pathNames();
+        assertTrue(host.dropNewPathsWithoutCtrlKey(beforeB, ctrlB, other).isEmpty());
+        sys.files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme4/"));
+        host.forgetVanishedRejections();
+    }
 }
