@@ -219,6 +219,20 @@ class LightbitsAclTest {
     }
 
     @Test
+    void aRefreshWithAnotherHostsIpsUnknownAddsTheRefreshingHostsNewIps() {
+        // GONE moved to 10.0.0.9; STAYS has not reported: the union is unknown, so the refresh
+        // adds GONE's new address (keeping the old one) instead of leaving GONE out.
+        wm.stubFor(get(urlPathEqualTo(VOLUMES)).atPriority(5).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":["
+                + volIps("u1", NAME, "1", List.of(STAYS, GONE), List.of("10.0.0.1")) + "]}")));
+        stubOne("u1", NAME, List.of(STAYS, GONE), List.of("10.0.0.1"));
+        LightbitsAcl.IpResolver unknown = nqns -> LightbitsHostIps.union(nqns, n -> GONE.equals(n) ? List.of("10.0.0.9") : List.of());
+        assertEquals(List.of(NAME), LightbitsAcl.refreshIps(client, "cs1", 2, GONE, unknown, List.of("10.0.0.9")));
+        wm.verify(1, putRequestedFor(urlEqualTo(VOLUMES + "/u1"))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values.length()", equalTo("2")))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[1]", equalTo("10.0.0.9"))));
+    }
+
+    @Test
     void refreshIpsTouchesOnlyThisPoolsVolumesOfTheHost() {
         String other = "cs-cs1-p2-bbbbbbbb-2222-3333-4444-555555555555";
         String otherPool = "cs-cs1-p20-dddddddd-2222-3333-4444-555555555555";

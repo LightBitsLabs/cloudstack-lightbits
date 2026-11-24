@@ -713,12 +713,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         LightbitsApiClient client = clientFor(cfg);
         String name = LightbitsUtil.volumeName(cfg.getEnvironment(), poolId, dataObject.getUuid());
         org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ips = ipResolverFor(cfg, poolId);
-        List<String> hostIps = ips == null ? null
-                : org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.of(hostDetailsDao, host.getId(), poolId);
-        if (ips != null && hostIps.isEmpty()) {
-            throw new CloudRuntimeException("host " + host.getId() + " has not reported its data IPs for Lightbits pool " + poolId
-                    + ", which has ipAcl on; the cluster would refuse its connection. Upgrade the host's agent to this plugin"
-                    + " version and reconnect the host (see the management server log for the host's last report).");
+        if (ips != null) {
+            hostIpsOrFail(host.getId(), poolId);   // fail early, before any lock; read again under the locks
         }
         // Under the host's ACL lock, refused while the host is being removed: see LightbitsHostGate.
         org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.grant(host.getId(),
@@ -729,6 +725,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 hostGateLocker,
                 // With ipAcl, also under the pool's IP ACL lock (after the host lock), so a refresh of
                 // another host's data IPs cannot run between resolving the IPs and writing them.
+                // The granted host's own IPs are read here, under both locks, so a refresh of its data
+                // IPs (which takes the same locks) cannot replace them between the read and the write.
                 () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
                         () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
                             if (acl.contains(nqn)) {
@@ -736,7 +734,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                             }
                             acl.add(nqn);
                             return true;
-                        }, ips, hostIps)),
+                        }, ips, ips == null ? null : hostIpsOrFail(host.getId(), poolId))),
                 () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
                         () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips)));
         if (dataObject instanceof VolumeInfo) {
@@ -770,6 +768,17 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         org.apache.cloudstack.storage.datastore.util.LightbitsAcl.IpResolver ips = ipResolverFor(cfg, poolId);
         org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
                 () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips));
+    }
+
+    /** The host's data IPs for a pool with ipAcl; throws when it has reported none (the cluster would refuse it). */
+    List<String> hostIpsOrFail(long hostId, long poolId) {
+        List<String> hostIps = org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.of(hostDetailsDao, hostId, poolId);
+        if (hostIps.isEmpty()) {
+            throw new CloudRuntimeException("host " + hostId + " has not reported its data IPs for Lightbits pool " + poolId
+                    + ", which has ipAcl on; the cluster would refuse its connection. Upgrade the host's agent to this plugin"
+                    + " version and reconnect the host (see the management server log for the host's last report).");
+        }
+        return hostIps;
     }
 
     /** With the pool option ipAcl, the IP ACL of a volume follows its hosts' data IPs; else untouched. */
