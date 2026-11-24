@@ -558,6 +558,67 @@ class LightbitsApiClientTest {
         assertEquals(VOL_UUID, v.getUuid());
     }
 
+    // ---- labels, placement affinity, hybrid encryption ----
+
+    @Test
+    void createVolumeSendsLabelsPlacementAndUnencrypted() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        java.util.Map<String, String> labels = new java.util.LinkedHashMap<>();
+        labels.put("cloudstack-volume", "11111111-2222-3333-4444-555555555555");
+        labels.put("cloudstack-pool", "pool-uuid");
+        client.createVolume("cs-abc", 4294967296L, 3, null, false, null,
+                new VolumeExtras(labels, List.of("fd-a", "fd-b"), true));
+        wm.verify(postRequestedFor(urlEqualTo(VOLUMES))
+                .withRequestBody(matchingJsonPath("$.labels[0].key", equalTo("cloudstack-volume")))
+                .withRequestBody(matchingJsonPath("$.labels[0].value", equalTo("11111111-2222-3333-4444-555555555555")))
+                .withRequestBody(matchingJsonPath("$.labels[1].key", equalTo("cloudstack-pool")))
+                .withRequestBody(matchingJsonPath("$.placementRestrictions[0].operator", equalTo("In")))
+                // a multi-replica volume can only restrict its primary replica
+                .withRequestBody(matchingJsonPath("$.placementRestrictions[0].labelValueKeyPairs[0].key", equalTo("PrimaryFD")))
+                .withRequestBody(matchingJsonPath("$.placementRestrictions[0].labelValueKeyPairs[1].value", equalTo("fd-b")))
+                .withRequestBody(matchingJsonPath("$.unencrypted", equalTo("true"))));
+    }
+
+    @Test
+    void singleReplicaPlacementUsesFailureDomainKey() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        client.createVolume("cs-abc", 4294967296L, 1, null, false, null, new VolumeExtras(null, List.of("fd-a"), false));
+        wm.verify(postRequestedFor(urlEqualTo(VOLUMES))
+                .withRequestBody(matchingJsonPath("$.placementRestrictions[0].labelValueKeyPairs[0].key", equalTo("FD")))
+                .withRequestBody(matchingJsonPath("$.unencrypted", absent()))
+                .withRequestBody(matchingJsonPath("$.labels", absent())));
+    }
+
+    @Test
+    void createVolumeWithoutExtrasSendsNoneOfTheNewFields() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        client.createVolume("cs-abc", 4294967296L, 3, null, false, null);
+        wm.verify(postRequestedFor(urlEqualTo(VOLUMES))
+                .withRequestBody(matchingJsonPath("$.labels", absent()))
+                .withRequestBody(matchingJsonPath("$.placementRestrictions", absent()))
+                .withRequestBody(matchingJsonPath("$.unencrypted", absent())));
+    }
+
+    @Test
+    void cloneCarriesLabelsButNotPlacementOrEncryption() {
+        wm.stubFor(post(urlEqualTo(VOLUMES)).willReturn(aResponse().withStatus(200).withBody(volumeJson("Creating"))));
+        client.createVolumeFromSnapshot("cs-clone", "snap-1", 1073741824L, 3, null, false, null,
+                new VolumeExtras(java.util.Map.of("cloudstack-volume", "v1"), List.of("fd-a"), true));
+        wm.verify(postRequestedFor(urlEqualTo(VOLUMES))
+                .withRequestBody(matchingJsonPath("$.labels[0].value", equalTo("v1")))
+                .withRequestBody(matchingJsonPath("$.placementRestrictions", absent()))
+                .withRequestBody(matchingJsonPath("$.unencrypted", absent())));
+    }
+
+    @Test
+    void moreThanSixteenLabelsIsRejectedBeforeAnyRequest() {
+        java.util.Map<String, String> labels = new java.util.HashMap<>();
+        for (int i = 0; i < 17; i++) {
+            labels.put("k" + i, "v");
+        }
+        assertThrows(IllegalArgumentException.class, () -> new VolumeExtras(labels, List.of(), false));
+    }
+
     @Test
     void qosPolicyExistsMatchesByExactNameForProject() {
         wm.stubFor(get(urlPathEqualTo("/api/v2/policies"))

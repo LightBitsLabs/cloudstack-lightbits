@@ -29,6 +29,10 @@ Working today (KVM):
 - Volume snapshots: take / revert (native in-place rollback) / delete, and create-volume-from-snapshot
 - Volume resize (grow, offline — online resize of managed KVM disks is restricted by CloudStack itself)
 - Per-volume replica factor via the `lightbitsReplicas` offering detail
+- Per-offering compression (`lightbitsCompression`), failure-domain placement
+  (`lightbitsPlacement`) and unencrypted volumes on hybrid-encryption clusters
+  (`lightbitsUnencrypted`); every CloudStack volume carries labels naming the volume, its
+  account and the pool, and a cached template volume labels naming the template and the pool
 - Per-pool compression (`?compression=true`) and QoS policy (`?qosPolicy=<name>`, validated at
   registration), with a per-offering QoS override via the `lightbitsQosPolicy` offering detail
 - Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and

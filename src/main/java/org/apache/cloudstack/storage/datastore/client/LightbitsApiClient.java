@@ -384,6 +384,12 @@ public class LightbitsApiClient {
      * so a retried CloudStack job converges instead of failing.
      */
     public Volume createVolume(String name, long sizeBytes, int replicaCount, List<String> aclNqns, boolean compression, String qosPolicyName) {
+        return createVolume(name, sizeBytes, replicaCount, aclNqns, compression, qosPolicyName, VolumeExtras.NONE);
+    }
+
+    /** {@link #createVolume(String, long, int, List, boolean, String)} with labels, placement and encryption choices. */
+    public Volume createVolume(String name, long sizeBytes, int replicaCount, List<String> aclNqns, boolean compression,
+                               String qosPolicyName, VolumeExtras extras) {
         ObjectNode body = mapper.createObjectNode();
         body.put("name", name);
         body.put("size", String.valueOf(sizeBytes));
@@ -399,6 +405,7 @@ public class LightbitsApiClient {
         ObjectNode acl = body.putObject("acl");
         ArrayNode values = acl.putArray("values");
         (aclNqns == null || aclNqns.isEmpty() ? List.of("ALLOW_NONE") : aclNqns).forEach(values::add);
+        putExtras(body, replicaCount, extras);
         Volume created;
         boolean createdHere = true;
         try {
@@ -858,8 +865,43 @@ public class LightbitsApiClient {
         }
     }
 
+    /**
+     * Add labels, placement affinity and the hybrid-encryption flag to a create request.
+     * Placement uses key FD for a single-replica volume and PrimaryFD otherwise: those are the
+     * only keys the cluster accepts for each case.
+     */
+    private void putExtras(ObjectNode body, int replicaCount, VolumeExtras extras) {
+        if (extras == null) {
+            return;
+        }
+        if (!extras.getLabels().isEmpty()) {
+            ArrayNode labels = body.putArray("labels");
+            extras.getLabels().forEach((k, v) -> labels.addObject().put("key", k).put("value", v));
+        }
+        if (!extras.getFailureDomains().isEmpty()) {
+            ObjectNode expr = body.putArray("placementRestrictions").addObject();
+            expr.put("operator", "In");
+            ArrayNode pairs = expr.putArray("labelValueKeyPairs");
+            String key = replicaCount == 1 ? "FD" : "PrimaryFD";
+            extras.getFailureDomains().forEach(fd -> pairs.addObject().put("key", key).put("value", fd));
+        }
+        if (extras.isUnencrypted()) {
+            body.put("unencrypted", true);
+        }
+    }
+
     /** Create a volume cloned from a snapshot (template-from-snapshot / volume-from-snapshot). */
     public Volume createVolumeFromSnapshot(String name, String snapshotUuid, long sizeBytes, int replicaCount, List<String> aclNqns, boolean compression, String qosPolicyName) {
+        return createVolumeFromSnapshot(name, snapshotUuid, sizeBytes, replicaCount, aclNqns, compression, qosPolicyName,
+                VolumeExtras.NONE);
+    }
+
+    /**
+     * A clone with labels. Placement and encryption are not sent for a clone: it shares its
+     * source's data, so it follows the source's placement and encryption.
+     */
+    public Volume createVolumeFromSnapshot(String name, String snapshotUuid, long sizeBytes, int replicaCount, List<String> aclNqns,
+                                           boolean compression, String qosPolicyName, VolumeExtras extras) {
         ObjectNode body = mapper.createObjectNode();
         body.put("name", name);
         // LightOS requires an explicit size even when cloning; it must be >= the snapshot size.
@@ -875,6 +917,7 @@ public class LightbitsApiClient {
         }
         ArrayNode values = body.putObject("acl").putArray("values");
         (aclNqns == null || aclNqns.isEmpty() ? List.of("ALLOW_NONE") : aclNqns).forEach(values::add);
+        putExtras(body, replicaCount, extras == null ? null : extras.labelsOnly());
         Volume created;
         boolean createdHere = true;
         try {
