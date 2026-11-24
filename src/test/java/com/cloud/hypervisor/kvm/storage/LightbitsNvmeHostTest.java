@@ -579,6 +579,10 @@ class LightbitsNvmeHostTest {
         assertEquals(List.of("nvme3"), host.dropNewPathsWithoutCtrlKey(before, ctrl));
         assertTrue(sys.commands.contains("nvme disconnect -d nvme3"), sys.commands.toString());
         assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -d nvme1")), "an older path is left alone");
+
+        sys.results.put("nvme disconnect -d nvme3", new LightbitsNvmeHost.Result(1, "failed"));
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrl));
+        assertTrue(e.getMessage().contains("could not be disconnected"), e.getMessage());
     }
 
     @Test

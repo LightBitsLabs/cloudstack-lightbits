@@ -169,6 +169,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   sends no controller key and is registered one-way (the management log names it), and the
   connect reads the discovery log page first: an endpoint whose discovery does not answer is
   skipped for the next one, as for any connect.
+- Two-way: nvme-cli takes the controller key only from the configuration file, which is
+  written from the discovery log page just before `connect-all`. A data port the cluster starts
+  advertising in between is connected with the host key only; the plugin disconnects such a
+  path right after `connect-all` (and fails the connect if it cannot), so it exists without the
+  host checking the cluster for those seconds only.
 - The readiness count of paths without the current controller key covers all the host's
   Lightbits paths: a host that also uses a one-way pool on another cluster stays reported
   NOT ready for its two-way pool. Make every pool of such hosts two-way.

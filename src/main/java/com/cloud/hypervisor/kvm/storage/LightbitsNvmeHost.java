@@ -455,9 +455,13 @@ class LightbitsNvmeHost {
             String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_ctrl_secret");
             if (secret == null || !secret.trim().equals(currentCtrlKey)) {
                 Result r = sys.run(30_000, "nvme", "disconnect", "-d", p.controller);
+                if (!r.ok() || sys.exists("/sys/class/nvme/" + p.controller)) {
+                    throw new CloudRuntimeException("Lightbits: path " + p.controller + " (" + p.address + ") was made without this"
+                            + " host's controller key (two-way) and could not be disconnected (exit " + r.exit + ": " + r.output
+                            + "); disconnect it by hand (nvme disconnect -d " + p.controller + ")");
+                }
                 LOG.warn("Lightbits: dropped path {} ({}): it was made without this host's controller key, so the host would not"
-                        + " check the cluster on it (two-way); the next connect makes it again{}", p.controller, p.address,
-                        r.ok() ? "" : " (disconnect failed, exit " + r.exit + ": " + r.output + ")");
+                        + " check the cluster on it (two-way); the next connect makes it again", p.controller, p.address);
                 dropped.add(p.controller);
             }
         }
