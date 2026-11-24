@@ -326,7 +326,11 @@ the host side:
   Key files found readable by other users (copied in or made by hand with a wider mode) are
   made root-only again but may already have been copied: the host is then listed in the
   readiness line as needing a key rotation (see [Rotating the keys](#rotating-the-keys))
-  until it rotates.
+  until it rotates. Key or configuration files not owned by root, or symbolic links, are
+  deleted instead and new keys are made (the agent log says so); the host is not listed, but
+  must be reconnected (`cmk reconnect host id=<host-id>`) to register the new key, and its
+  paths that still hold the old key keep it until they reconnect, so move it onto keyed paths
+  as in the rollout below before enforcement is on.
 - On every host connect the agent sends the key to the management server over the agent
   channel. The management server registers the host as a trusted host of the pool's project
   (named `cs-<environment>-host-<host uuid>`, label `cloudstack-host`) with the key as its

@@ -185,8 +185,8 @@ public class LightbitsHostKey {
                         + " could read or replace this host's in-band authentication key. Remove the directory (a new key"
                         + " is made) and reconnect the host");
             }
-            wider = !DIR_MODE.containsAll(Files.getPosixFilePermissions(dir, LinkOption.NOFOLLOW_LINKS));
-            Files.setPosixFilePermissions(dir, DIR_MODE);
+            // The directory's own mode exposes no key: a file readable only by root stays so, and a
+            // file another user replaced through a writable directory is no longer root's (below).
         }
         java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), configFile(), ctrlKeyFile()));
         if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
@@ -199,30 +199,54 @@ public class LightbitsHostKey {
         for (Path f : files) {
             untrusted |= Files.isSymbolicLink(f) || Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS) && uid(f) != ownerUid;
         }
-        for (Path f : files) {
-            if (untrusted) {
+        if (!untrusted) {
+            for (Path f : files) {
+                if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
+                    wider |= groupOrOthers(Files.getPosixFilePermissions(f, LinkOption.NOFOLLOW_LINKS));
+                }
+            }
+        }
+        if (untrusted) {
+            for (Path f : files) {
                 if (Files.deleteIfExists(f)) {
                     LOG.warn("Lightbits: removed {}: the key or configuration file was not a file owned by root, so a new"
                             + " in-band authentication key is made (register it by reconnecting the host)", f);
                 }
-            } else if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
-                wider |= !FILE_MODE.containsAll(Files.getPosixFilePermissions(f, LinkOption.NOFOLLOW_LINKS));
-                Files.setPosixFilePermissions(f, FILE_MODE);
             }
-        }
-        if (untrusted) {
             Files.deleteIfExists(rotationMarker());   // the keys are new: nothing left to rotate
         } else if (wider && (Files.isRegularFile(keyFile(), LinkOption.NOFOLLOW_LINKS)
                 || Files.isRegularFile(ctrlKeyFile(), LinkOption.NOFOLLOW_LINKS)) && !keysPossiblyExposedUnlocked()) {
             // Making the files root-only again does not take back a copy someone made while they
             // were readable. Replacing the keys at once could break this host's live paths, so the
-            // keys stay until a rotation replaces them, and the host is reported until then.
+            // keys stay until a rotation replaces them, and the host is reported until then. The
+            // mark is written before the modes are tightened: if it cannot be written, the wide
+            // modes stay as the evidence and the next attempt tries again.
             Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
             Files.move(tmp, rotationMarker(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             LOG.warn("Lightbits: this host's in-band authentication key files were readable by other users than root;"
                     + " they are root-only again, but the keys may have been copied. Rotate them (INSTALL.md, \"Rotating"
                     + " the keys\")");
         }
+        if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            Files.setPosixFilePermissions(dir, DIR_MODE);
+        }
+        if (!untrusted) {
+            for (Path f : files) {
+                if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
+                    Files.setPosixFilePermissions(f, FILE_MODE);
+                }
+            }
+        }
+    }
+
+    /** True when the group or other users have any permission (owner bits do not expose a key). */
+    private static boolean groupOrOthers(Set<PosixFilePermission> perms) {
+        for (PosixFilePermission p : perms) {
+            if (p.name().startsWith("GROUP_") || p.name().startsWith("OTHERS_")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Marks keys that were readable by other users before {@link #restrict()} tightened them. */
