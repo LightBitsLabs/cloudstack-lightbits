@@ -167,16 +167,28 @@ public final class LightbitsRevocations {
         if (pending.isEmpty()) {
             return;
         }
+        // one pass waits at most RETRY_BUDGET_SECONDS for locks in all: the statistics poll and
+        // host connects run it, and records left over stay for the next pass
+        long deadline = System.currentTimeMillis() + RETRY_BUDGET_SECONDS * 1000L;
         for (String nqn : pending) {
+            long left = (deadline - System.currentTimeMillis()) / 1000L;
+            if (left <= 0) {
+                LOG.info("Lightbits: pending revocations on pool {} left for the next retry (this pass used its {} s)", poolId,
+                        RETRY_BUDGET_SECONDS);
+                return;
+            }
             // Under the NQN's lock, which a host takes to record this NQN as its own: a host added
             // back with it either is seen here (and the record dropped) or records it after the
             // revocation is done, so its own registration and grants come after and stay.
-            if (!locker.run(nqnLockName(nqn), NQN_LOCK_SECONDS,
+            if (!locker.run(nqnLockName(nqn), (int) Math.min(NQN_LOCK_SECONDS, left),
                     () -> retryOne(poolDetails, hostDetails, nqnDetail, poolId, cfg, client, nqn))) {
                 LOG.info("Lightbits: the lock of host NQN {} was busy; its pending revocation on pool {} is retried later", nqn, poolId);
             }
         }
     }
+
+    /** Seconds one retry pass of a pool may spend waiting for NQN locks, all records together. */
+    static final int RETRY_BUDGET_SECONDS = 60;
 
     /** Seconds a revocation retry or a host recording its NQN waits for the NQN's lock. */
     public static final int NQN_LOCK_SECONDS = 60;
@@ -191,6 +203,12 @@ public final class LightbitsRevocations {
         LightbitsHostGate.RemovingCheck removing = LightbitsHostGate.removingCheck(hostDetails, nqnDetail);
         for (DetailVO d : hostDetails.findByName(nqnDetail)) {
             if (d.getValue() != null && nqn.equals(d.getValue().trim()) && !removing.isRemoving(d.getHostId())) {
+                // Checked again right before the record is dropped: a removal of that host marks it
+                // before it writes its record (and waits for this lock), so a record a removal writes
+                // is never dropped by a retry that looked before the mark.
+                if (LightbitsHostGate.removingCheck(hostDetails, nqnDetail).isRemoving(d.getHostId())) {
+                    continue;
+                }
                 clear(poolDetails, poolId, nqn);
                 LOG.info("Lightbits: host NQN {} belongs to a CloudStack host again; dropped its pending revocation on pool {}",
                         nqn, poolId);
