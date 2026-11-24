@@ -137,4 +137,29 @@ public final class LightbitsUtil {
         }
         return java.util.List.copyOf(fds);
     }
+
+    /**
+     * The QoS policy for a requested max IOPS: among IOPS policies whose read and write
+     * limits are both set, the one with the lowest limit that still gives at least
+     * {@code maxIops} in each direction (ties by name). Unlimited policies never match: a max
+     * IOPS asks for a limit. Null when none fits.
+     */
+    public static String policyForIops(java.util.List<org.apache.cloudstack.storage.datastore.client.LightbitsApiClient.IopsPolicy> policies,
+                                       long maxIops) {
+        org.apache.cloudstack.storage.datastore.client.LightbitsApiClient.IopsPolicy best = null;
+        for (org.apache.cloudstack.storage.datastore.client.LightbitsApiClient.IopsPolicy p : policies) {
+            if (p.readIops <= 0 || p.writeIops <= 0) {
+                continue;
+            }
+            long limit = Math.min(p.readIops, p.writeIops);
+            if (limit < maxIops) {
+                continue;
+            }
+            long bestLimit = best == null ? Long.MAX_VALUE : Math.min(best.readIops, best.writeIops);
+            if (limit < bestLimit || (limit == bestLimit && p.name.compareTo(best.name) < 0)) {
+                best = p;
+            }
+        }
+        return best == null ? null : best.name;
+    }
 }

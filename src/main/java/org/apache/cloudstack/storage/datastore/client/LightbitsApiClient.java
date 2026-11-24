@@ -281,6 +281,52 @@ public class LightbitsApiClient {
         }
     }
 
+    /** An IOPS-type QoS policy: its name and per-direction limits (0 means no limit). */
+    public static final class IopsPolicy {
+        public final String name;
+        public final long readIops;
+        public final long writeIops;
+
+        public IopsPolicy(String name, long readIops, long writeIops) {
+            this.name = name;
+            this.readIops = readIops;
+            this.writeIops = writeIops;
+        }
+
+        @Override
+        public String toString() {
+            return name + " (read " + (readIops == 0 ? "unlimited" : readIops) + ", write "
+                    + (writeIops == 0 ? "unlimited" : writeIops) + " IOPS)";
+        }
+    }
+
+    /**
+     * The IOPS-limit QoS policies visible to this project ({@code GET /api/v2/policies}).
+     * Bandwidth and IOPS-per-GB policies are left out: they do not map to an IOPS figure. So is
+     * a policy in any state other than Active (for example Deprecated, which the cluster does
+     * not accept for new volumes); a policy without a state is kept.
+     */
+    public List<IopsPolicy> listIopsPolicies() {
+        Map<String, String> q = new HashMap<>();
+        q.put("projectName", project);
+        String resp = execute("GET", "/api/v2/policies" + query(q), null);
+        try {
+            List<IopsPolicy> out = new ArrayList<>();
+            for (JsonNode p : mapper.readTree(resp).path("policies")) {
+                JsonNode iops = p.path("QoSRateLimitPolicy").path("limitIOPS");
+                String name = p.path("name").asText(null);
+                String state = p.path("state").asText("");
+                if (name == null || iops.isMissingNode() || iops.isNull() || !(state.isEmpty() || "Active".equals(state))) {
+                    continue;
+                }
+                out.add(new IopsPolicy(name, iops.path("readIOPSLimit").asLong(0), iops.path("writeIOPSLimit").asLong(0)));
+            }
+            return out;
+        } catch (IOException e) {
+            throw new LightbitsApiException(Kind.UNKNOWN, "malformed policies list response", e);
+        }
+    }
+
     /**
      * Raw physical capacity aggregated across all cluster nodes, read from
      * {@code GET /api/v2/nodes} (which a project-scoped token is permitted to read, unlike
@@ -710,6 +756,45 @@ public class LightbitsApiClient {
         if (after.getSizeBytes() != newSizeBytes) {
             throw new LightbitsApiException(Kind.UNKNOWN, -1, "volume " + after.getName() + " (" + uuid
                     + ") reports " + after.getSizeBytes() + " bytes after a resize to " + newSizeBytes);
+        }
+    }
+
+    /**
+     * Change a volume's QoS policy by NAME ({@code PUT /projects/{p}/volumes/{uuid}} with
+     * {@code qosPolicyName}, the field lbcli's {@code update volume --qos-policy-name} sends),
+     * conditional on the revision it read, like {@link #resizeVolume}. Waits for the volume to
+     * settle and checks that it reports the new policy.
+     */
+    public void updateVolumeQosPolicy(String uuid, String qosPolicyName) {
+        if (qosPolicyName == null || qosPolicyName.isBlank()) {
+            throw new IllegalArgumentException("a QoS policy name is required");
+        }
+        Volume before = getVolume(uuid).orElseThrow(() -> new LightbitsApiException(Kind.NOT_FOUND, 404,
+                "volume " + uuid + " not found on the cluster"));
+        if (qosPolicyName.equals(before.getQosPolicyName())) {
+            return;
+        }
+        requireRevision(before.getEtag(), "QoS policy change of volume " + uuid);
+        ObjectNode body = mapper.createObjectNode();
+        body.put("qosPolicyName", qosPolicyName);
+        body.put("projectName", project);
+        try {
+            executeConditional("PUT", projectPath("volumes", uuid), body.toString(), before.getEtag());
+        } catch (LightbitsApiException e) {
+            if (e.getKind() != Kind.TRANSIENT) {
+                throw e;
+            }
+            // Sent, not confirmed; not replayed (see resizeVolume). The volume decides.
+            Volume now = getVolume(uuid).orElseThrow(() -> e);
+            if (before.getEtag().equals(now.getEtag()) || !qosPolicyName.equals(now.getQosPolicyName())) {
+                throw e;
+            }
+            LOG.warn("Lightbits: QoS policy change of {} was not confirmed ({}) but the volume shows it applied", uuid, e.getMessage());
+        }
+        Volume after = waitForVolume(uuid, before.getEtag());
+        if (!qosPolicyName.equals(after.getQosPolicyName())) {
+            throw new LightbitsApiException(Kind.UNKNOWN, -1, "volume " + after.getName() + " (" + uuid
+                    + ") reports QoS policy " + after.getQosPolicyName() + " after a change to " + qosPolicyName);
         }
     }
 

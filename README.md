@@ -35,6 +35,10 @@ Working today (KVM):
   account and the pool, and a cached template volume labels naming the template and the pool
 - Per-pool compression (`?compression=true`) and QoS policy (`?qosPolicy=<name>`, validated at
   registration), with a per-offering QoS override via the `lightbitsQosPolicy` offering detail
+  or, with the pool option `qosFromIops=true`, a policy picked from the offering's max IOPS.
+  A changed offering moves the volume to its policy at the next resize, attach, VM start or
+  migration; a failed change is logged and tried again at a later one (see INSTALL.md,
+  "QoS policy": until then the limit may be the old or the new one)
 - Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and
   cluster-side cleanup only ever touches the pool's own objects. Several pools can share one
   Lightbits project **operationally** (a per-pool volume-name prefix keeps names, stats, and

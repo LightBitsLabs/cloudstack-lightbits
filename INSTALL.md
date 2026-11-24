@@ -105,7 +105,7 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
 - **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required),
   `&fingerprint=<SHA-256 fingerprint>` (needed for a Lightbits cluster, see
   [TLS](#tls-verifying-the-cluster-certificate)) and optional
-  `&replicas=1..3&compression=true&qosPolicy=<name>&endpoints=<host[:port]>,...`
+  `&replicas=1..3&compression=true&qosPolicy=<name>&qosFromIops=true&endpoints=<host[:port]>,...`
 - **endpoints** — further API endpoints of the same cluster, comma-separated `host[:port]`
   (the port defaults to the pool's API port). List the other nodes so the storage keeps working
   when the node named in the URL is down. Read calls move to the next endpoint on a connection
@@ -214,6 +214,53 @@ CloudStack volume UUID), `cloudstack-account` (the owner account UUID) and `clou
 (the pool UUID); a cached template volume carries `cloudstack-template` and `cloudstack-pool`.
 They let a cluster admin see who owns a volume. Ownership for cleanup is still decided by the
 volume name, never by labels.
+
+**QoS policy.** A volume gets the QoS policy named by its offering's `lightbitsQosPolicy`
+detail, else the pool's `qosPolicy`, else the cluster's default. The plugin cannot create
+policies: a cluster admin creates them and makes them visible to the pool's project, for
+example `lbcli create qos-policy --name=gold --type iops --read-limit 20000 --write-limit 20000
+--projects <project>`. A policy name in an offering that the project cannot see fails the
+volume creation with the offering detail in the reason.
+
+**QoS from IOPS (pool option `qosFromIops=true`, off by default).** With it, an offering
+that sets a max IOPS (fixed, or customized by the user) and names no `lightbitsQosPolicy` gets
+the IOPS policy visible to the project with the lowest limit that still gives at least that max
+IOPS for reads and for writes (equal limits: the first by name). Unlimited policies,
+bandwidth or IOPS-per-GB policies, and policies whose state is not Active (for example
+Deprecated) are not candidates. If none fits, the volume creation fails and the error lists the IOPS policies the project can see. Min IOPS has no Lightbits
+equivalent and is not used. CloudStack keeps an offering's IOPS only when it is created
+with `customizediops=false miniops=<n> maxiops=<n>` (or `customizediops=true` for user-set
+IOPS). The cluster may round a policy's limits (on 3.22.1, 1000 was stored as 1024); the
+plugin compares against the stored limits. The cluster admin creates the steps, for example:
+
+```bash
+lbcli create qos-policy --name=iops-1k --type iops --read-limit 1000 --write-limit 1000 --projects <project>
+lbcli create qos-policy --name=iops-5k --type iops --read-limit 5000 --write-limit 5000 --projects <project>
+lbcli create qos-policy --name=iops-20k --type iops --read-limit 20000 --write-limit 20000 --projects <project>
+```
+
+When a volume moves to another offering (`cmk change offeringforvolume`) whose policy is
+different, the plugin moves the volume to that policy. CloudStack hands an offering change to
+the plugin only when the size or the IOPS change too; otherwise the new policy is applied at
+the volume's next attach (or its VM's next start or migration). An offering that names no
+policy, with no IOPS policy picked for it and no pool default (`qosPolicy`), leaves the
+volume on the policy it has; otherwise the volume moves to the policy those resolve to (for
+example, to the pool default). A failed change is logged ("could not change
+the QoS policy of volume ...") and tried again at the next attach or resize. When the
+plugin could not confirm the change (the cluster did not answer), the new policy may already
+be in effect; check it as shown below.
+
+**Operators: an offering change can leave the old limit in place.** Until one of the events
+above, the volume keeps running with its old QoS policy while CloudStack already shows the
+new offering. This matters most when moving a volume to a lower tier: it keeps the higher
+limit. To apply the new policy at once, use one of these:
+- detach the volume and attach it again (a data disk), or stop and start the VM (a root disk);
+- migrate the VM to another host;
+- change the offering together with a size increase (detached volume, since attached
+  volumes cannot be resized online).
+
+Check the policy the cluster applies with `lbcli get volume` (`qosPolicyName`) or in the
+management server log ("QoS policy changed from ... to ...").
 
 ## TLS: verifying the cluster certificate
 

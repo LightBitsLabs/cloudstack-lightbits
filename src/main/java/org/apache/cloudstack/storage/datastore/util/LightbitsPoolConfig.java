@@ -64,6 +64,8 @@ public class LightbitsPoolConfig {
      * other addresses than the management server reaches its API; by default the API hosts.
      */
     public static final String KEY_NVME_DISCOVERY = "nvmeDiscovery";
+    /** Pick the QoS policy from the offering's max IOPS when the offering names none (opt-in). */
+    public static final String KEY_QOS_FROM_IOPS = "qosFromIops";
     public static final int DISCOVERY_PORT = 8009;
     private static final int MAX_DETAIL_LENGTH = 255;
 
@@ -81,6 +83,7 @@ public class LightbitsPoolConfig {
     private final List<String> extraEndpoints; // host:port, never null
     private final List<String> fingerprints;   // normalized SHA-256, never null; empty = CA validation
     private List<String> nvmeDiscovery = List.of(); // host:port, empty = the API hosts
+    private boolean qosFromIops;
 
     public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
                                boolean compression, String qosPolicy, String jwt, String environment) {
@@ -168,6 +171,7 @@ public class LightbitsPoolConfig {
         LightbitsPoolConfig cfg = new LightbitsPoolConfig(host, port, project, replicas, compression, qos, jwt, environment,
                 parseEndpoints(decode(q.get("endpoints")), port), parseFingerprints(decode(q.get("fingerprint"))));
         cfg.nvmeDiscovery = List.copyOf(parseEndpoints(decode(q.get("discovery")), DISCOVERY_PORT));
+        cfg.qosFromIops = parseStrictBoolean(KEY_QOS_FROM_IOPS, q.get(KEY_QOS_FROM_IOPS));
         return cfg;
     }
 
@@ -259,6 +263,7 @@ public class LightbitsPoolConfig {
                 environment, parseEndpoints(details.get(KEY_API_ENDPOINTS), port),
                 parseFingerprints(details.get(KEY_TLS_FINGERPRINT)));
         cfg.nvmeDiscovery = List.copyOf(parseEndpoints(details.get(KEY_NVME_DISCOVERY), DISCOVERY_PORT));
+        cfg.qosFromIops = parseStrictBoolean(KEY_QOS_FROM_IOPS, details.get(KEY_QOS_FROM_IOPS));
         return cfg;
     }
 
@@ -279,6 +284,9 @@ public class LightbitsPoolConfig {
         }
         if (!fingerprints.isEmpty()) {
             d.put(KEY_TLS_FINGERPRINT, String.join(",", fingerprints));
+        }
+        if (qosFromIops) {
+            d.put(KEY_QOS_FROM_IOPS, "true");
         }
         if (!nvmeDiscovery.isEmpty()) {
             d.put(KEY_NVME_DISCOVERY, String.join(",", nvmeDiscovery));
@@ -394,6 +402,19 @@ public class LightbitsPoolConfig {
     public int getReplicaCount() { return replicaCount; }
     public boolean isCompression() { return compression; }
     public String getQosPolicy() { return qosPolicy; }
+    public boolean isQosFromIops() { return qosFromIops; }
+
+    /** Absent means false; anything but true or false is refused rather than read as false. */
+    private static boolean parseStrictBoolean(String key, String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String v = value.trim();
+        if (v.equalsIgnoreCase("true") || v.equalsIgnoreCase("false")) {
+            return Boolean.parseBoolean(v);
+        }
+        throw new IllegalArgumentException(key + " must be true or false (got '" + value + "')");
+    }
     public String getJwt() { return jwt; }
     public String getEnvironment() { return environment; }
     public List<String> getExtraEndpoints() { return extraEndpoints; }

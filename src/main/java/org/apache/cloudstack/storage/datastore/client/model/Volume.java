@@ -33,6 +33,7 @@ public class Volume {
     @JsonProperty("ETag")
     private String etag;
     private Statistics statistics;
+    private String qosPolicyName;
 
     /** Space accounting of a volume; the cluster sends the byte counts as decimal strings. */
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -87,6 +88,8 @@ public class Volume {
         return size == null ? 0L : Long.parseLong(size);
     }
 
+    public String getQosPolicyName() { return qosPolicyName; }
+    public void setQosPolicyName(String qosPolicyName) { this.qosPolicyName = qosPolicyName; }
     public String getUuid() { return uuid; }
     public void setUuid(String uuid) { this.uuid = uuid; }
     public String getName() { return name; }
