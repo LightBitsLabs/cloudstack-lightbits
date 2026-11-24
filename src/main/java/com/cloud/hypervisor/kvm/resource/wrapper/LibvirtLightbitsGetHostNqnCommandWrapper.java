@@ -61,12 +61,48 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
             if (!nqn.startsWith("nqn.")) {
                 return new LightbitsGetHostNqnAnswer(command, false, "unexpected host NQN '" + nqn + "'");
             }
-            return new LightbitsGetHostNqnAnswer(command, nqn,
+            LightbitsGetHostNqnAnswer answer = new LightbitsGetHostNqnAnswer(command, nqn,
                     command.getEndpoints() == null ? new java.util.ArrayList<>() : dataIps(command.getEndpoints()));
+            if (command.isInbandAuth()) {
+                inbandAuth(answer);
+            }
+            return answer;
         } catch (Exception e) {
             LOG.warn("Lightbits: failed to determine host NQN", e);
             return new LightbitsGetHostNqnAnswer(command, false, "failed to determine host NQN: " + e.getMessage());
         }
+    }
+
+    /**
+     * This host's in-band authentication key (made if missing) and how many of its Lightbits
+     * paths hold no key. A failure is reported in the answer, not as a failed command: the
+     * NQN and data IPs are still good.
+     */
+    void inbandAuth(LightbitsGetHostNqnAnswer answer) {
+        String key;
+        try {
+            key = hostKey().ensure();
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not prepare this host's in-band authentication key: {}", e.getMessage());
+            answer.withInbandAuth(null, null, e.getMessage());
+            return;
+        }
+        Integer keyless;
+        try {
+            keyless = keylessPaths();
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not count this host's NVMe/TCP paths without a key: {}", e.getMessage());
+            keyless = null;
+        }
+        answer.withInbandAuth(key, keyless, null);
+    }
+
+    protected com.cloud.hypervisor.kvm.storage.LightbitsHostKey hostKey() {
+        return new com.cloud.hypervisor.kvm.storage.LightbitsHostKey();
+    }
+
+    protected int keylessPaths() {
+        return com.cloud.hypervisor.kvm.storage.LightbitsHostKey.keylessPaths();
     }
 
     /**

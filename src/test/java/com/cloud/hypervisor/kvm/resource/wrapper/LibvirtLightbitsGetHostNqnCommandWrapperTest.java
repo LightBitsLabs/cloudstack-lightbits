@@ -155,4 +155,72 @@ class LibvirtLightbitsGetHostNqnCommandWrapperTest {
                 "10.19.31.20 dev ens785f0np0 src 10.19.31.17 uid 0 \\    cache "));
         assertEquals(null, LibvirtLightbitsGetHostNqnCommandWrapper.parseRouteSource("RTNETLINK answers: Network is unreachable"));
     }
+
+    // ---- in-band authentication ----
+
+    private LibvirtLightbitsGetHostNqnCommandWrapper authWrapper(java.util.function.Supplier<String> key) throws IOException {
+        LibvirtLightbitsGetHostNqnCommandWrapper base = wrapper(null);
+        Files.createDirectories(base.hostNqnPath().getParent());
+        Files.writeString(base.hostNqnPath(), NQN + "\n");
+        return new LibvirtLightbitsGetHostNqnCommandWrapper() {
+            @Override
+            protected Path hostNqnPath() {
+                return base.hostNqnPath();
+            }
+
+            @Override
+            protected com.cloud.hypervisor.kvm.storage.LightbitsHostKey hostKey() {
+                return new com.cloud.hypervisor.kvm.storage.LightbitsHostKey() {
+                    @Override
+                    public String ensure() {
+                        return key.get();
+                    }
+                };
+            }
+
+            @Override
+            protected int keylessPaths() {
+                return 2;
+            }
+        };
+    }
+
+    @Test
+    void theKeyIsReportedOnlyWhenAskedForAndNeverLogged() throws IOException {
+        String secret = "DHHC-1:00:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+KfiaR:";
+        LibvirtLightbitsGetHostNqnCommandWrapper w = authWrapper(() -> secret);
+
+        LightbitsGetHostNqnAnswer plain = (LightbitsGetHostNqnAnswer) w.execute(new LightbitsGetHostNqnCommand(), null);
+        assertNull(plain.getDhchapKey());
+        assertNull(plain.getKeylessPaths());
+
+        LightbitsGetHostNqnAnswer a = (LightbitsGetHostNqnAnswer) w.execute(new LightbitsGetHostNqnCommand(null, true), null);
+        assertTrue(a.getResult());
+        assertEquals(NQN, a.getHostNqn());
+        assertEquals(secret, a.getDhchapKey());
+        assertEquals(Integer.valueOf(2), a.getKeylessPaths());
+        assertNull(a.getInbandAuthError());
+
+        // CloudStack logs commands and answers through this exclusion strategy, at debug level
+        // or finer (below that it leaves the whole answer out); even at trace the key stays out
+        org.apache.logging.log4j.core.config.Configurator.setLevel("lightbits.test.commands", org.apache.logging.log4j.Level.TRACE);
+        String logged = new com.google.gson.GsonBuilder()
+                .setExclusionStrategies(new com.cloud.agent.transport.LoggingExclusionStrategy(
+                        org.apache.logging.log4j.LogManager.getLogger("lightbits.test.commands")))
+                .create().toJson(a);
+        assertTrue(logged.contains(NQN), logged);
+        assertTrue(!logged.contains("DHHC-1"), "the key is left out of the logged answer: " + logged);
+    }
+
+    @Test
+    void aKeyThatCannotBePreparedIsReportedButTheNqnStillAnswers() throws IOException {
+        LibvirtLightbitsGetHostNqnCommandWrapper w = authWrapper(() -> {
+            throw new com.cloud.utils.exception.CloudRuntimeException("disk full");
+        });
+        LightbitsGetHostNqnAnswer a = (LightbitsGetHostNqnAnswer) w.execute(new LightbitsGetHostNqnCommand(null, true), null);
+        assertTrue(a.getResult());
+        assertEquals(NQN, a.getHostNqn());
+        assertNull(a.getDhchapKey());
+        assertEquals("disk full", a.getInbandAuthError());
+    }
 }

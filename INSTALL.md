@@ -105,7 +105,7 @@ cmk create storagepool name=lightbits-primary provider=Lightbits scope=cluster \
 - **url** — `lightbits://<api-host>[:443]/<project>` with `?environment=<name>` (required),
   `&fingerprint=<SHA-256 fingerprint>` (needed for a Lightbits cluster, see
   [TLS](#tls-verifying-the-cluster-certificate)) and optional
-  `&replicas=1..3&compression=true&qosPolicy=<name>&qosFromIops=true&ipAcl=true&endpoints=<host[:port]>,...`
+  `&replicas=1..3&compression=true&qosPolicy=<name>&qosFromIops=true&ipAcl=true&inbandAuth=true&endpoints=<host[:port]>,...`
 - **endpoints** — further API endpoints of the same cluster, comma-separated `host[:port]`
   (the port defaults to the pool's API port). List the other nodes so the storage keeps working
   when the node named in the URL is down. Read calls move to the next endpoint on a connection
@@ -297,6 +297,66 @@ and a volume with `lbcli get volume` (`IPAcl`).
 To turn it off, first have the cluster admin set `lbcli update volume --ip-acl ALLOW_ANY` on
 the pool's volumes, then remove the detail: with the option off the plugin no longer changes
 IP ACLs, and a volume left with one host's address refuses every other host.
+
+### In-band authentication
+
+**Pool option `inbandAuth=true`, off by default.** With NVMe in-band authentication
+(DH-HMAC-CHAP) turned on, the cluster lets a host open an I/O path only when the host proves
+it holds the key registered for it as a trusted host. With `inbandAuth=true` the plugin does
+the host side:
+- Each KVM host makes its own key the first time it is needed and keeps it in
+  `/etc/nvme/lightbits/dhchap-key`, with an nvme-cli configuration file next to it
+  (`auth.json`); the directory is 0700 and both files 0600. The agent connects to the pool's
+  cluster with `nvme connect-all --config=/etc/nvme/lightbits/auth.json`, so the key never
+  appears on a command line. A cluster with in-band authentication off ignores the key.
+- On every host connect the agent sends the key to the management server over the agent
+  channel. The management server registers the host as a trusted host of the pool's project
+  (named `cs-<environment>-host-<host uuid>`, label `cloudstack-host`) with the key as its
+  host secret. It keeps only a fingerprint (host detail `lightbits.inband.<pool id>`) and
+  never logs the key. A host that is already a trusted host of the project under another
+  name gets its key set there.
+- Removing a host from CloudStack deletes the trusted host the plugin made for it.
+- The discovery service (port 8009) does not authenticate, so discovery is unchanged. The
+  authentication is one-way: the host does not check the cluster.
+
+Turning in-band authentication on is a cluster-wide switch that only a cluster admin can
+flip, and a host without a registered key loses each path at its next reconnect. Follow
+this order:
+1. The cluster admin turns on the feature flag: `lbcli enable feature-flag in-band-authentication`
+   (this only enables the trusted-host API; nothing is enforced yet).
+2. Upgrade the plugin on the management server and the agent on every host.
+3. Turn the option on, for a new pool in the URL (`&inbandAuth=true`) or on an existing one:
+   ```bash
+   cmk update storagepool id=<pool-id> details[0].inbandAuth=true
+   ```
+   then reconnect every host (`cmk reconnect host id=<host-id>`).
+4. Watch the management log. Each host connect logs either
+   `pool <id> is ready for in-band authentication` or `pool <id> is NOT ready`, with the
+   hosts that are not registered and those with NVMe/TCP paths made before the option was on
+   (they hold no key). Move each of those hosts onto keyed paths: put it in maintenance (its
+   VMs migrate away), disconnect it from the cluster's subsystem
+   (`nvme disconnect -n <subsystem NQN>`, the `nqn.2016-01.com.lightbitslabs:` entry of
+   `nvme list-subsys`), and cancel maintenance; its next connects use the key.
+5. When the log says the pool is ready, the cluster admin turns enforcement on:
+   `lbcli enable in-band-auth`.
+
+A path that fails authentication shows in the host's kernel log, and nvme-cli reports
+"could not add new controller: pre-shared TLS key is missing" for a host with no key (the
+wording is nvme-cli's, the cause is DH-HMAC-CHAP). Check a host's registration with
+`lbcli list trusted-hosts --project-name=<project>`.
+
+To rotate a host's key, delete `/etc/nvme/lightbits/dhchap-key` on the host and reconnect it
+in CloudStack: a new key is made and registered. Paths that are already connected keep the
+old key until they reconnect, so move the host onto new paths as in step 4.
+
+To turn the option off, the cluster admin first turns enforcement off
+(`lbcli disable in-band-auth`); then remove the detail. The trusted hosts stay on the
+cluster until the admin deletes them.
+
+A host NQN can be a trusted host in only one project of a cluster. If the host is already a
+trusted host of another project, the pool cannot change it and logs that the host is
+registered elsewhere; the host still connects, because every pool on the host uses the same
+key, as long as that registration holds it.
 
 ## TLS: verifying the cluster certificate
 

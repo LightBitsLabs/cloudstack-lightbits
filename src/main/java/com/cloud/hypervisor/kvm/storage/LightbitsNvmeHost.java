@@ -54,7 +54,7 @@ class LightbitsNvmeHost {
     static final int DEFAULT_DISCOVERY_PORT = 8009;
     private static final Pattern UUID = Pattern.compile("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}");
     private static final Pattern ENDPOINT = Pattern.compile("[A-Za-z0-9]([A-Za-z0-9.-]{0,252})(:[0-9]{1,5})?");
-    private static final long CONNECT_TIMEOUT_MS = 60_000;
+    static final long CONNECT_TIMEOUT_MS = 60_000;
     private static final Pattern SUBSYS_NQN = Pattern.compile("nqn\\.2016-01\\.com\\.lightbitslabs:[A-Za-z0-9:._-]{1,200}");
     private static final Pattern NAMESPACE_ENTRY = Pattern.compile("nvme[0-9]+(c[0-9]+)?n[0-9]+");
     private static final Pattern CONTROLLER_ENTRY = Pattern.compile("nvme[0-9]+");
@@ -183,6 +183,16 @@ class LightbitsNvmeHost {
      * so false is no proof that this pool's cluster is reachable.
      */
     boolean connect(List<String> endpoints, long endpointTimeoutMillis) {
+        return connect(endpoints, endpointTimeoutMillis, null);
+    }
+
+    /**
+     * {@link #connect(List, long)} with an nvme-cli configuration file ({@code --config}) that
+     * holds this host's in-band authentication key, or null to connect without a key. The
+     * discovery service itself does not authenticate; the key is used for the I/O paths, and a
+     * cluster with in-band authentication off ignores it.
+     */
+    boolean connect(List<String> endpoints, long endpointTimeoutMillis, java.nio.file.Path authConfig) {
         if (endpoints.isEmpty()) {
             throw new CloudRuntimeException("Lightbits: the storage pool has no NVMe discovery endpoint");
         }
@@ -196,8 +206,12 @@ class LightbitsNvmeHost {
         for (int i = 0; i < endpoints.size(); i++) {
             String endpoint = endpoints.get((start + i) % endpoints.size());
             int colon = endpoint.lastIndexOf(':');
-            Result r = sys.run(endpointTimeoutMillis, "nvme", "connect-all", "-t", "tcp",
-                    "-a", endpoint.substring(0, colon), "-s", endpoint.substring(colon + 1));
+            List<String> argv = new ArrayList<>(Arrays.asList("nvme", "connect-all", "-t", "tcp",
+                    "-a", endpoint.substring(0, colon), "-s", endpoint.substring(colon + 1)));
+            if (authConfig != null) {
+                argv.add("--config=" + authConfig);
+            }
+            Result r = sys.run(endpointTimeoutMillis, argv.toArray(new String[0]));
             if (r.ok()) {
                 if (!failures.isEmpty()) {
                     LOG.warn("Lightbits: NVMe discovery succeeded via {} after failing via {}; check those endpoints",
@@ -311,6 +325,22 @@ class LightbitsNvmeHost {
                     sys.read("/sys/class/nvme/" + ctrl + "/state")));
         }
         return out;
+    }
+
+    /**
+     * Lightbits paths that hold no in-band authentication key ({@code dhchap_secret} reads
+     * "none", or the kernel has no such attribute). Once the cluster turns in-band
+     * authentication on, such a path fails at its next reconnect.
+     */
+    int keylessPaths() {
+        int n = 0;
+        for (Path p : paths()) {
+            String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_secret");
+            if (secret == null || secret.isEmpty() || "none".equals(secret)) {
+                n++;
+            }
+        }
+        return n;
     }
 
     List<Path> livePaths() {

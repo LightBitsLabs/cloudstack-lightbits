@@ -67,6 +67,8 @@ public class LightbitsPoolConfig {
     /** Pick the QoS policy from the offering's max IOPS when the offering names none (opt-in). */
     public static final String KEY_QOS_FROM_IOPS = "qosFromIops";
     public static final String KEY_IP_ACL = "ipAcl";
+    /** Register the pool's hosts as trusted hosts and connect them with their DH-HMAC-CHAP keys (opt-in). */
+    public static final String KEY_INBAND_AUTH = "inbandAuth";
     public static final int DISCOVERY_PORT = 8009;
     private static final int MAX_DETAIL_LENGTH = 255;
 
@@ -86,6 +88,7 @@ public class LightbitsPoolConfig {
     private List<String> nvmeDiscovery = List.of(); // host:port, empty = the API hosts
     private boolean qosFromIops;
     private boolean ipAcl;
+    private boolean inbandAuth;
 
     public LightbitsPoolConfig(String apiHost, int apiPort, String project, int replicaCount,
                                boolean compression, String qosPolicy, String jwt, String environment) {
@@ -175,6 +178,7 @@ public class LightbitsPoolConfig {
         cfg.nvmeDiscovery = List.copyOf(parseEndpoints(decode(q.get("discovery")), DISCOVERY_PORT));
         cfg.qosFromIops = parseStrictBoolean(KEY_QOS_FROM_IOPS, q.get(KEY_QOS_FROM_IOPS));
         cfg.ipAcl = parseStrictBoolean(KEY_IP_ACL, q.get(KEY_IP_ACL));
+        cfg.inbandAuth = parseStrictBoolean(KEY_INBAND_AUTH, q.get(KEY_INBAND_AUTH));
         return cfg;
     }
 
@@ -268,6 +272,7 @@ public class LightbitsPoolConfig {
         cfg.nvmeDiscovery = List.copyOf(parseEndpoints(details.get(KEY_NVME_DISCOVERY), DISCOVERY_PORT));
         cfg.qosFromIops = parseStrictBoolean(KEY_QOS_FROM_IOPS, details.get(KEY_QOS_FROM_IOPS));
         cfg.ipAcl = parseStrictBoolean(KEY_IP_ACL, details.get(KEY_IP_ACL));
+        cfg.inbandAuth = parseStrictBoolean(KEY_INBAND_AUTH, details.get(KEY_INBAND_AUTH));
         return cfg;
     }
 
@@ -291,6 +296,9 @@ public class LightbitsPoolConfig {
         }
         if (ipAcl) {
             d.put(KEY_IP_ACL, "true");
+        }
+        if (inbandAuth) {
+            d.put(KEY_INBAND_AUTH, "true");
         }
         if (qosFromIops) {
             d.put(KEY_QOS_FROM_IOPS, "true");
@@ -412,6 +420,8 @@ public class LightbitsPoolConfig {
     public boolean isQosFromIops() { return qosFromIops; }
     /** Volume IP ACLs follow the data IPs of the hosts in the volume's NQN ACL. */
     public boolean isIpAcl() { return ipAcl; }
+    /** Hosts are registered as trusted hosts and connect with their in-band authentication keys. */
+    public boolean isInbandAuth() { return inbandAuth; }
 
     /** Absent means false; anything but true or false is refused rather than read as false. */
     private static boolean parseStrictBoolean(String key, String value) {

@@ -42,6 +42,9 @@ Working today (KVM):
 - Volume IP ACL (pool option `ipAcl=true`): each volume accepts connections only from the
   data IPs of the hosts it is granted to, on top of the host NQN ACL (see INSTALL.md,
   "Volume IP ACL")
+- NVMe in-band authentication (pool option `inbandAuth=true`): each host connects with its
+  own DH-HMAC-CHAP key, registered for it as a trusted host on the cluster; the key stays on
+  the host and is never logged (see INSTALL.md, "In-band authentication")
 - Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and
   cluster-side cleanup only ever touches the pool's own objects. Several pools can share one
   Lightbits project **operationally** (a per-pool volume-name prefix keeps names, stats, and

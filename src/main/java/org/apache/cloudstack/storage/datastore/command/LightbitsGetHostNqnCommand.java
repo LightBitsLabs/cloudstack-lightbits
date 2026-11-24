@@ -43,8 +43,23 @@ public class LightbitsGetHostNqnCommand extends Command {
         this.endpoints = endpoints == null ? null : new java.util.ArrayList<>(endpoints);
     }
 
+    /**
+     * When true the agent makes this host's in-band authentication key if it has none, and
+     * reports it with the number of Lightbits paths that hold no key. An older agent ignores it.
+     */
+    private boolean inbandAuth;
+
+    public LightbitsGetHostNqnCommand(java.util.List<String> endpoints, boolean inbandAuth) {
+        this(endpoints);
+        this.inbandAuth = inbandAuth;
+    }
+
     public java.util.List<String> getEndpoints() {
         return endpoints;
+    }
+
+    public boolean isInbandAuth() {
+        return inbandAuth;
     }
 
     @Override

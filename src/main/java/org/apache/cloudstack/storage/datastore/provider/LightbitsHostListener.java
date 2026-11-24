@@ -22,6 +22,9 @@ import org.apache.cloudstack.engine.subsystem.api.storage.HypervisorHostListener
 import org.apache.cloudstack.storage.datastore.command.LightbitsGetHostNqnAnswer;
 import org.apache.cloudstack.storage.datastore.command.LightbitsGetHostNqnCommand;
 import org.apache.cloudstack.storage.datastore.driver.LightbitsPrimaryDataStoreDriver;
+import org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig;
+import org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret;
+import org.apache.cloudstack.storage.datastore.util.LightbitsTrustedHosts;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -120,6 +123,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
                             storagePoolDetailsDao.listDetailsKeyPairs(poolId), null);
             out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY,
                     String.join(",", cfg.discoveryEndpoints()));
+            if (cfg.isInbandAuth()) {
+                out.put(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true");
+            }
         } catch (RuntimeException e) {
             // the agent falls back to the pool's host address on the discovery port
             LOG.warn("Lightbits: could not derive the NVMe discovery endpoints of pool {} ({}); the host will use"
@@ -143,12 +149,12 @@ public class LightbitsHostListener implements HypervisorHostListener {
         boolean hasNqn = existing != null && existing.getValue() != null && !existing.getValue().isBlank();
         org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
         boolean wantIps = cfg != null && cfg.isIpAcl();
-        if (hasNqn && !wantIps) {
+        boolean wantAuth = cfg != null && cfg.isInbandAuth();
+        if (hasNqn && !wantIps && !wantAuth) {
             LOG.debug("Lightbits: host {} already has '{}' = {}", hostId, key, existing.getValue());
             return;
         }
-        Answer answer = agentMgr.easySend(hostId, wantIps
-                ? new LightbitsGetHostNqnCommand(cfg.discoveryEndpoints()) : new LightbitsGetHostNqnCommand());
+        Answer answer = agentMgr.easySend(hostId, new LightbitsGetHostNqnCommand(wantIps ? cfg.discoveryEndpoints() : null, wantAuth));
         if (answer instanceof LightbitsGetHostNqnAnswer && answer.getResult()
                 && ((LightbitsGetHostNqnAnswer) answer).getHostNqn() != null) {
             String nqn = ((LightbitsGetHostNqnAnswer) answer).getHostNqn();
@@ -159,11 +165,16 @@ public class LightbitsHostListener implements HypervisorHostListener {
             if (wantIps) {
                 recordDataIps(hostId, poolId, hasNqn ? existing.getValue() : nqn, ((LightbitsGetHostNqnAnswer) answer).getDataIps());
             }
+            if (wantAuth) {
+                registerTrustedHost(hostId, poolId, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
+            }
         } else {
             String detail = answer == null ? "no answer" : answer.getDetails();
             if (hasNqn) {
-                LOG.warn("Lightbits: could not read the data IPs of host {} for pool {} ({}); its volumes keep the IP"
-                        + " ACLs they have", hostId, poolId, detail);
+                LOG.warn("Lightbits: could not ask host {} for its {} for pool {} ({}); {}", hostId,
+                        wantIps && wantAuth ? "data IPs and in-band authentication key" : wantIps ? "data IPs" : "in-band authentication key",
+                        poolId, detail, wantAuth ? "its trusted host registration is checked again at its next connect"
+                                : "its volumes keep the IP ACLs they have");
             } else {
                 LOG.warn("Lightbits: could not auto-populate '{}' for host {} ({}); volume attach on this host "
                         + "will fail until it is set - check nvme-cli on the host, then reconnect it", key, hostId, detail);
@@ -228,6 +239,106 @@ public class LightbitsHostListener implements HypervisorHostListener {
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: could not update the IP ACLs of the volumes of pool {} for host {}: {}; they are set at"
                     + " the next attach", poolId, hostId, e.getMessage());
+        }
+    }
+
+    /**
+     * Register the host's in-band authentication key as a trusted host in the pool's project
+     * and keep its fingerprint (host detail lightbits.inband.<pool id>) and the agent's count of
+     * keyless paths, then log whether every host of the pool is ready for the cluster admin to
+     * turn in-band authentication on. Failures are logged and retried at the next connect.
+     */
+    private void registerTrustedHost(long hostId, long poolId, String nqn, LightbitsGetHostNqnAnswer answer) {
+        String key = answer.getDhchapKey();
+        if (key == null) {
+            if (answer.getInbandAuthError() != null) {
+                LOG.warn("Lightbits: host {} could not prepare its in-band authentication key for pool {}: {}", hostId, poolId,
+                        answer.getInbandAuthError());
+            } else {
+                LOG.warn("Lightbits: the agent of host {} does not support in-band authentication (older than this plugin"
+                        + " version); pool {} has inbandAuth on, so upgrade the agent before the cluster admin turns"
+                        + " in-band authentication on", hostId, poolId);
+            }
+            reportInbandReadiness(poolId);
+            return;
+        }
+        setHostDetail(hostId, LightbitsTrustedHosts.KEYLESS_DETAIL,
+                answer.getKeylessPaths() == null ? null : String.valueOf(answer.getKeylessPaths()));
+        String fp = LightbitsTrustedHosts.fingerprint(key);
+        try {
+            LightbitsPoolConfig cfg = LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
+            com.cloud.host.HostVO host = hostDao.findById(hostId);
+            String hostUuid = host == null ? String.valueOf(hostId) : host.getUuid();
+            LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(cfg.newClient(),
+                    LightbitsTrustedHosts.name(cfg.getEnvironment(), hostUuid), nqn, key,
+                    java.util.Map.of("cloudstack-host", hostUuid));
+            if (!r.registered()) {
+                setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
+                LOG.warn("Lightbits: host {} ({}) is a trusted host of another project on the cluster of pool {}; this"
+                        + " pool's project cannot set its key. It can connect once in-band authentication is on only if"
+                        + " that trusted host holds this host's key ({} on the host)", hostId, nqn, poolId,
+                        "/etc/nvme/lightbits/dhchap-key");
+            } else {
+                DetailVO before = hostDetailsDao.findDetail(hostId, LightbitsTrustedHosts.detailKey(poolId));
+                setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), fp);
+                if (before == null || !fp.equals(before.getValue())) {
+                    LOG.info("Lightbits: host {} registered as trusted host '{}' in project {} of pool {} (key {})", hostId,
+                            r.name, cfg.getProject(), poolId, fp);
+                }
+                if (r.foreignName) {
+                    LOG.info("Lightbits: host {} was already a trusted host of project {} as '{}'; set its key there", hostId,
+                            cfg.getProject(), r.name);
+                }
+            }
+        } catch (RuntimeException e) {
+            setHostDetail(hostId, LightbitsTrustedHosts.detailKey(poolId), null);
+            LOG.warn("Lightbits: could not register host {} as a trusted host for pool {}: {}; retried at its next connect"
+                    + " (the cluster's InBandAuthentication feature flag must be on)", hostId, poolId, e.getMessage());
+        }
+        reportInbandReadiness(poolId);
+    }
+
+    /**
+     * One log line per host connect on whether the pool is ready for in-band authentication:
+     * every host of the pool registered, and none with paths that hold no key.
+     */
+    private void reportInbandReadiness(long poolId) {
+        java.util.List<String> unregistered = new java.util.ArrayList<>();
+        java.util.List<String> keyless = new java.util.ArrayList<>();
+        java.util.List<StoragePoolHostVO> refs = storagePoolHostDao.listByPoolId(poolId);
+        for (StoragePoolHostVO ref : refs) {
+            long id = ref.getHostId();
+            com.cloud.host.HostVO h = hostDao.findById(id);
+            String label = h == null ? String.valueOf(id) : h.getName();
+            if (hostDetailsDao.findDetail(id, LightbitsTrustedHosts.detailKey(poolId)) == null) {
+                unregistered.add(label);
+            }
+            DetailVO k = hostDetailsDao.findDetail(id, LightbitsTrustedHosts.KEYLESS_DETAIL);
+            if (k == null || !"0".equals(k.getValue())) {
+                keyless.add(label + (k == null ? " (unknown)" : " (" + k.getValue() + ")"));
+            }
+        }
+        if (unregistered.isEmpty() && keyless.isEmpty()) {
+            LOG.info("Lightbits: pool {} is ready for in-band authentication: all {} host(s) are trusted hosts and connect"
+                    + " with their keys; the cluster admin can turn it on (lbcli enable in-band-auth)", poolId, refs.size());
+        } else {
+            LOG.warn("Lightbits: pool {} is NOT ready for in-band authentication; do not turn it on yet. Not registered: {}."
+                    + " With paths that hold no key (they fail at their next reconnect once it is on; put the host in"
+                    + " maintenance and reconnect it, see INSTALL.md): {}", poolId, unregistered, keyless);
+        }
+    }
+
+    private void setHostDetail(long hostId, String name, String value) {
+        DetailVO current = hostDetailsDao.findDetail(hostId, name);
+        if (value == null) {
+            if (current != null) {
+                hostDetailsDao.remove(current.getId());
+            }
+        } else if (current == null) {
+            hostDetailsDao.persist(new DetailVO(hostId, name, value));
+        } else if (!value.equals(current.getValue())) {
+            current.setValue(value);
+            hostDetailsDao.update(current.getId(), current);
         }
     }
 
@@ -306,6 +417,31 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 LOG.warn("Lightbits: could not check the volumes of pool {} for ACL entries of host {} that is being"
                         + " removed: {}", pool.getName(), hostId, e.getMessage());
             }
+            unregisterTrustedHost(hostId, pool, nqnValue);
+        }
+    }
+
+    /** Delete the trusted host the plugin made for a host that is being removed, for a pool with inbandAuth. */
+    private void unregisterTrustedHost(long hostId, org.apache.cloudstack.storage.datastore.db.StoragePoolVO pool, String nqn) {
+        try {
+            LightbitsPoolConfig cfg = LightbitsPoolSecret.load(storagePoolDetailsDao, pool.getId());
+            if (!cfg.isInbandAuth()) {
+                return;
+            }
+            java.util.List<String> others = new java.util.ArrayList<>();
+            java.util.List<String> deleted = LightbitsTrustedHosts.unregister(cfg.newClient(), cfg.getEnvironment(), nqn, others);
+            if (!deleted.isEmpty()) {
+                LOG.info("Lightbits: host {} is being removed: deleted its trusted host(s) {} in project {} of pool {}", hostId,
+                        deleted, cfg.getProject(), pool.getName());
+            }
+            if (!others.isEmpty()) {
+                LOG.warn("Lightbits: host {} is being removed and is still trusted host(s) {} in project {} of pool {}, which"
+                        + " the plugin did not make; delete them by hand if the machine should lose access", hostId, others,
+                        cfg.getProject(), pool.getName());
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not delete the trusted host of host {} that is being removed, in pool {}: {}; delete it"
+                    + " by hand (lbcli delete trusted-host)", hostId, pool.getName(), e.getMessage());
         }
     }
 

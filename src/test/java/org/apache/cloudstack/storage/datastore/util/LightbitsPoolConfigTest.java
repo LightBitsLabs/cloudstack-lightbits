@@ -257,4 +257,17 @@ class LightbitsPoolConfigTest {
                 () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&ipAcl=1", "jwt"));
         assertTrue(e.getMessage().contains("ipAcl"));
     }
+
+    @Test
+    void inbandAuthIsOffUnlessSetAndSurvivesTheDetailsRoundTrip() {
+        LightbitsPoolConfig off = LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1", "jwt");
+        org.junit.jupiter.api.Assertions.assertFalse(off.isInbandAuth());
+        org.junit.jupiter.api.Assertions.assertFalse(off.toDetailsWithoutSecret().containsKey(LightbitsPoolConfig.KEY_INBAND_AUTH));
+        LightbitsPoolConfig on = LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandAuth=true", "jwt");
+        assertTrue(on.isInbandAuth());
+        assertTrue(LightbitsPoolConfig.fromDetails(on.toDetailsWithoutSecret(), "jwt").isInbandAuth());
+        IllegalArgumentException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> LightbitsPoolConfig.fromUrl("lightbits://host/proj?environment=cs1&inbandAuth=yes", "jwt"));
+        assertTrue(e.getMessage().contains("inbandAuth"));
+    }
 }
