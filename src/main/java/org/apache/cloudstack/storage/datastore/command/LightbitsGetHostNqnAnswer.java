@@ -25,6 +25,8 @@ public class LightbitsGetHostNqnAnswer extends Answer {
     private String hostNqn;
     /** Source addresses toward the command's endpoints; null from an agent older than the field. */
     private java.util.List<String> dataIps;
+    /** True when the agent could not look up every endpoint, so dataIps may miss addresses. */
+    private Boolean dataIpsPartial;
     /**
      * This host's in-band authentication key, when the command asked for it. Never logged:
      * CloudStack's command logging leaves out fields marked Off.
@@ -75,6 +77,15 @@ public class LightbitsGetHostNqnAnswer extends Answer {
 
     public String getHostNqn() {
         return hostNqn;
+    }
+
+    public LightbitsGetHostNqnAnswer withDataIpsPartial(boolean partial) {
+        this.dataIpsPartial = partial;
+        return this;
+    }
+
+    public boolean isDataIpsPartial() {
+        return Boolean.TRUE.equals(dataIpsPartial);
     }
 
     public java.util.List<String> getDataIps() {

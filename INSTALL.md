@@ -278,8 +278,14 @@ only when both allow it. With `ipAcl=true` the plugin also manages the IP list:
   host in CloudStack: the plugin records the new address and updates the IP ACL of the
   pool's volumes that host is in. Until the reconnect the cluster refuses the host's new
   connections to those volumes.
+- Every host connect also re-checks the IP ACLs of the volumes the host is in, so a volume
+  an earlier update could not reach is put right at the host's next connect. If the agent
+  cannot look up one of the endpoints, it adds what it found to the host's addresses and drops
+  none.
 - A host reaching the cluster from several addresses (one per NIC) has all of them in its
   volumes' IP ACLs; the management log warns when this happens.
+- The IP ACL is the union of the addresses of the volume's hosts: the cluster does not tie
+  each host NQN to its own address. During a live migration both hosts are in both lists.
 
 Turn it on for a new pool in the URL (`&ipAcl=true`) or on an existing one:
 ```bash

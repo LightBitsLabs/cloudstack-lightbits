@@ -51,4 +51,45 @@ class LightbitsHostIpsTest {
         assertEquals(List.of(), LightbitsHostIps.parse(null));
         assertEquals("lightbits.dataips.7", LightbitsHostIps.detailKey(7));
     }
+
+    @Test
+    void aPartialReportAddsAddressesAndACompleteOneReplacesThem() {
+        assertEquals(List.of("10.0.0.1", "10.0.0.2", "10.0.0.3"), LightbitsHostIps.merge("10.0.0.1,10.0.0.2", List.of("10.0.0.3"), true));
+        assertEquals(List.of("10.0.0.3"), LightbitsHostIps.merge("10.0.0.1,10.0.0.2", List.of("10.0.0.3"), false));
+        assertEquals(List.of("10.0.0.3"), LightbitsHostIps.merge(null, List.of("10.0.0.3"), true));
+    }
+
+    /** Host details as rows of (host id, name, value), behind the two DAO calls the resolver makes. */
+    private static com.cloud.host.dao.HostDetailsDao dao(Object[]... rows) {
+        return (com.cloud.host.dao.HostDetailsDao) java.lang.reflect.Proxy.newProxyInstance(LightbitsHostIpsTest.class.getClassLoader(),
+                new Class<?>[] {com.cloud.host.dao.HostDetailsDao.class}, (proxy, m, args) -> {
+                    java.util.List<com.cloud.host.DetailVO> out = new java.util.ArrayList<>();
+                    for (Object[] r : rows) {
+                        if ("findByName".equals(m.getName()) && r[1].equals(args[0])
+                                || "findDetail".equals(m.getName()) && r[0].equals(args[0]) && r[1].equals(args[1])) {
+                            out.add(new com.cloud.host.DetailVO((Long) r[0], (String) r[1], (String) r[2]));
+                        }
+                    }
+                    if ("findByName".equals(m.getName())) {
+                        return out;
+                    }
+                    if ("findDetail".equals(m.getName())) {
+                        return out.isEmpty() ? null : out.get(0);
+                    }
+                    throw new UnsupportedOperationException(m.getName());
+                });
+    }
+
+    @Test
+    void everyHostSharingAnNqnMustHaveReportedItsIps() {
+        String nqnKey = "nvme.hostnqn";
+        com.cloud.host.dao.HostDetailsDao both = dao(new Object[] {1L, nqnKey, "nqn.a"}, new Object[] {2L, nqnKey, "nqn.a"},
+                new Object[] {1L, "lightbits.dataips.7", "10.0.0.1"}, new Object[] {2L, "lightbits.dataips.7", "10.0.0.2"});
+        assertEquals(List.of("10.0.0.1", "10.0.0.2"), LightbitsHostIps.resolver(both, nqnKey, 7).ipsFor(List.of("nqn.a")));
+
+        com.cloud.host.dao.HostDetailsDao oneMissing = dao(new Object[] {1L, nqnKey, "nqn.a"}, new Object[] {2L, nqnKey, "nqn.a"},
+                new Object[] {1L, "lightbits.dataips.7", "10.0.0.1"});
+        assertNull(LightbitsHostIps.resolver(oneMissing, nqnKey, 7).ipsFor(List.of("nqn.a")),
+                "a cloned host with the same NQN and no IPs must not lose access");
+    }
 }

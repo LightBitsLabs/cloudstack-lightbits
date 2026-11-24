@@ -163,7 +163,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 LOG.info("Lightbits: host {} '{}' auto-populated: {}", hostId, key, nqn);
             }
             if (wantIps) {
-                recordDataIps(hostId, poolId, hasNqn ? existing.getValue() : nqn, ((LightbitsGetHostNqnAnswer) answer).getDataIps());
+                recordDataIps(hostId, poolId, hasNqn ? existing.getValue() : nqn, ((LightbitsGetHostNqnAnswer) answer).getDataIps(),
+                        ((LightbitsGetHostNqnAnswer) answer).isDataIpsPartial());
             }
             if (wantAuth) {
                 registerTrustedHost(hostId, poolId, hasNqn ? existing.getValue() : nqn, (LightbitsGetHostNqnAnswer) answer);
@@ -193,13 +194,20 @@ public class LightbitsHostListener implements HypervisorHostListener {
     }
 
     /**
-     * Keep the host's data IPs for the pool (host detail lightbits.dataips.<pool id>) and,
-     * when they are new or changed, bring the IP ACLs of the pool's volumes this host may
-     * use in line. An agent older than this plugin version reports none: the old detail is
-     * kept and the host cannot be granted access to the pool's volumes until it is upgraded.
+     * Keep the host's data IPs for the pool (host detail lightbits.dataips.<pool id>) and bring
+     * the IP ACLs of the pool's volumes this host is in into line. The refresh runs on every
+     * connect, not only when the IPs change, so a volume an earlier refresh could not update is
+     * retried. A partial report (the agent could not look up every endpoint) adds its addresses
+     * to the stored ones and drops none. An agent older than this plugin version reports none:
+     * the old detail is kept and the host cannot be granted access to the pool's volumes until
+     * it is upgraded.
+     *
+     * <p>Storing the IPs and the refresh run under the pool's IP ACL lock (so two refreshes of
+     * the pool cannot interleave and the slower one overwrite the newer IPs) and the host's ACL
+     * lock (so a grant for the host cannot resolve its old IPs and write them after the
+     * refresh). Without the locks in time nothing changes and the next connect tries again.
      */
-    private void recordDataIps(long hostId, long poolId, String nqn, java.util.List<String> dataIps) {
-        String key = org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.detailKey(poolId);
+    private void recordDataIps(long hostId, long poolId, String nqn, java.util.List<String> dataIps, boolean partial) {
         if (dataIps == null) {
             LOG.warn("Lightbits: the agent of host {} does not report its data IPs (older than this plugin version);"
                     + " pool {} has ipAcl on, so the host gets no access to its volumes until the agent is upgraded", hostId, poolId);
@@ -210,23 +218,50 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     + " were", hostId, poolId);
             return;
         }
-        if (dataIps.size() > 1) {
-            LOG.warn("Lightbits: host {} reaches the cluster of pool {} from several addresses {}; all of them are put in"
-                    + " the IP ACLs of its volumes", hostId, poolId, dataIps);
+        boolean had = hostGateLocker.run(ipAclLockName(poolId), IP_ACL_LOCK_SECONDS, () -> {
+            boolean hostLock = hostGateLocker.run(org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.lockName(hostId),
+                    IP_ACL_LOCK_SECONDS, () -> storeAndRefresh(hostId, poolId, nqn, dataIps, partial));
+            if (!hostLock) {
+                LOG.warn("Lightbits: the ACL lock of host {} was busy for {} s; its data IPs for pool {} are recorded at its"
+                        + " next connect", hostId, IP_ACL_LOCK_SECONDS, poolId);
+            }
+        });
+        if (!had) {
+            LOG.warn("Lightbits: the IP ACL lock of pool {} was busy for {} s; the data IPs of host {} are recorded at its"
+                    + " next connect", poolId, IP_ACL_LOCK_SECONDS, hostId);
         }
-        String value = String.join(",", dataIps);
+    }
+
+    static final int IP_ACL_LOCK_SECONDS = 120;
+
+    static String ipAclLockName(long poolId) {
+        return "lightbits.pool.ipacl." + poolId;
+    }
+
+    private void storeAndRefresh(long hostId, long poolId, String nqn, java.util.List<String> reported, boolean partial) {
+        String key = org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.detailKey(poolId);
         DetailVO current = hostDetailsDao.findDetail(hostId, key);
-        if (current != null && value.equals(current.getValue())) {
-            return;
+        java.util.List<String> ips = org.apache.cloudstack.storage.datastore.util.LightbitsHostIps.merge(
+                current == null ? null : current.getValue(), reported, partial);
+        if (partial) {
+            LOG.warn("Lightbits: host {} could not look up every NVMe endpoint of pool {}; added {} to its data IPs and"
+                    + " kept the ones it had", hostId, poolId, reported);
         }
+        if (ips.size() > 1) {
+            LOG.warn("Lightbits: host {} reaches the cluster of pool {} from several addresses {}; all of them are put in"
+                    + " the IP ACLs of its volumes", hostId, poolId, ips);
+        }
+        String value = String.join(",", ips);
         if (current == null) {
             hostDetailsDao.persist(new DetailVO(hostId, key, value));
-        } else {
+        } else if (!value.equals(current.getValue())) {
             current.setValue(value);
             hostDetailsDao.update(current.getId(), current);
         }
-        LOG.info("Lightbits: host {} data IPs for pool {}: {} (were {})", hostId, poolId, value,
-                current == null ? "unknown" : current.getValue());
+        if (current == null || !value.equals(current.getValue())) {
+            LOG.info("Lightbits: host {} data IPs for pool {}: {} (were {})", hostId, poolId, value,
+                    current == null ? "unknown" : current.getValue());
+        }
         try {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
                     org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
@@ -237,8 +272,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
                         hostId, updated);
             }
         } catch (RuntimeException e) {
-            LOG.warn("Lightbits: could not update the IP ACLs of the volumes of pool {} for host {}: {}; they are set at"
-                    + " the next attach", poolId, hostId, e.getMessage());
+            LOG.warn("Lightbits: could not update the IP ACLs of the volumes of pool {} for host {}: {}; retried at the"
+                    + " host's next connect and set at the next attach", poolId, hostId, e.getMessage());
         }
     }
 

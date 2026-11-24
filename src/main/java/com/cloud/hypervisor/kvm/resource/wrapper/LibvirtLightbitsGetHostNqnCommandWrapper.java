@@ -61,8 +61,14 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
             if (!nqn.startsWith("nqn.")) {
                 return new LightbitsGetHostNqnAnswer(command, false, "unexpected host NQN '" + nqn + "'");
             }
-            LightbitsGetHostNqnAnswer answer = new LightbitsGetHostNqnAnswer(command, nqn,
-                    command.getEndpoints() == null ? new java.util.ArrayList<>() : dataIps(command.getEndpoints()));
+            LightbitsGetHostNqnAnswer answer;
+            if (command.getEndpoints() == null) {
+                answer = new LightbitsGetHostNqnAnswer(command, nqn, new java.util.ArrayList<>());
+            } else {
+                java.util.List<String> failed = new java.util.ArrayList<>();
+                java.util.List<String> ips = dataIps(command.getEndpoints(), failed);
+                answer = new LightbitsGetHostNqnAnswer(command, nqn, ips).withDataIpsPartial(!failed.isEmpty());
+            }
             if (command.isInbandAuth()) {
                 inbandAuth(answer);
             }
@@ -111,6 +117,11 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
      * route is logged and skipped.
      */
     java.util.List<String> dataIps(java.util.List<String> endpoints) {
+        return dataIps(endpoints, new java.util.ArrayList<>());
+    }
+
+    /** As {@link #dataIps(java.util.List)}, adding each endpoint that could not be looked up to {@code failed}. */
+    java.util.List<String> dataIps(java.util.List<String> endpoints, java.util.List<String> failed) {
         java.util.List<String> out = new java.util.ArrayList<>();
         for (String endpoint : endpoints) {
             String host = hostOf(endpoint);
@@ -119,11 +130,13 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
                 String src = routeSource(address);
                 if (src == null) {
                     LOG.warn("Lightbits: no route source toward {} ({})", endpoint, address);
+                    failed.add(endpoint);
                 } else if (!out.contains(src)) {
                     out.add(src);
                 }
             } catch (Exception e) {
                 LOG.warn("Lightbits: could not find the source address toward {}: {}", endpoint, e.getMessage());
+                failed.add(endpoint);
             }
         }
         return out;
@@ -146,13 +159,22 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
 
     /** The "src" of {@code ip -o route get <address>}, or null. */
     protected String routeSource(String address) throws IOException, InterruptedException {
-        Process p = new ProcessBuilder("ip", "-o", "route", "get", address).redirectErrorStream(true).start();
-        String out = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-        if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS) || p.exitValue() != 0) {
-            p.destroyForcibly();
-            return null;
+        // output to a file, so the wait below bounds the whole lookup (reading a pipe blocks until EOF)
+        Path out = Files.createTempFile("lightbits-route", ".out");
+        try {
+            Process p = new ProcessBuilder("ip", "-o", "route", "get", address).redirectErrorStream(true)
+                    .redirectOutput(out.toFile()).start();
+            if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return null;
+            }
+            if (p.exitValue() != 0) {
+                return null;
+            }
+            return parseRouteSource(Files.readString(out));
+        } finally {
+            Files.deleteIfExists(out);
         }
-        return parseRouteSource(out);
     }
 
     static String parseRouteSource(String ipRouteGetOutput) {
