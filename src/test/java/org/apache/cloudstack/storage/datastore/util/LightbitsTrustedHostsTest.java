@@ -75,7 +75,7 @@ class LightbitsTrustedHostsTest {
 
     private static String hosts(String... nameNqn) {
         StringBuilder b = new StringBuilder("{\"hosts\":[");
-        for (int i = 0; i < nameNqn.length; i += 2) {
+        for (int i = 0; i + 1 < nameNqn.length; i += 2) {
             b.append(i == 0 ? "" : ",").append("{\"name\":\"").append(nameNqn[i]).append("\",\"hostNqn\":\"").append(nameNqn[i + 1])
                     .append("\",\"authRequired\":\"true\"}");
         }
