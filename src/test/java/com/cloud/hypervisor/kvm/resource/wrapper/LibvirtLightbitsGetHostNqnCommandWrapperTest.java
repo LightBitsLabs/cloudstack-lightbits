@@ -228,4 +228,59 @@ class LibvirtLightbitsGetHostNqnCommandWrapperTest {
         assertNull(a.getDhchapKey());
         assertEquals("disk full", a.getInbandAuthError());
     }
+
+    @Test
+    void theControllerKeyIsReportedOnlyForTwoWayAndNeverLogged() throws IOException {
+        String secret = "DHHC-1:00:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh+KfiaR:";
+        String ctrl = "DHHC-1:00:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=:";
+        LibvirtLightbitsGetHostNqnCommandWrapper base = authWrapper(() -> secret);
+        LibvirtLightbitsGetHostNqnCommandWrapper w = new LibvirtLightbitsGetHostNqnCommandWrapper() {
+            @Override
+            protected Path hostNqnPath() {
+                return base.hostNqnPath();
+            }
+
+            @Override
+            protected com.cloud.hypervisor.kvm.storage.LightbitsHostKey hostKey() {
+                return new com.cloud.hypervisor.kvm.storage.LightbitsHostKey() {
+                    @Override
+                    public String ensure() {
+                        return secret;
+                    }
+
+                    @Override
+                    public String ensureCtrlKey() {
+                        return ctrl;
+                    }
+                };
+            }
+
+            @Override
+            protected int pathsWithoutKey(String currentKey) {
+                return 0;
+            }
+
+            @Override
+            protected int pathsWithoutCtrlKey(String currentCtrlKey) {
+                return 3;
+            }
+        };
+        LightbitsGetHostNqnAnswer oneWay = (LightbitsGetHostNqnAnswer) w.execute(new LightbitsGetHostNqnCommand(null, true), null);
+        assertNull(oneWay.getDhchapCtrlKey());
+        assertNull(oneWay.getPathsWithoutCtrlKey());
+        assertTrue(!new LightbitsGetHostNqnCommand(null, false, true).isTwoWay(), "two-way only with inbandAuth");
+
+        LightbitsGetHostNqnAnswer a = (LightbitsGetHostNqnAnswer) w.execute(new LightbitsGetHostNqnCommand(null, true, true), null);
+        assertEquals(secret, a.getDhchapKey());
+        assertEquals(ctrl, a.getDhchapCtrlKey());
+        assertEquals(Integer.valueOf(3), a.getPathsWithoutCtrlKey());
+
+        org.apache.logging.log4j.core.config.Configurator.setLevel("lightbits.test.commands", org.apache.logging.log4j.Level.TRACE);
+        String logged = new com.google.gson.GsonBuilder()
+                .setExclusionStrategies(new com.cloud.agent.transport.LoggingExclusionStrategy(
+                        org.apache.logging.log4j.LogManager.getLogger("lightbits.test.commands")))
+                .create().toJson(a);
+        assertTrue(logged.contains("pathsWithoutCtrlKey"), logged);
+        assertTrue(!logged.contains("DHHC-1"), "neither key is in the logged answer: " + logged);
+    }
 }

@@ -56,6 +56,16 @@ public final class LightbitsTrustedHosts {
     private LightbitsTrustedHosts() {
     }
 
+    /** Host detail: the fingerprint of the host's current controller key (two-way), as the agent last reported it. */
+    public static final String CURRENT_CTRL_KEY_DETAIL = "lightbits.inbandctrlkey";
+    /** Host detail: Lightbits paths of the host whose controller key is not the current one, as last reported. */
+    public static final String CTRL_KEYLESS_DETAIL = "lightbits.ctrlkeylesspaths";
+
+    /** Host detail: the fingerprint of the controller key registered as the target secret for the pool (two-way). */
+    public static String ctrlDetailKey(long poolId) {
+        return "lightbits.inbandctrl." + poolId;
+    }
+
     public static String detailKey(long poolId) {
         return DETAIL_PREFIX + poolId;
     }
@@ -134,6 +144,11 @@ public final class LightbitsTrustedHosts {
             this.authRequired = authRequired;
         }
 
+        /** True when the controller key was set as the target secret (two-way). */
+        public boolean twoWay;
+        /** True when a one-way registration kept a target secret the trusted host already had. */
+        public boolean targetKept;
+
         public boolean registered() {
             return name != null;
         }
@@ -146,6 +161,18 @@ public final class LightbitsTrustedHosts {
      * the NQN is a trusted host of another project.
      */
     public static Registration register(LightbitsApiClient client, String name, String hostNqn, String key,
+            Map<String, String> labels) {
+        return register(client, name, hostNqn, key, null, labels);
+    }
+
+    /**
+     * {@link #register(LightbitsApiClient, String, String, String, Map)} with a controller key
+     * for two-way authentication: it becomes the trusted host's target secret. Without one (a
+     * one-way pool, or an agent that sent none) an existing target secret is kept, never turned
+     * off: the trusted host is shared by every pool of the project on the cluster, and the host's
+     * paths made with that controller key would fail their next reconnect without it.
+     */
+    public static Registration register(LightbitsApiClient client, String name, String hostNqn, String key, String ctrlKey,
             Map<String, String> labels) {
         Optional<TrustedHost> existing = client.findTrustedHostByNqn(hostNqn);
         if (existing.isEmpty()) {
@@ -168,11 +195,15 @@ public final class LightbitsTrustedHosts {
             }
         }
         String used = existing.map(h -> h.name).orElse(name);
-        client.setTrustedHostSecret(used, key);
+        String target = ctrlKey != null ? ctrlKey : existing.isPresent() ? client.getTrustedHostTargetSecret(used) : null;
+        client.setTrustedHostSecret(used, key, target);
         // A trusted host the plugin creates has authRequired=true; one that existed keeps what it has.
         // An existing one whose value the cluster did not report stays unknown (null), not true.
         Boolean authRequired = existing.isPresent() ? existing.get().authRequired : Boolean.TRUE;
-        return new Registration(used, !used.equals(name), authRequired);
+        Registration r = new Registration(used, !used.equals(name), authRequired);
+        r.twoWay = ctrlKey != null;
+        r.targetKept = ctrlKey == null && target != null;
+        return r;
     }
 
     /**

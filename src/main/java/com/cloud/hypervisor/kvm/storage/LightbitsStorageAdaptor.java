@@ -80,6 +80,10 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     public static final String DETAIL_PLUGIN_VERSION = "pluginVersion";
     /** Pool detail, "true" when the pool's hosts connect with their in-band authentication key. */
     public static final String DETAIL_INBAND_AUTH = "inbandAuth";
+    /** How long reading one endpoint's discovery log page for a two-way configuration may take. */
+    static final long DISCOVER_TIMEOUT_MILLIS = 15_000;
+    /** Pool detail from the management server: two-way in-band authentication (with inbandAuth). */
+    public static final String DETAIL_INBAND_TWO_WAY = "inbandAuthTwoWay";
 
     private final LightbitsNvmeHost nvme;
     private final LightbitsHostKey hostKey;
@@ -169,11 +173,11 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         }
         String uuid = LightbitsNvmeHost.requireVolumeUuid(volumePath);
         List<String> endpoints = discoveryEndpoints(pool);
-        java.nio.file.Path authConfig = authConfig(pool);
+        java.util.function.Function<String, java.nio.file.Path> configFor = configFor(pool);
         // One connect at a time on this host: parallel VM starts would otherwise race each
         // other's connect-all against the same subsystem.
         synchronized (CONNECT_LOCK) {
-            nvme.connect(endpoints, LightbitsNvmeHost.CONNECT_TIMEOUT_MS, authConfig);
+            nvme.connectWith(endpoints, LightbitsNvmeHost.CONNECT_TIMEOUT_MS, configFor);
             // the host is connected: a failure an earlier lookup remembered for this pool is history
             lookupConnects.remove(pool.getUuid());
         }
@@ -219,7 +223,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             boolean answered;
             List<String> endpoints = discoveryEndpoints(pool);
             try {
-                answered = nvme.connect(endpoints, LOOKUP_CONNECT_TIMEOUT_MILLIS, authConfig(pool));
+                answered = nvme.connectWith(endpoints, LOOKUP_CONNECT_TIMEOUT_MILLIS, configFor(pool));
             } catch (CloudRuntimeException e) {
                 state.lastFailure = e.getMessage();
                 backOff(state);
@@ -267,6 +271,27 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      * is made on first use. A key that cannot be prepared fails the connect: without it the
      * host loses its paths once the cluster turns in-band authentication on.
      */
+    /**
+     * The configuration file to connect a pool with, chosen per discovery endpoint: none for a
+     * pool without in-band authentication, the shared one-way file ({@link #authConfig}) for
+     * one-way, and for two-way the pool's own file with the host and controller keys on every
+     * data port the endpoint advertises (read just before the connect, from its discovery log
+     * page; nvme-cli takes a controller key only per port). A key that cannot be prepared, or a
+     * discovery that fails, counts as that endpoint failing.
+     */
+    java.util.function.Function<String, java.nio.file.Path> configFor(KVMStoragePool pool) {
+        java.nio.file.Path oneWay = authConfig(pool);
+        if (oneWay == null) {
+            return null;
+        }
+        Map<String, String> details = pool.getDetails();
+        if (!"true".equals(details.get(DETAIL_INBAND_TWO_WAY))) {
+            return endpoint -> oneWay;
+        }
+        String poolUuid = pool.getUuid();
+        return endpoint -> hostKey.ensureTwoWayConfig(poolUuid, nvme.discover(endpoint, DISCOVER_TIMEOUT_MILLIS));
+    }
+
     java.nio.file.Path authConfig(KVMStoragePool pool) {
         Map<String, String> details = pool.getDetails();
         if (details == null || !"true".equals(details.get(DETAIL_INBAND_AUTH))) {

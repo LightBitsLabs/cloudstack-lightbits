@@ -83,6 +83,19 @@ public class LightbitsHostKey {
         return dir.resolve("dhchap-key");
     }
 
+    /** The controller key: the secret the cluster proves itself with, for two-way authentication. */
+    Path ctrlKeyFile() {
+        return dir.resolve("dhchap-ctrl-key");
+    }
+
+    /** The two-way nvme-cli configuration of one pool (per-port keys from its discovery log page). */
+    Path twoWayConfigFile(String poolUuid) {
+        if (poolUuid == null || !UUID.matcher(poolUuid).matches()) {
+            throw new CloudRuntimeException("Lightbits: not a pool UUID: " + poolUuid);
+        }
+        return dir.resolve("auth-" + poolUuid.toLowerCase() + ".json");
+    }
+
     public Path configFile() {
         return dir.resolve("auth.json");
     }
@@ -126,9 +139,10 @@ public class LightbitsHostKey {
 
     /**
      * Before anything is read: the directory must not be a symbolic link and, if it exists, must
-     * be owned by root; it is made 0700. If the key or the configuration file is owned by another
-     * user or is a symbolic link, both are removed, so a new key is made: another user may have
-     * read the old one (the configuration file holds it too). Otherwise existing files are made
+     * be owned by root; it is made 0700. If a key file (host or controller) or a configuration
+     * file (the shared one or a pool's two-way one) is owned by another user or is a symbolic
+     * link, all of them are removed, so new keys are made: another user may have read the old
+     * ones (the configuration files hold them too). Otherwise existing files are made
      * 0600 (files from an earlier version, or copied or made by hand with a wider mode, are
      * root-only again). New files are made with these modes.
      */
@@ -147,7 +161,13 @@ public class LightbitsHostKey {
             }
             Files.setPosixFilePermissions(dir, DIR_MODE);
         }
-        Path[] files = {keyFile(), configFile()};
+        java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), configFile(), ctrlKeyFile()));
+        if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
+            // the per-pool two-way configurations hold the keys too
+            try (java.util.stream.Stream<Path> list = Files.list(dir)) {
+                list.filter(f -> f.getFileName().toString().matches("auth-.+\\.json")).forEach(files::add);
+            }
+        }
         boolean untrusted = false;
         for (Path f : files) {
             untrusted |= Files.isSymbolicLink(f) || Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS) && uid(f) != ownerUid;
@@ -169,15 +189,107 @@ public class LightbitsHostKey {
     }
 
     private String readKey() throws IOException {
-        String key = read(keyFile());
+        return readKey(keyFile());
+    }
+
+    private String readKey(Path file) throws IOException {
+        String key = read(file);
         if (key == null) {
             return null;
         }
         if (!valid(key)) {
-            LOG.warn("Lightbits: {} does not hold a valid DH-HMAC-CHAP key; making a new one", keyFile());
+            LOG.warn("Lightbits: {} does not hold a valid DH-HMAC-CHAP key; making a new one", file);
             return null;
         }
         return key;
+    }
+
+    /**
+     * This host's controller key (made if missing), for two-way authentication: the cluster
+     * proves itself to the host with it. One per host, used for every cluster, like the host
+     * key. Kept beside the host key with the same rules; never logged.
+     */
+    public String ensureCtrlKey() {
+        synchronized (LOCK) {
+            try {
+                restrict();
+                String key = readKey(ctrlKeyFile());
+                if (key == null) {
+                    key = newKey(RANDOM);
+                    writePrivate(ctrlKeyFile(), key + "\n");
+                    LOG.info("Lightbits: made this host's in-band authentication controller key ({})", ctrlKeyFile());
+                }
+                return key;
+            } catch (IOException e) {
+                throw new CloudRuntimeException("Lightbits: could not prepare this host's in-band authentication controller key in "
+                        + dir + ": " + e.getMessage(), e);
+            }
+        }
+    }
+
+    /** One data port of a discovery log page: the subsystem NQN, address and service. */
+    public static final class Port {
+        final String subsystemNqn;
+        final String address;
+        final String service;
+
+        public Port(String subsystemNqn, String address, String service) {
+            this.subsystemNqn = subsystemNqn;
+            this.address = address;
+            this.service = service;
+        }
+    }
+
+    private static final Pattern ADDRESS = Pattern.compile("[0-9A-Za-z.:%-]{1,64}");
+    private static final Pattern SERVICE = Pattern.compile("[0-9]{1,5}");
+
+    /**
+     * The two-way nvme-cli configuration for one pool, written if it changed: the host entry
+     * with the host key, and every data port of {@code ports} with the host key and the
+     * controller key ({@code nvme connect-all} takes a controller key only per port). Ports with
+     * an NQN, address or service that does not look like one are left out, so no value needs
+     * escaping. Returns the file.
+     */
+    public Path ensureTwoWayConfig(String poolUuid, java.util.List<Port> ports) {
+        String key = ensure();
+        String ctrl = ensureCtrlKey();
+        synchronized (LOCK) {
+            try {
+                String nqn = read(nvmeDir.resolve("hostnqn"));
+                String hostId = hostId(nqn, read(nvmeDir.resolve("hostid")));
+                java.util.Map<String, java.util.List<Port>> bySubsystem = new java.util.LinkedHashMap<>();
+                for (Port p : ports) {
+                    if (p.subsystemNqn != null && HOST_NQN.matcher(p.subsystemNqn).matches() && p.address != null
+                            && ADDRESS.matcher(p.address).matches() && p.service != null && SERVICE.matcher(p.service).matches()) {
+                        bySubsystem.computeIfAbsent(p.subsystemNqn, k -> new java.util.ArrayList<>()).add(p);
+                    }
+                }
+                StringBuilder b = new StringBuilder("[{\"hostnqn\":\"").append(nqn).append("\",\"hostid\":\"").append(hostId)
+                        .append("\",\"dhchap_key\":\"").append(key).append("\",\"subsystems\":[");
+                boolean firstSub = true;
+                for (java.util.Map.Entry<String, java.util.List<Port>> e : bySubsystem.entrySet()) {
+                    b.append(firstSub ? "" : ",").append("{\"nqn\":\"").append(e.getKey()).append("\",\"ports\":[");
+                    firstSub = false;
+                    boolean firstPort = true;
+                    for (Port p : e.getValue()) {
+                        b.append(firstPort ? "" : ",").append("{\"transport\":\"tcp\",\"traddr\":\"").append(p.address)
+                                .append("\",\"trsvcid\":\"").append(p.service).append("\",\"dhchap_key\":\"").append(key)
+                                .append("\",\"dhchap_ctrl_key\":\"").append(ctrl).append("\"}");
+                        firstPort = false;
+                    }
+                    b.append("]}");
+                }
+                String config = b.append("]}]\n").toString();
+                Path file = twoWayConfigFile(poolUuid);
+                if (!config.equals(read(file) + "\n")) {
+                    writePrivate(file, config);
+                }
+                return file;
+            } catch (IOException e) {
+                throw new CloudRuntimeException("Lightbits: could not write this host's two-way in-band authentication"
+                        + " configuration in " + dir + ": " + e.getMessage(), e);
+            }
+        }
     }
 
     /** True for a DH-HMAC-CHAP secret whose CRC-32 matches its key bytes. */
@@ -264,5 +376,10 @@ public class LightbitsHostKey {
     /** Lightbits NVMe/TCP paths on this host that do not hold the given (current) key: none, or an old one. */
     public static int pathsWithoutKey(String currentKey) {
         return new LightbitsNvmeHost().pathsWithoutKey(currentKey);
+    }
+
+    /** Lightbits NVMe/TCP paths on this host whose controller key is not the given (current) one: none, or an old one. */
+    public static int pathsWithoutCtrlKey(String currentCtrlKey) {
+        return new LightbitsNvmeHost().pathsWithoutCtrlKey(currentCtrlKey);
     }
 }

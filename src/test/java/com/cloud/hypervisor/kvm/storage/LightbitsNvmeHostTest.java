@@ -470,4 +470,55 @@ class LightbitsNvmeHostTest {
                 "a listed controller whose NQN cannot be read is an unknown count, not skipped");
         assertEquals(2, host.livePaths().size(), "paths() still skips it for its other callers (nvme1, nvme4)");
     }
+
+    private static final String DISCOVERY_JSON = "Warning: some nvme-cli notice\n{\"genctr\":7,\"records\":["
+            + "{\"trtype\":\"tcp\",\"subtype\":\"discovery subsystem referral\",\"traddr\":\"10.0.0.2\",\"trsvcid\":\"8009\","
+            + "\"subnqn\":\"nqn.2014-08.org.nvmexpress.discovery\"},"
+            + "{\"trtype\":\"tcp\",\"subtype\":\"nvme subsystem\",\"traddr\":\"10.0.0.1\",\"trsvcid\":\"4420\",\"subnqn\":\"" + NQN + "\"},"
+            + "{\"trtype\":\"tcp\",\"subtype\":\"nvme subsystem\",\"traddr\":\"10.0.0.2\",\"trsvcid\":\"4420\",\"subnqn\":\"" + NQN + "\"}]}";
+
+    @Test
+    void discoveryKeepsTheDataPortsAndDropsReferrals() {
+        sys.results.put("nvme discover -t tcp -a 10.0.0.1 -s 8009 -o json", new LightbitsNvmeHost.Result(0, DISCOVERY_JSON));
+        List<LightbitsHostKey.Port> ports = host.discover("10.0.0.1:8009", 1000);
+        assertEquals(2, ports.size());
+        assertEquals("10.0.0.1", ports.get(0).address);
+        assertEquals("4420", ports.get(1).service);
+        assertEquals(NQN, ports.get(1).subsystemNqn);
+
+        sys.results.put("nvme discover -t tcp -a 10.0.0.9", new LightbitsNvmeHost.Result(1, "failed to connect"));
+        assertThrows(CloudRuntimeException.class, () -> host.discover("10.0.0.9:8009", 1000));
+        assertThrows(CloudRuntimeException.class, () -> LightbitsNvmeHost.parseDiscovery("no json here"));
+    }
+
+    @Test
+    void aConfigThatCannotBePreparedCountsAsThatEndpointFailing() {
+        java.nio.file.Path cfg = java.nio.file.Path.of("/etc/nvme/lightbits/auth-x.json");
+        List<String> asked = new ArrayList<>();
+        boolean answered = host.connectWith(List.of("10.0.0.1:8009", "10.0.0.2:8009"), 1000, endpoint -> {
+            asked.add(endpoint);
+            if (asked.size() == 1) {
+                throw new CloudRuntimeException("'nvme discover' failed");
+            }
+            return cfg;
+        });
+        assertTrue(answered);
+        assertEquals(2, asked.size(), "the second endpoint is tried after the first one's configuration failed");
+        List<String> connects = sys.commands.stream().filter(c -> c.startsWith("nvme connect-all")).collect(java.util.stream.Collectors.toList());
+        assertEquals(1, connects.size());
+        assertTrue(connects.get(0).endsWith("--config=" + cfg), connects.get(0));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.contains("DHHC-1")), "no key on any command line");
+    }
+
+    @Test
+    void pathsWithoutTheCurrentControllerKeyAreCounted() {
+        String ctrl = "DHHC-1:00:ctrl:";
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.controller("nvme2", "traddr=10.0.0.2,trsvcid=4420", "live");
+        sys.controller("nvme3", "traddr=10.0.0.3,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme1/dhchap_ctrl_secret", "none");
+        sys.files.put("/sys/class/nvme/nvme2/dhchap_ctrl_secret", ctrl + "\n");
+        sys.files.put("/sys/class/nvme/nvme3/dhchap_ctrl_secret", "DHHC-1:00:old:");
+        assertEquals(2, host.pathsWithoutCtrlKey(ctrl));
+    }
 }

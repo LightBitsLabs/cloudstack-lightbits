@@ -332,4 +332,27 @@ class LightbitsStorageAdaptorTest {
         assertEquals(tmp.resolve("lightbits").resolve("auth.json"), a.authConfig(auth));
         assertTrue(java.nio.file.Files.exists(tmp.resolve("lightbits").resolve("dhchap-key")));
     }
+
+    @Test
+    void aTwoWayPoolConnectsWithItsOwnConfigBuiltFromDiscovery(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
+        LightbitsStorageAdaptor a = new LightbitsStorageAdaptor(new LightbitsNvmeHost(sys), new LightbitsHostKey(tmp.resolve("lightbits"), tmp,
+                (Integer) java.nio.file.Files.getAttribute(tmp, "unix:uid")));
+        String sub = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+        sys.results.put("nvme discover -t tcp -a 10.0.1.1 -s 8009 -o json", new LightbitsNvmeHost.Result(0,
+                "{\"genctr\":1,\"records\":[{\"trtype\":\"tcp\",\"subtype\":\"nvme subsystem\",\"traddr\":\"10.0.1.1\","
+                        + "\"trsvcid\":\"4420\",\"subnqn\":\"" + sub + "\"}]}"));
+        KVMStoragePool twoWay = a.createStoragePool(POOL_B, "10.0.1.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.1.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true",
+                        LightbitsStorageAdaptor.DETAIL_INBAND_TWO_WAY, "true"), true);
+        java.nio.file.Path cfg = a.configFor(twoWay).apply("10.0.1.1:8009");
+        assertEquals(tmp.resolve("lightbits").resolve("auth-" + POOL_B + ".json"), cfg);
+        String json = java.nio.file.Files.readString(cfg);
+        assertTrue(json.contains("\"traddr\":\"10.0.1.1\"") && json.contains("dhchap_ctrl_key"), "per-port keys");
+        assertTrue(java.nio.file.Files.exists(tmp.resolve("lightbits").resolve("dhchap-ctrl-key")));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.contains("DHHC-1")), "no key on any command line");
+        KVMStoragePool oneWay = a.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.0.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true"), true);
+        assertEquals(tmp.resolve("lightbits").resolve("auth.json"), a.configFor(oneWay).apply("10.0.0.1:8009"));
+    }
 }

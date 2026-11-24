@@ -236,4 +236,46 @@ class LightbitsTrustedHostsTest {
         assertFalse(LightbitsTrustedHosts.CURRENT_KEY_DETAIL.startsWith(LightbitsTrustedHosts.DETAIL_PREFIX),
                 "the host-wide detail is not read as a pool's registration");
     }
+
+    private static final String CTRL = "DHHC-1:00:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=:";
+
+    @Test
+    void aTwoWayRegistrationSetsTheControllerKeyAsTheTargetSecret() {
+        wm.stubFor(get(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody(hosts())));
+        wm.stubFor(post(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody("{}")));
+        wm.stubFor(put(urlEqualTo(SECRETS + NAME)).willReturn(aResponse().withStatus(200).withBody("{}")));
+
+        LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(client, NAME, NQN, KEY, CTRL, Map.of());
+        assertTrue(r.twoWay);
+        assertFalse(r.targetKept);
+        wm.verify(putRequestedFor(urlEqualTo(SECRETS + NAME))
+                .withRequestBody(matchingJsonPath("$.hostSecret", equalTo(KEY)))
+                .withRequestBody(matchingJsonPath("$.targetSecretType", equalTo("Enabled")))
+                .withRequestBody(matchingJsonPath("$.targetSecret", equalTo(CTRL))));
+        wm.verify(0, getRequestedFor(urlEqualTo(SECRETS + NAME)));
+    }
+
+    @Test
+    void aOneWayRegistrationKeepsATargetSecretAnotherPoolSet() {
+        wm.stubFor(get(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody(hosts(NAME, NQN))));
+        wm.stubFor(get(urlEqualTo(SECRETS + NAME)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"name\":\"" + NAME + "\",\"hostSecret\":\"" + KEY + "\",\"targetSecretType\":\"Enabled\",\"targetSecret\":\"" + CTRL + "\"}")));
+        wm.stubFor(put(urlEqualTo(SECRETS + NAME)).willReturn(aResponse().withStatus(200).withBody("{}")));
+
+        LightbitsTrustedHosts.Registration r = LightbitsTrustedHosts.register(client, NAME, NQN, KEY, null, Map.of());
+        assertFalse(r.twoWay);
+        assertTrue(r.targetKept);
+        wm.verify(putRequestedFor(urlEqualTo(SECRETS + NAME))
+                .withRequestBody(matchingJsonPath("$.targetSecretType", equalTo("Enabled")))
+                .withRequestBody(matchingJsonPath("$.targetSecret", equalTo(CTRL))));
+
+        wm.resetAll();
+        wm.stubFor(get(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody(hosts(NAME, NQN))));
+        wm.stubFor(get(urlEqualTo(SECRETS + NAME)).willReturn(aResponse().withStatus(200).withBody(
+                "{\"name\":\"" + NAME + "\",\"targetSecretType\":\"Disabled\",\"targetSecret\":\"\"}")));
+        wm.stubFor(put(urlEqualTo(SECRETS + NAME)).willReturn(aResponse().withStatus(200).withBody("{}")));
+        r = LightbitsTrustedHosts.register(client, NAME, NQN, KEY, null, Map.of());
+        assertFalse(r.targetKept);
+        wm.verify(putRequestedFor(urlEqualTo(SECRETS + NAME)).withRequestBody(matchingJsonPath("$.targetSecretType", equalTo("Disabled"))));
+    }
 }

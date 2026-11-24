@@ -331,8 +331,20 @@ the host side:
   effort: if the cluster call fails, the removal still completes and the management log asks
   to delete it by hand (`lbcli delete trusted-host`); until then a machine holding the key
   can still authenticate.
-- The discovery service (port 8009) does not authenticate, so discovery is unchanged. The
-  authentication is one-way: the host does not check the cluster.
+- The discovery service (port 8009) does not authenticate, so discovery is unchanged.
+- **Two-way (pool option `inbandAuthTwoWay=true`, with `inbandAuth=true`, off by default).**
+  The host also checks the cluster. Each host makes a second key, the controller key
+  (`/etc/nvme/lightbits/dhchap-ctrl-key`, same rules as the host key), and the management
+  server registers it as the trusted host's target secret (`targetSecretType=Enabled`). The
+  agent then connects the pool with its own configuration file
+  (`/etc/nvme/lightbits/auth-<pool uuid>.json`), written just before each connect from the
+  discovery log page of the endpoint it uses: nvme-cli takes a controller key only per port.
+  A path made that way refuses a cluster that cannot prove the key. Without the option the
+  authentication is one-way: the cluster checks the host, the host does not check the
+  cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way
+  pool keeps a target secret a two-way pool set. Readiness for a two-way pool also needs the
+  current controller key registered and on every path; move hosts onto new paths as in step
+  4 after turning the option on.
 
 **Warning: turning enforcement on too early can freeze a host.** Once the cluster admin runs
 `lbcli enable in-band-auth`, any NVMe/TCP path that does not hold the host's current key
@@ -384,7 +396,7 @@ wording is nvme-cli's, the cause is DH-HMAC-CHAP). Check a host's registration w
 `lbcli list trusted-hosts --project-name=<project>`.
 
 To rotate a host's key, put the host in maintenance (its VMs migrate away), delete
-`/etc/nvme/lightbits/dhchap-key`, disconnect it from the subsystem of **every** Lightbits
+`/etc/nvme/lightbits/dhchap-key` (and, for two-way, `/etc/nvme/lightbits/dhchap-ctrl-key`), disconnect it from the subsystem of **every** Lightbits
 cluster it uses (as in step 4, one `nvme disconnect -n` per `nqn.2016-01.com.lightbitslabs:`
 entry of `nvme list-subsys`) and cancel maintenance: a new key is made and registered with
 every `inbandAuth=true` pool the host is in, and the new paths hold it.

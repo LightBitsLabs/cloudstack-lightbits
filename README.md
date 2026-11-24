@@ -45,7 +45,8 @@ Working today (KVM):
 - NVMe in-band authentication (pool option `inbandAuth=true`): each host connects with its
   own DH-HMAC-CHAP key. The key is stored only on the host (root-only); the agent sends it to
   the management server, which registers the host with it as a trusted host on the cluster
-  and keeps only a fingerprint. The key is never logged. **Follow the rollout order in
+  and keeps only a fingerprint. The key is never logged. With `inbandAuthTwoWay=true` the
+  host also checks the cluster (two-way, with a second, controller key). **Follow the rollout order in
   INSTALL.md ("In-band authentication") before the cluster admin enables enforcement:**
   enabling it while a host still has paths without its current key can freeze that host's VMs
 - Multi-tenancy: pools authenticate with **project-scoped JWTs** (never the system JWT), and
