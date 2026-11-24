@@ -118,4 +118,38 @@ class LightbitsRevocationsTest {
         failWrites = false;
         LightbitsRevocations.clear(dao(), pool, nqn);
     }
+
+    @Test
+    void anOlderRecordKeptInMemoryIsNeverSavedOverANewerOne() {
+        String nqn = "nqn.2014-08.org.nvmexpress:uuid:replay-order";
+        long pool = 9105L;
+        StoragePoolDetailsDao dao = dao();
+        failWrites = true;
+        LightbitsRevocations.record(dao, pool, nqn);   // v1 kept in memory
+        failWrites = false;
+        LightbitsRevocations.record(dao, pool, nqn);   // v2 saved: v1 is gone from memory
+        String v2 = details.get(LightbitsRevocations.detailKey(nqn));
+        assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool));
+        assertEquals(v2, details.get(LightbitsRevocations.detailKey(nqn)), "the pass does not save v1 back");
+        LightbitsRevocations.clear(dao, pool, nqn);
+    }
+
+    @Test
+    void aRevocationSavedByThisPassIsListedEvenIfTheReadThenFails() {
+        String nqn = "nqn.2014-08.org.nvmexpress:uuid:saved-then-unreadable";
+        long pool = 9106L;
+        failWrites = true;
+        LightbitsRevocations.record(dao(), pool, nqn);
+        failWrites = false;
+        StoragePoolDetailsDao writesOnly = (StoragePoolDetailsDao) Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[] {StoragePoolDetailsDao.class}, (p, m, a) -> {
+                    if (m.getName().equals("addDetail")) {
+                        details.put((String) a[1], (String) a[2]);
+                        return null;
+                    }
+                    throw new IllegalStateException("database read down");
+                });
+        assertEquals(List.of(nqn), LightbitsRevocations.pending(writesOnly, pool));
+        LightbitsRevocations.clear(dao(), pool, nqn);
+    }
 }

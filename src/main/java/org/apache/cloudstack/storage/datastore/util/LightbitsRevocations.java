@@ -65,25 +65,52 @@ public final class LightbitsRevocations {
         }
     }
 
+    /**
+     * Every write, re-save and drop of one pool's record for one NQN on this management server
+     * runs under this monitor, so a version check and the change it guards are one step, and a
+     * re-save of an older value never lands after a newer record.
+     */
+    private static final Map<String, Object> MONITORS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static Object monitor(long poolId, String nqn) {
+        return MONITORS.computeIfAbsent(poolId + "/" + nqn, k -> new Object());
+    }
+
     /** Record a revocation of the NQN on the pool's cluster as pending. */
     public static void record(StoragePoolDetailsDao dao, long poolId, String nqn) {
         // the value carries a version: a retry drops only the record it looked at, never one a
         // removal wrote after that
-        save(dao, poolId, nqn, nqn + " " + Long.toHexString(System.currentTimeMillis())
-                + "-" + Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt()));
+        String value = nqn + " " + Long.toHexString(System.currentTimeMillis())
+                + "-" + Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt());
+        synchronized (monitor(poolId, nqn)) {
+            try {
+                dao.addDetail(poolId, detailKey(nqn), value, false);
+                unsaved(poolId).remove(nqn);   // anything kept in memory is older
+            } catch (RuntimeException e) {
+                // CloudStack removes the host whatever its listeners return, so the revocation cannot
+                // hold the removal up: keep it in memory with its version, saved again on each retry pass.
+                unsaved(poolId).put(nqn, value);
+                LOG.error("Lightbits: could not save the pending revocation of removed host {} on pool {} ({}); it is kept in"
+                        + " memory and retried, but a management server restart before it is saved or confirmed loses it."
+                        + " Check that no volume ACL of the pool lists the NQN and that its trusted host is gone", nqn, poolId,
+                        e.getMessage());
+            }
+        }
     }
 
-    private static void save(StoragePoolDetailsDao dao, long poolId, String nqn, String value) {
-        try {
-            dao.addDetail(poolId, detailKey(nqn), value, false);
-            unsaved(poolId).remove(nqn, value);
-        } catch (RuntimeException e) {
-            // CloudStack removes the host whatever its listeners return, so the revocation cannot
-            // hold the removal up: keep it in memory with its version, saved again on each retry pass.
-            unsaved(poolId).put(nqn, value);
-            LOG.error("Lightbits: could not save the pending revocation of removed host {} on pool {} ({}); it is kept in"
-                    + " memory and retried, but a management server restart before it is saved or confirmed loses it. Check"
-                    + " that no volume ACL of the pool lists the NQN and that its trusted host is gone", nqn, poolId, e.getMessage());
+    /** Save again a record kept in memory, if it is still the one kept (a newer record wins). */
+    private static boolean resave(StoragePoolDetailsDao dao, long poolId, String nqn, String value) {
+        synchronized (monitor(poolId, nqn)) {
+            if (!value.equals(unsaved(poolId).get(nqn))) {
+                return false;
+            }
+            try {
+                dao.addDetail(poolId, detailKey(nqn), value, false);
+                unsaved(poolId).remove(nqn, value);
+                return true;
+            } catch (RuntimeException e) {
+                return false;   // stays in memory for the next pass
+            }
         }
     }
 
@@ -97,16 +124,23 @@ public final class LightbitsRevocations {
     /** The NQNs whose revocation on the pool's cluster is pending. */
     public static List<String> pending(StoragePoolDetailsDao dao, long poolId) {
         // a revocation kept in memory is saved now, with its version, if the database takes it
+        List<String> out = new ArrayList<>();
         for (Map.Entry<String, String> e : new java.util.HashMap<>(unsaved(poolId)).entrySet()) {
-            save(dao, poolId, e.getKey(), e.getValue());
+            if (resave(dao, poolId, e.getKey(), e.getValue())) {
+                out.add(e.getKey());   // listed even if the read below fails
+            }
         }
-        List<String> out = new ArrayList<>(unsaved(poolId).keySet());
+        for (String nqn : unsaved(poolId).keySet()) {
+            if (!out.contains(nqn)) {
+                out.add(nqn);
+            }
+        }
         Map<String, String> details;
         try {
             details = dao.listDetailsKeyPairs(poolId);
         } catch (RuntimeException e) {
-            // the ones kept in memory are still retried
-            LOG.warn("Lightbits: could not read the pending revocations of pool {} ({}); retrying the {} kept in memory", poolId,
+            // the ones kept in memory or just saved are still retried
+            LOG.warn("Lightbits: could not read the pending revocations of pool {} ({}); retrying the {} known here", poolId,
                     e.getMessage(), out.size());
             return out;
         }
@@ -124,8 +158,10 @@ public final class LightbitsRevocations {
     }
 
     static void clear(StoragePoolDetailsDao dao, long poolId, String nqn) {
-        unsaved(poolId).remove(nqn);
-        dao.removeDetail(poolId, detailKey(nqn));
+        synchronized (monitor(poolId, nqn)) {
+            unsaved(poolId).remove(nqn);
+            dao.removeDetail(poolId, detailKey(nqn));
+        }
     }
 
     /** The NQN of a record's value (the NQN, then its version). */
@@ -150,9 +186,15 @@ public final class LightbitsRevocations {
 
     /** Drop the record only if it is still the version the caller looked at. */
     static void clearIf(StoragePoolDetailsDao dao, long poolId, String nqn, String observed) {
-        if (java.util.Objects.equals(recordValue(dao, poolId, nqn), observed)) {
-            clear(dao, poolId, nqn);
-        } else {
+        boolean dropped;
+        // the check and the drop are one step against records written on this management server
+        synchronized (monitor(poolId, nqn)) {
+            dropped = java.util.Objects.equals(recordValue(dao, poolId, nqn), observed);
+            if (dropped) {
+                clear(dao, poolId, nqn);
+            }
+        }
+        if (!dropped) {
             LOG.info("Lightbits: the pending revocation of host NQN {} on pool {} was written again meanwhile; it stays", nqn, poolId);
         }
     }
