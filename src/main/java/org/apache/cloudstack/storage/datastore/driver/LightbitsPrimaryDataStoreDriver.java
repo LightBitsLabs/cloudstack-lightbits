@@ -296,7 +296,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         try {
             if (!org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.pending(storagePoolDetailsDao, poolId).isEmpty()) {
                 org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.retry(storagePoolDetailsDao, hostDetailsDao,
-                        HOST_NQN_DETAIL, poolId, cfg, clientFor(cfg));
+                        HOST_NQN_DETAIL, poolId, cfg, clientFor(cfg), hostGateLocker);
             }
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: could not retry the pending revocations of pool {}: {}", poolId, e.getMessage());
