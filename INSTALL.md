@@ -352,8 +352,9 @@ the host side:
   message saying how to move the host; VMs already running keep working. **A VM that
   maintenance cannot migrate is stopped by CloudStack**, so move the hosts in this order:
   1. Before turning two-way on, put one host of the pool in maintenance (its VMs migrate as
-     usual, the pool is still one-way) and disconnect it from the cluster's subsystem
-     (`nvme disconnect -n <subsystem NQN>`).
+     usual, the pool is still one-way). Wait until it is in Maintenance and runs no VMs, and
+     until nothing outside CloudStack on the host uses the cluster's volumes, then disconnect
+     it from the cluster's subsystem (`nvme disconnect -n <subsystem NQN>`).
   2. Turn two-way on (`cmk update storagepool id=<pool-id> details[0].inbandAuthTwoWay=true`)
      and reconnect the hosts that are not in maintenance (`cmk reconnect host id=<host-id>`),
      which registers their controller keys.
@@ -362,7 +363,7 @@ the host side:
   4. For each further host, one at a time: first migrate its VMs to moved hosts
      (`cmk migrate virtualmachine virtualmachineid=<vm-id> hostid=<moved-host-id>`), since
      CloudStack may otherwise pick a host that is not moved yet, then put it in maintenance,
-     disconnect it from the subsystem, cancel maintenance and reconnect it.
+     wait as in 1, disconnect it from the subsystem, cancel maintenance and reconnect it.
 
   The moved hosts need room for the VMs of the next host, as for any maintenance.
 
@@ -395,9 +396,11 @@ this order:
    <id> are NOT ready`, with the hosts that are not registered and those with NVMe/TCP paths
    that do not hold the host's current key: paths made before the option was on hold none,
    and paths made before a key was replaced hold an old one. Move each of those hosts onto keyed
-   paths: put it in maintenance (its VMs migrate away), disconnect it from the cluster's
-   subsystem (`nvme disconnect -n <subsystem NQN>`, the `nqn.2016-01.com.lightbitslabs:`
-   entry of `nvme list-subsys`), and cancel maintenance; its next connects use the key.
+   paths: put it in maintenance (its VMs migrate away), wait until it is in Maintenance and
+   runs no VMs, and until nothing outside CloudStack on the host uses the cluster's volumes,
+   disconnect it from the cluster's subsystem (`nvme disconnect -n <subsystem NQN>`, the
+   `nqn.2016-01.com.lightbitslabs:` entry of `nvme list-subsys`), and cancel maintenance; its
+   next connects use the key.
 5. Enforcement is cluster-wide, and the readiness line covers only the hosts of one pool.
    Before the cluster admin turns it on, every host and client that uses the cluster must be
    ready: the hosts of every CloudStack pool on the cluster (each pool logs its own line,
