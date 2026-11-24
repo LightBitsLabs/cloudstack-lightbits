@@ -238,6 +238,9 @@ public class LightbitsHostKey {
             }
             // The directory's own mode exposes no key: a file readable only by root stays so, and a
             // file another user replaced through a writable directory is no longer root's (below).
+            // It is made root-only before its entries are listed and checked, so no other user can
+            // add or replace an entry between the checks and their use.
+            Files.setPosixFilePermissions(dir, DIR_MODE);
         }
         // every file here holds or marks keys: each cluster's keys and configurations, the
         // host-wide ones, the per-pool two-way configurations and the rotation marks
@@ -292,9 +295,6 @@ public class LightbitsHostKey {
                         + " they are root-only again, but the keys may have been copied. Rotate them (INSTALL.md, \"Rotating"
                         + " the keys\")");
             }
-        }
-        if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
-            Files.setPosixFilePermissions(dir, DIR_MODE);
         }
         if (!untrusted) {
             for (Path f : files) {
