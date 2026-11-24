@@ -333,12 +333,28 @@ class LightbitsHostListenerTest {
     // ---- IP ACL ----
 
     @Test
-    void withIpAclTheDataIpsAreRecordedAndTheVolumesRefreshed() {
+    void withIpAclTheDataIpsAreRecordedAndTheVolumesRefreshed() throws Exception {
         option(LightbitsPoolConfig.KEY_IP_ACL, "true");
+        putDetail("nvme.hostnqn", NQN);
+        String name = LightbitsUtil.volumeName("cs1", POOL, "aaaaaaaa-1111-2222-3333-444444444444");
+        String vol = "{\"UUID\":\"u1\",\"name\":\"" + name + "\",\"state\":\"Available\",\"ETag\":\"1\","
+                + "\"acl\":{\"values\":[\"" + NQN + "\"]},\"IPAcl\":{\"values\":[\"10.0.0.99\"]}}";
+        String updated = vol.replace("10.0.0.99", "10.0.0.5").replace("\"ETag\":\"1\"", "\"ETag\":\"2\"");
+        wm.stubFor(get(urlPathEqualTo(P + "/volumes")).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + vol + "]}")));
+        wm.stubFor(get(urlPathEqualTo(P + "/volumes")).withQueryParam("name", equalTo(name)).atPriority(1).inScenario("acl")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + vol + "]}")));
+        wm.stubFor(put(urlEqualTo(P + "/volumes/u1")).inScenario("acl").willSetStateTo("put")
+                .willReturn(aResponse().withStatus(200).withBody("{}")));
+        // after the update the cluster reports it (the client waits for that)
+        wm.stubFor(get(urlEqualTo(P + "/volumes/u1")).inScenario("acl").whenScenarioStateIs("put")
+                .willReturn(aResponse().withStatus(200).withBody(updated)));
         listener.hostConnect(HOST, POOL);
         assertEquals("10.0.0.5", detail("lightbits.dataips." + POOL));
         assertTrue(nqnCommands().get(0).getEndpoints() != null, "the agent is asked for its data IPs");
-        wm.verify(getRequestedFor(urlPathEqualTo(P + "/volumes")));
+        wm.verify(putRequestedFor(urlEqualTo(P + "/volumes/u1"))
+                .withRequestBody(matchingJsonPath("$.IPAcl.values[0]", equalTo("10.0.0.5")))
+                .withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo(NQN))));
     }
 
     @Test
@@ -427,6 +443,11 @@ class LightbitsHostListenerTest {
         listener.hostConnect(HOST, POOL);
         assertNull(detail(LightbitsTrustedHosts.detailKey(POOL)));
         assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL));
+        // the next connect registers it
+        wm.stubFor(post(urlEqualTo(P + "/trustedHosts")).willReturn(aResponse().withStatus(200).withBody("{}")));
+        listener.hostConnect(HOST, POOL);
+        wm.verify(putRequestedFor(urlEqualTo(P + "/trustedHostSecrets/" + TH_NAME)));
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(LightbitsTrustedHosts.detailKey(POOL)));
     }
 
     // ---- rotation ----
