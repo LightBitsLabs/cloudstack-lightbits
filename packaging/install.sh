@@ -127,7 +127,8 @@ read_props() {  # prints the properties file inside the jar, or nothing
 }
 command -v unzip >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || can_inspect=0
 props="$(read_props)"
-prop() { echo "$props" | sed -n "s/^$1=//p" | head -1 | tr -d '\r'; }
+# A property the build did not fill in (left as ${...}) counts as missing, as in LightbitsVersion.
+prop() { local v; v="$(echo "$props" | sed -n "s/^$1=//p" | head -1 | tr -d '\r')"; [[ "$v" == '${'* ]] && v=""; echo "$v"; }
 jar_version="$(prop version)"
 jar_built="$(prop built)"
 jar_cloudstack="$(prop cloudstack)"
