@@ -11,6 +11,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   controller key and none is a path it rejected but could not disconnect; otherwise it
   refuses with how to move the host onto two-way paths. Running VMs are not affected.
 
+### Known limitations
+- Two-way: a migration onto a host whose paths do not hold its current controller key is
+  refused, and CloudStack stops a VM that maintenance cannot migrate. Turning two-way on for a
+  pool with running VMs therefore needs the host order in INSTALL.md: one host emptied before
+  the option is turned on, and VMs migrated by hand onto moved hosts before each further
+  maintenance.
+
 ## [0.1.0-rc.1] - 2026-11-24
 
 Release candidate for 0.1.0: feature-complete and validated in the lab; for evaluation and
