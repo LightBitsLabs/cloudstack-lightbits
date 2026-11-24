@@ -214,9 +214,12 @@ class LightbitsApiClientTest {
     void iopsPoliciesAreListedForTheProjectAndOtherKindsLeftOut() {
         wm.stubFor(get(urlEqualTo("/api/v2/policies?projectName=" + PROJECT)).willReturn(aResponse().withStatus(200).withBody(
                 "{\"policies\":[{\"name\":\"gold\",\"QoSRateLimitPolicy\":{\"limitIOPS\":{\"readIOPSLimit\":20000,\"writeIOPSLimit\":10000}}},"
+                + "{\"name\":\"old\",\"state\":\"Deprecated\",\"QoSRateLimitPolicy\":{\"limitIOPS\":{\"readIOPSLimit\":1000,\"writeIOPSLimit\":1000}}},"
+                + "{\"name\":\"active\",\"state\":\"Active\",\"QoSRateLimitPolicy\":{\"limitIOPS\":{\"readIOPSLimit\":5000,\"writeIOPSLimit\":5000}}},"
                 + "{\"name\":\"bw\",\"QoSRateLimitPolicy\":{\"limitBw\":{\"readBWLimit\":10,\"writeBWLimit\":10}}}]}")));
         java.util.List<LightbitsApiClient.IopsPolicy> ps = client.listIopsPolicies();
-        assertEquals(1, ps.size());
+        assertEquals(2, ps.size(), "gold (no state) and active are kept; deprecated and bandwidth are left out");
+        assertEquals("active", ps.get(1).name);
         assertEquals("gold", ps.get(0).name);
         assertEquals(20000, ps.get(0).readIops);
         assertEquals(10000, ps.get(0).writeIops);

@@ -225,9 +225,9 @@ volume creation with the offering detail in the reason.
 **QoS from IOPS (pool option `qosFromIops=true`, off by default).** With it, an offering
 that sets a max IOPS (fixed, or customized by the user) and names no `lightbitsQosPolicy` gets
 the IOPS policy visible to the project with the lowest limit that still gives at least that max
-IOPS for reads and for writes (equal limits: the first by name). Unlimited policies and
-bandwidth or IOPS-per-GB policies are not candidates. If none fits, the volume creation fails
-and the error lists the IOPS policies the project can see. Min IOPS has no Lightbits
+IOPS for reads and for writes (equal limits: the first by name). Unlimited policies,
+bandwidth or IOPS-per-GB policies, and policies whose state is not Active (for example
+Deprecated) are not candidates. If none fits, the volume creation fails and the error lists the IOPS policies the project can see. Min IOPS has no Lightbits
 equivalent and is not used. CloudStack keeps an offering's IOPS only when it is created
 with `customizediops=false miniops=<n> maxiops=<n>` (or `customizediops=true` for user-set
 IOPS). The cluster may round a policy's limits (on 3.22.1, 1000 was stored as 1024); the
@@ -246,7 +246,9 @@ the volume's next attach (or its VM's next start or migration). An offering that
 policy, with no IOPS policy picked for it and no pool default (`qosPolicy`), leaves the
 volume on the policy it has; otherwise the volume moves to the policy those resolve to (for
 example, to the pool default). A failed change is logged ("could not change
-the QoS policy of volume ...") and tried again at the next attach or resize.
+the QoS policy of volume ...") and tried again at the next attach or resize. When the
+plugin could not confirm the change (the cluster did not answer), the new policy may already
+be in effect; check it as shown below.
 
 **Operators: an offering change can leave the old limit in place.** Until one of the events
 above, the volume keeps running with its old QoS policy while CloudStack already shows the
