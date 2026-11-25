@@ -350,10 +350,13 @@ class LightbitsStorageAdaptorTest {
         assertTrue(targets.get(0).options.contains("traddr=10.0.1.1,") && targets.get(0).options.contains("dhchap_ctrl_secret=DHHC-1:"),
                 "the port with both keys");
         assertTrue(java.nio.file.Files.exists(tmp.resolve("lightbits").resolve("dhchap-ctrl-key")));
+        sys.commands.clear();
         // no device appears in this fake: the connect before the wait is what is checked here
         assertThrows(CloudRuntimeException.class, () -> a.connectPhysicalDisk(VOL, twoWay, null, false));
         assertTrue(sys.fabrics.stream().anyMatch(o -> o.contains("traddr=10.0.1.1,")), "connected directly");
         assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme connect-all")), "a two-way pool never runs connect-all");
+        assertEquals(1, sys.commands.stream().filter(c -> c.startsWith("nvme discover")).count(),
+                "the connect reads the discovery log page once: the ports connected are the ports of that read");
         assertTrue(sys.commands.stream().noneMatch(c -> c.contains("DHHC-1")), "no key on any command line");
         KVMStoragePool oneWay = a.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
                 Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.0.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true"), true);
