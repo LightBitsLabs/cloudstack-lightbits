@@ -5,6 +5,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0-rc.2] - 2026-11-25
+
+Second release candidate for 0.1.0: hardening of in-band authentication and host removal, and
+documentation for a first trial. For evaluation and pre-production testing, not yet a
+general-availability release. Built for CloudStack 4.22.1.0 and 4.23.0.0 (KVM); lab-validated on
+CloudStack 4.23.0.0 with Lightbits 3.22.1. Upgrading from 0.1.0-rc.1: install the same jar on the
+management server and every KVM host; no other step. With `inbandAuthTwoWay=true` on a pool with
+running VMs, follow the host order in INSTALL.md ("In-band authentication").
+
 ### Fixed
 - With `ipAcl=true`, the management log line with a host's data IPs is written whenever they
   change, not only when they are first recorded.
