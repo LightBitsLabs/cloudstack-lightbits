@@ -394,7 +394,26 @@ the host side:
   cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way
   pool keeps a target secret a two-way pool set. Readiness for a two-way pool also needs the
   current controller key registered and on every path; move hosts onto new paths as in step
-  4 after turning the option on.
+  4 after turning the option on. **Until a host is moved, new attaches, VM starts and
+  migrations onto it fail for this pool's volumes:** the agent refuses to hand a volume to a VM
+  while any path of the pool's subsystem lacks the host's current controller key, with a
+  message saying how to move the host; VMs already running keep working. **A VM that
+  maintenance cannot migrate is stopped by CloudStack**, so move the hosts in this order:
+  1. Before turning two-way on, put one host of the pool in maintenance (its VMs migrate as
+     usual, the pool is still one-way). Wait until it is in Maintenance and runs no VMs, and
+     until nothing outside CloudStack on the host uses the cluster's volumes, then disconnect
+     it from the cluster's subsystem (`nvme disconnect -n <subsystem NQN>`).
+  2. Turn two-way on (`cmk update storagepool id=<pool-id> details[0].inbandAuthTwoWay=true`)
+     and reconnect the hosts that are not in maintenance (`cmk reconnect host id=<host-id>`),
+     which registers their controller keys.
+  3. Cancel maintenance on the first host and reconnect it: it is moved, and the readiness line
+     no longer lists it.
+  4. For each further host, one at a time: first migrate its VMs to moved hosts
+     (`cmk migrate virtualmachine virtualmachineid=<vm-id> hostid=<moved-host-id>`), since
+     CloudStack may otherwise pick a host that is not moved yet, then put it in maintenance,
+     wait as in 1, disconnect it from the subsystem, cancel maintenance and reconnect it.
+
+  The moved hosts need room for the VMs of the next host, as for any maintenance.
 
 **Warning: turning enforcement on too early can freeze a host.** Once the cluster admin runs
 `lbcli enable in-band-auth`, any NVMe/TCP path that does not hold the host's current key
@@ -425,9 +444,11 @@ this order:
    <id> are NOT ready`, with the hosts that are not registered and those with NVMe/TCP paths
    that do not hold the host's current key: paths made before the option was on hold none,
    and paths made before a key was replaced hold an old one. Move each of those hosts onto keyed
-   paths: put it in maintenance (its VMs migrate away), disconnect it from the cluster's
-   subsystem (`nvme disconnect -n <subsystem NQN>`, the `nqn.2016-01.com.lightbitslabs:`
-   entry of `nvme list-subsys`), and cancel maintenance; its next connects use the key.
+   paths: put it in maintenance (its VMs migrate away), wait until it is in Maintenance and
+   runs no VMs, and until nothing outside CloudStack on the host uses the cluster's volumes,
+   disconnect it from the cluster's subsystem (`nvme disconnect -n <subsystem NQN>`, the
+   `nqn.2016-01.com.lightbitslabs:` entry of `nvme list-subsys`), and cancel maintenance; its
+   next connects use the key.
 5. Enforcement is cluster-wide, and the readiness line covers only the hosts of one pool.
    Before the cluster admin turns it on, every host and client that uses the cluster must be
    ready: the hosts of every CloudStack pool on the cluster (each pool logs its own line,

@@ -16,6 +16,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   and kept (so the host keeps working), but are now flagged as possibly copied: the agent
   reports it, the management log warns, and the readiness line lists the host until its keys
   are rotated.
+- Two-way in-band authentication: the agent hands a volume to a VM (attach, VM start, migration
+  onto the host) only when every path of the volume's subsystem holds the host's current
+  controller key and none is a path it rejected but could not disconnect; otherwise it
+  refuses with how to move the host onto two-way paths. Running VMs are not affected.
+
+### Known limitations
+- Two-way: a migration onto a host whose paths do not hold its current controller key is
+  refused, and CloudStack stops a VM that maintenance cannot migrate. Turning two-way on for a
+  pool with running VMs therefore needs the host order in INSTALL.md: one host emptied before
+  the option is turned on, and VMs migrated by hand onto moved hosts before each further
+  maintenance.
 
 ## [0.1.0-rc.1] - 2026-11-24
 
