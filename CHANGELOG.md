@@ -5,6 +5,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- A volume could fail to attach, or a VM to migrate, with "did not appear on this host within
+  60s" when it was the host's first volume on that cluster: the cluster applies the new ACL in
+  the background, and the connect made right after the grant could read a discovery log page
+  that did not list the host yet, so it made no path. While the volume has not appeared, the
+  agent now connects again every 5 seconds during the first half of the wait; a connect again
+  makes only the missing paths.
+
 ### Changed
 - Documentation of two-way in-band authentication states what it checks (INSTALL.md, "What two-way
   checks").

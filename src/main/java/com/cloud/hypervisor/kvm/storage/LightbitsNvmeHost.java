@@ -775,6 +775,22 @@ class LightbitsNvmeHost {
      * event. A timeout is reported with what is known and the usual cause (the volume's ACL).
      */
     String waitForDevice(String volumeUuid, int waitSecs, String hostNqnHint) {
+        return waitForDevice(volumeUuid, waitSecs, hostNqnHint, null);
+    }
+
+    /** Seconds between the connects {@link #waitForDevice(String, int, String, Runnable)} makes again. */
+    static final int CONNECT_AGAIN_SECS = 5;
+
+    /**
+     * As {@link #waitForDevice(String, int, String)}, and while the device has not appeared, run
+     * {@code connectAgain} every {@value #CONNECT_AGAIN_SECS} s during the first half of the wait.
+     * A cluster applies an ACL change in the background: a connect made right after the grant can
+     * read a discovery log page that does not list this host yet and then makes no path, which a
+     * host with no earlier path to that cluster (its first volume there) never gets otherwise. A
+     * connect again makes only the paths that are missing. Its failure is logged, not thrown: the
+     * wait goes on and ends with its own diagnosis.
+     */
+    String waitForDevice(String volumeUuid, int waitSecs, String hostNqnHint, Runnable connectAgain) {
         String uuid = requireVolumeUuid(volumeUuid);
         String link = BY_ID_PREFIX + uuid;
         boolean rescanned = false;
@@ -782,6 +798,18 @@ class LightbitsNvmeHost {
             if (sys.exists(link)) {
                 verifyIdentity(uuid);
                 return link;
+            }
+            if (connectAgain != null && i > 0 && i % CONNECT_AGAIN_SECS == 0 && i <= waitSecs / 2) {
+                LOG.info("Lightbits: volume {} has not appeared after {} s; connecting to its cluster again", uuid, i);
+                try {
+                    connectAgain.run();
+                } catch (RuntimeException e) {
+                    LOG.warn("Lightbits: connecting again for volume {} failed ({}); still waiting for it", uuid, e.getMessage());
+                }
+                if (sys.exists(link)) {
+                    verifyIdentity(uuid);
+                    return link;
+                }
             }
             if (!rescanned && i >= Math.max(1, waitSecs / 2)) {
                 rescanned = true;

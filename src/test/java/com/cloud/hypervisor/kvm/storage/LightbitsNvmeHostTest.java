@@ -243,6 +243,29 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
+    void aVolumeWhoseFirstConnectMadeNoPathAppearsAfterAConnectAgain() {
+        // the cluster had not applied the grant yet when the first connect read its discovery log page
+        int[] connects = {0};
+        Runnable connectAgain = () -> {
+            connects[0]++;
+            attached();
+        };
+        assertEquals(LINK, host.waitForDevice(VOL, 60, null, connectAgain));
+        assertEquals(1, connects[0], "connected again once, after " + LightbitsNvmeHost.CONNECT_AGAIN_SECS + " s");
+    }
+
+    @Test
+    void connectsAgainOnlyInTheFirstHalfOfTheWaitAndAFailedOneDoesNotEndIt() {
+        int[] connects = {0};
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> host.waitForDevice(VOL, 20, null, () -> {
+            connects[0]++;
+            throw new CloudRuntimeException("no endpoint answered");
+        }));
+        assertEquals(2, connects[0], "at 5 s and 10 s of a 20 s wait");
+        assertTrue(e.getMessage().contains("did not appear"), e.getMessage());
+    }
+
+    @Test
     void aTimeoutOnAConnectedHostPointsAtTheAcl() {
         sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
         CloudRuntimeException e = assertThrows(CloudRuntimeException.class,

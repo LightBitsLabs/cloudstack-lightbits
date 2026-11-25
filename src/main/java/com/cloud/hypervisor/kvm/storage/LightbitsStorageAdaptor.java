@@ -183,7 +183,11 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         }
         // Throws with a diagnosis (paths, ACL hint) rather than returning false: the caller
         // would turn false into a generic "failed to connect disks".
-        String device = nvme.waitForDevice(uuid, DEFAULT_WAIT_SECS, nvme.hostNqn());
+        String device = nvme.waitForDevice(uuid, DEFAULT_WAIT_SECS, nvme.hostNqn(), () -> {
+            synchronized (CONNECT_LOCK) {
+                connectPool(pool, endpoints, LightbitsNvmeHost.CONNECT_TIMEOUT_MS, configFor);
+            }
+        });
         if (twoWay(pool)) {
             requireTwoWayPaths(nvme.verifyIdentity(uuid));
         }
