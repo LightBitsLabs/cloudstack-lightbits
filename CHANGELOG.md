@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 - Documentation of two-way in-band authentication states what it checks (INSTALL.md, "What two-way
   checks").
+- A pending revocation of a removed host that the database cannot save is also kept in a local
+  file on the management server (`/var/lib/cloudstack/lightbits/pending-revocations`, root only),
+  so a restart of that management server no longer loses it. INSTALL.md, "Removing a host",
+  gives the manual procedure for the case where that management server is lost.
 
 ### Known limitations
 - Two-way in-band authentication (`inbandAuthTwoWay=true`) checks the cluster only on connections
@@ -16,6 +20,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   target that does not ask for authentication, so two-way does not replace an isolated storage
   network. The CHANGELOG entries of 0.1.0-rc.1 and 0.1.0-rc.2 ("the host checks the cluster
   too") should be read with this.
+- A pending revocation that neither the database nor the local file could keep, or whose
+  management server is lost before it completes, is not retried by another management server:
+  keep the removed machine fenced and remove its access by hand (INSTALL.md, "Removing a host").
+  This needs a database failure during the removal plus the loss of that server, so it is
+  documented rather than handled in code.
 
 ## [0.1.0-rc.2] - 2026-11-25
 
