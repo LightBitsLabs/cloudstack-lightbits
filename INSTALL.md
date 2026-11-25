@@ -384,8 +384,8 @@ the host side:
   storage statistics poll and at host connects until the cluster confirms it; the management
   log says so each time. If the same machine is added back to CloudStack first, its pending
   revocation is dropped. Until a pending revocation completes, the removed machine keeps its
-  access, so restore the API connectivity (or remove its NQN and trusted host by hand with
-  `lbcli`) when the log reports one.
+  access, so restore the API connectivity (or remove its NQN and trusted host by hand, see
+  "Removing a host" below) when the log reports one.
 - The discovery service (port 8009) does not authenticate, so discovery is unchanged.
 - **Two-way (pool option `inbandAuthTwoWay=true`, with `inbandAuth=true`, off by default).**
   The host also checks the cluster. Each host makes a second key, the controller key
@@ -577,6 +577,35 @@ A host NQN can be a trusted host in only one project of a cluster. If the host i
 trusted host of another project, the pool cannot change it and logs that the host is
 registered elsewhere; the host still connects, because every pool on the host uses the same
 key, as long as that registration holds it.
+
+### Removing a host
+
+Removing a host from CloudStack revokes its access on the cluster: its NQN leaves the ACL of
+every volume of the pool, its address leaves every volume IP ACL, and the trusted host the
+plugin made for it is deleted. When the cluster cannot take that at once, the revocation is
+kept as pending and retried (see "In-band authentication" above).
+
+If the management server cannot save a pending revocation in its database either, it logs an
+ERROR (`could not save the pending revocation of removed host ...`), keeps the revocation in
+memory and in `/var/lib/cloudstack/lightbits/pending-revocations` on that management server
+(root only), and keeps retrying. A restart of the same management server picks the file up
+again. If that management server is lost (or the file could not be written, which the same
+ERROR says) before the revocation completes, nothing retries it. In that case:
+
+1. Keep the removed machine fenced: powered off, or cut from the storage network, until step 3
+   is done. Do not reinstall it and add it back first.
+2. Find the volumes of the pool's project whose `acl` lists its NQN (the NQN is in the ERROR
+   line) or, with the IP ACL option, whose `IPAcl` lists one of its data IP addresses (its NQN
+   may already be gone from a volume whose IP ACL still has its address):
+   `lbcli list volumes --project-name=<project> -o json`.
+3. For each such volume, set the ACL again without that NQN (and the IP ACL without its
+   address); `--acl` and `--ip-acl` replace the whole list, so give the remaining entries:
+   `lbcli update volume --project-name=<project> --uuid=<volume uuid> --acl <remaining NQNs>`.
+   With in-band authentication, delete its trusted host:
+   `lbcli delete trusted-host --project-name=<project> --name=cs-<environment>-host-<host uuid>`.
+
+A host that disconnects its paths cleanly loses nothing by this; the procedure is for a host
+that may still hold paths or keys while it should not.
 
 ## TLS: verifying the cluster certificate
 
