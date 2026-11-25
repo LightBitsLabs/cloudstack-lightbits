@@ -5,6 +5,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- With `ipAcl=true`, the management log line with a host's data IPs is written whenever they
+  change, not only when they are first recorded.
+
+### Changed
+- README and INSTALL.md: a quick start for a first trial; the security options presented as
+  optional, with what each adds and costs.
+
 ## [0.1.0-rc.1] - 2026-11-24
 
 Release candidate for 0.1.0: feature-complete and validated in the lab; for evaluation and
