@@ -67,7 +67,9 @@ for what each adds, what it costs to run, and when to consider it):
   own DH-HMAC-CHAP key. The key is stored only on the host (root-only); the agent sends it to
   the management server, which registers the host with it as a trusted host on the cluster
   and keeps only a fingerprint. The key is never logged. With `inbandAuthTwoWay=true` the
-  host also checks the cluster (two-way, with a second, controller key). Keys are rotated from
+  host also checks the cluster (two-way, with a second, controller key) on connections the
+  cluster authenticates, that is once enforcement is on; it does not replace an isolated
+  storage network (INSTALL.md, "What two-way checks"). Keys are rotated from
   CloudStack (pool detail `inbandKeyGeneration`, then a maintenance cycle and a reconnect per host). **Follow the rollout order in
   INSTALL.md ("In-band authentication") before the cluster admin enables enforcement:**
   enabling it while a host still has paths without its current key can freeze that host's VMs
