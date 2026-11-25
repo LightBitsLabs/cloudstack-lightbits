@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -180,6 +181,18 @@ class LightbitsRevocationsTest {
         assertFalse(java.nio.file.Files.exists(f), "nothing left only locally");
         deleteAll(dao, pool, nqn);
         assertTrue(LightbitsRevocations.pending(dao, pool).isEmpty());
+    }
+
+    @Test
+    void theLocalCopyKeepsNonAsciiNqnsAndSkipsOnlyDamagedLines() {
+        byte[] bytes = ("1 lightbits.revoke.a nqn.2026-01.com.example:h\u00f6st\nbad \u0000\n").getBytes(StandardCharsets.UTF_8);
+        byte[] damaged = java.util.Arrays.copyOf(bytes, bytes.length + 3);
+        damaged[bytes.length] = (byte) 0xc3;
+        damaged[bytes.length + 1] = (byte) 0x28;
+        damaged[bytes.length + 2] = '\n';
+        List<String> lines = LightbitsRevocations.utf8Lines(damaged);
+        assertEquals("1 lightbits.revoke.a nqn.2026-01.com.example:h\u00f6st", lines.get(0));
+        assertTrue(lines.stream().noneMatch(l -> l.contains("(")), "the damaged line is skipped");
     }
 
     @Test

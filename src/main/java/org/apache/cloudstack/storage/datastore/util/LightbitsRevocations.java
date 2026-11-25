@@ -118,8 +118,7 @@ public final class LightbitsRevocations {
         }
         try {
             int n = 0;
-            // ISO-8859-1 decodes any byte, so a damaged line cannot keep the good ones from being read
-            for (String line : java.nio.file.Files.readAllLines(f, StandardCharsets.ISO_8859_1)) {
+            for (String line : utf8Lines(java.nio.file.Files.readAllBytes(f))) {
                 String[] p = line.trim().split(" ");
                 if (p.length != 3 || !p[1].startsWith(DETAIL_PREFIX) || p[2].isEmpty()) {
                     continue;
@@ -137,6 +136,24 @@ public final class LightbitsRevocations {
         } catch (java.io.IOException | RuntimeException e) {
             LOG.error("Lightbits: could not read the pending revocations kept in {}: {}", f, e.getMessage());
         }
+    }
+
+    /** The lines of {@code bytes} decoded as UTF-8; a line that is not valid UTF-8 is skipped, the others are kept. */
+    static List<String> utf8Lines(byte[] bytes) {
+        List<String> lines = new java.util.ArrayList<>();
+        int start = 0;
+        for (int i = 0; i <= bytes.length; i++) {
+            if (i == bytes.length || bytes[i] == '\n') {
+                try {
+                    lines.add(StandardCharsets.UTF_8.newDecoder()
+                            .decode(java.nio.ByteBuffer.wrap(bytes, start, i - start)).toString());
+                } catch (java.nio.charset.CharacterCodingException e) {
+                    // a damaged line: skipped
+                }
+                start = i + 1;
+            }
+        }
+        return lines;
     }
 
     /** Write the records kept in memory to the local copy (or remove it when none is left). */
