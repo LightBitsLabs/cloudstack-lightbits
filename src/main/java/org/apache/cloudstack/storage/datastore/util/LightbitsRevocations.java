@@ -104,8 +104,11 @@ public final class LightbitsRevocations {
 
     private static final java.util.concurrent.atomic.AtomicBoolean LOADED = new java.util.concurrent.atomic.AtomicBoolean();
 
-    /** Read the local copy once per process, into the records kept in memory. */
-    static void loadUnsaved() {
+    /**
+     * Read the local copy once per process, into the records kept in memory. It holds the same
+     * monitor as {@link #writeUnsaved()}, so no caller rewrites the file while it is being read.
+     */
+    static synchronized void loadUnsaved() {
         if (!LOADED.compareAndSet(false, true)) {
             return;
         }
@@ -115,7 +118,8 @@ public final class LightbitsRevocations {
         }
         try {
             int n = 0;
-            for (String line : java.nio.file.Files.readAllLines(f, StandardCharsets.UTF_8)) {
+            // ISO-8859-1 decodes any byte, so a damaged line cannot keep the good ones from being read
+            for (String line : java.nio.file.Files.readAllLines(f, StandardCharsets.ISO_8859_1)) {
                 String[] p = line.trim().split(" ");
                 if (p.length != 3 || !p[1].startsWith(DETAIL_PREFIX) || p[2].isEmpty()) {
                     continue;

@@ -190,6 +190,8 @@ class LightbitsRevocationsTest {
         java.nio.file.Files.createDirectories(f.getParent());
         java.nio.file.Files.writeString(f, "not a record\n" + pool + " other.key " + nqn + "\nx lightbits.revoke.ab " + nqn + "\n"
                 + pool + " lightbits.revoke.0011223344556677.1 " + nqn + "\n");
+        // a damaged line (bytes that are not UTF-8) does not hide the good ones
+        java.nio.file.Files.write(f, new byte[] {(byte) 0xc3, (byte) 0x28, '\n'}, java.nio.file.StandardOpenOption.APPEND);
         StoragePoolDetailsDao dao = dao();
         failWrites = true;
         assertEquals(List.of(nqn), LightbitsRevocations.pending(dao, pool), "only the well-formed record");

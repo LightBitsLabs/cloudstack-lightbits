@@ -594,9 +594,10 @@ ERROR says) before the revocation completes, nothing retries it. In that case:
 
 1. Keep the removed machine fenced: powered off, or cut from the storage network, until step 3
    is done. Do not reinstall it and add it back first.
-2. Find the volumes of the pool's project whose ACL lists its NQN (the NQN is in the ERROR line):
-   `lbcli list volumes --project-name=<project> -o json`, and check `acl` and, with the IP ACL
-   option, `IPAcl`.
+2. Find the volumes of the pool's project whose `acl` lists its NQN (the NQN is in the ERROR
+   line) or, with the IP ACL option, whose `IPAcl` lists one of its data IP addresses (its NQN
+   may already be gone from a volume whose IP ACL still has its address):
+   `lbcli list volumes --project-name=<project> -o json`.
 3. For each such volume, set the ACL again without that NQN (and the IP ACL without its
    address); `--acl` and `--ip-acl` replace the whole list, so give the remaining entries:
    `lbcli update volume --project-name=<project> --uuid=<volume uuid> --acl <remaining NQNs>`.
