@@ -100,6 +100,8 @@ class LightbitsHostListenerTest {
     private final List<Command> sent = new ArrayList<>();
     private Function<Command, Answer> agent;
     private boolean reportLockBusy;
+    private boolean nqnLockBusy;
+    private final List<String> lockNames = new ArrayList<>();
 
     @SuppressWarnings("unchecked")
     private static <T> T fake(Class<T> type, Function<java.lang.reflect.Method, Function<Object[], Object>> handler) {
@@ -213,8 +215,14 @@ class LightbitsHostListenerTest {
                 default: return null;
             }
         }));
-        inject(listener, "storagePoolDetailsDao", fake(StoragePoolDetailsDao.class,
-                m -> m.getName().equals("listDetailsKeyPairs") ? a -> new HashMap<>(poolDetails) : null));
+        inject(listener, "storagePoolDetailsDao", fake(StoragePoolDetailsDao.class, m -> {
+            switch (m.getName()) {
+                case "listDetailsKeyPairs": return a -> new HashMap<>(poolDetails);
+                case "addDetail": return a -> poolDetails.put((String) a[1], (String) a[2]);
+                case "removeDetail": return a -> poolDetails.remove((String) a[1]);
+                default: return null;
+            }
+        }));
         inject(listener, "storagePoolHostDao", fake(StoragePoolHostDao.class, m -> {
             switch (m.getName()) {
                 case "findByPoolHost": return a -> refs.stream().filter(r -> r.getPoolId() == (Long) a[0] && r.getHostId() == (Long) a[1])
@@ -248,7 +256,11 @@ class LightbitsHostListenerTest {
         listener.clients = cfg -> new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default",
                 java.net.http.HttpClient.newHttpClient(), 1);
         listener.hostGateLocker = (name, seconds, work) -> {
+            lockNames.add(name);
             if (reportLockBusy && name.startsWith("lightbits.host.report.")) {
+                return false;
+            }
+            if (nqnLockBusy && name.startsWith("lightbits.nqn.")) {
                 return false;
             }
             work.run();
@@ -538,5 +550,111 @@ class LightbitsHostListenerTest {
         assertTrue(listener.hostAboutToBeRemoved(HOST));
         wm.verify(0, getRequestedFor(urlPathEqualTo(P + "/volumes")));
         assertNull(detail(LightbitsHostGate.REMOVING_DETAIL));
+    }
+
+    @Test
+    void aRevocationTheClusterCouldNotTakeStaysPendingAndIsRetried() throws Exception {
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        putDetail("nvme.hostnqn", NQN);
+        String name = LightbitsUtil.volumeName("cs1", POOL, "aaaaaaaa-1111-2222-3333-444444444444");
+        String vol = "{\"UUID\":\"u1\",\"name\":\"" + name + "\",\"state\":\"Available\",\"ETag\":\"1\",\"acl\":{\"values\":[\"" + NQN + "\"]}}";
+        // the cluster API is down during the removal
+        wm.stubFor(get(urlPathEqualTo(P + "/volumes")).willReturn(aResponse().withStatus(503).withBody("{}")));
+        wm.stubFor(get(urlPathEqualTo(P + "/trustedHosts")).willReturn(aResponse().withStatus(503).withBody("{}")));
+        assertTrue(listener.hostAboutToBeRemoved(HOST), "the removal itself is not held up");
+        assertEquals(List.of(NQN), org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.pending(
+                fake(StoragePoolDetailsDao.class, m -> m.getName().equals("listDetailsKeyPairs") ? a -> poolDetails : null), POOL));
+
+        // CloudStack deletes the removed host's details; the API is back; another host connects
+        details.clear();
+        wm.stubFor(get(urlPathEqualTo(P + "/volumes")).willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + vol + "]}")));
+        wm.stubFor(get(urlPathEqualTo(P + "/volumes")).withQueryParam("name", equalTo(name)).atPriority(1).inScenario("rv")
+                .whenScenarioStateIs(com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED)
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + vol + "]}")));
+        wm.stubFor(put(urlEqualTo(P + "/volumes/u1")).inScenario("rv").willSetStateTo("put")
+                .willReturn(aResponse().withStatus(200).withBody("{}")));
+        String pruned = vol.replace("\"values\":[\"" + NQN + "\"]", "\"values\":[\"ALLOW_NONE\"]").replace("\"ETag\":\"1\"", "\"ETag\":\"2\"");
+        wm.stubFor(get(urlEqualTo(P + "/volumes/u1")).inScenario("rv").whenScenarioStateIs("put")
+                .willReturn(aResponse().withStatus(200).withBody(pruned)));
+        wm.stubFor(get(urlPathEqualTo(P + "/volumes")).inScenario("rv").whenScenarioStateIs("put")
+                .willReturn(aResponse().withStatus(200).withBody("{\"volumes\":[" + pruned + "]}")));
+        wm.stubFor(get(urlPathEqualTo(P + "/trustedHosts")).willReturn(aResponse().withStatus(200)
+                .withBody("{\"hosts\":[],\"nextOffset\":\"\"}")));
+        agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
+                ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, "nqn.2014-08.org.nvmexpress:uuid:00000000-0000-0000-0000-000000000008")
+                : new Answer(cmd);   // another host, with its own NQN
+        listener.hostConnect(8, POOL);
+        wm.verify(putRequestedFor(urlEqualTo(P + "/volumes/u1")).withRequestBody(matchingJsonPath("$.acl.values[0]", equalTo("ALLOW_NONE"))));
+        assertTrue(poolDetails.keySet().stream().noneMatch(k -> k.startsWith(
+                org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.DETAIL_PREFIX)), "cleared once the cluster confirms");
+    }
+
+    @Test
+    void aPendingRevocationOfAnNqnAddedBackIsDropped() throws Exception {
+        poolDetails.put("lightbits.revoke.x", NQN);
+        putDetail("nvme.hostnqn", NQN);   // the machine was added back to CloudStack
+        org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.retry(
+                fake(StoragePoolDetailsDao.class, m -> {
+                    switch (m.getName()) {
+                        case "listDetailsKeyPairs": return a -> new HashMap<>(poolDetails);
+                        case "removeDetail": return a -> poolDetails.values().remove(NQN);
+                        default: return null;
+                    }
+                }),
+                fake(HostDetailsDao.class, m -> {
+                    switch (m.getName()) {
+                        case "findByName": return a -> new ArrayList<>(details.values());
+                        case "findDetail": return a -> detailRow((Long) a[0], (String) a[1]);
+                        default: return null;
+                    }
+                }), "nvme.hostnqn", POOL, LightbitsPoolConfig.fromDetails(new HashMap<>(poolDetails), "jwt"),
+                new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default", java.net.http.HttpClient.newHttpClient(), 1),
+                listener.hostGateLocker);
+        assertFalse(poolDetails.containsValue(NQN), "dropped, not revoked");
+        assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)),
+                "checked and decided under the NQN's lock");
+        wm.verify(0, putRequestedFor(urlPathEqualTo(P + "/volumes/u1")));
+    }
+
+    @Test
+    void aRetryWaitsWhenTheNqnIsBeingRecordedAndAHostRecordsItsNqnUnderTheSameLock() throws Exception {
+        poolDetails.put("lightbits.revoke.x", NQN);
+        nqnLockBusy = true;
+        org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.retry(
+                fake(StoragePoolDetailsDao.class, m -> m.getName().equals("listDetailsKeyPairs") ? a -> new HashMap<>(poolDetails) : null),
+                fake(HostDetailsDao.class, m -> m.getName().equals("findByName") ? a -> new ArrayList<>(details.values()) : null),
+                "nvme.hostnqn", POOL, LightbitsPoolConfig.fromDetails(new HashMap<>(poolDetails), "jwt"),
+                new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default", java.net.http.HttpClient.newHttpClient(), 1),
+                listener.hostGateLocker);
+        assertTrue(poolDetails.containsValue(NQN), "kept for a later retry");
+        wm.verify(0, getRequestedFor(urlPathEqualTo(P + "/volumes")));
+
+        nqnLockBusy = false;
+        lockNames.clear();
+        listener.hostConnect(HOST, POOL);
+        assertEquals(NQN, detail("nvme.hostnqn"));
+        assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)),
+                "a host records its NQN under the NQN's lock");
+    }
+
+    @Test
+    void aHostWhoseNqnLockStaysBusyRecordsNothingForItThisConnect() {
+        nqnLockBusy = true;
+        listener.hostConnect(HOST, POOL);
+        assertNull(detail("nvme.hostnqn"), "deferred to the next connect");
+        nqnLockBusy = false;
+        listener.hostConnect(HOST, POOL);
+        assertEquals(NQN, detail("nvme.hostnqn"));
+    }
+
+    @Test
+    void aRemovalRecordsItsPendingRevocationUnderTheNqnLock() throws Exception {
+        putDetail("nvme.hostnqn", NQN);
+        wm.stubFor(get(urlPathEqualTo(P + "/volumes")).willReturn(aResponse().withStatus(503).withBody("{}")));
+        lockNames.clear();
+        assertTrue(listener.hostAboutToBeRemoved(HOST));
+        assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)));
+        assertTrue(poolDetails.entrySet().stream().anyMatch(e -> e.getKey().startsWith(
+                org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.DETAIL_PREFIX) && e.getValue().equals(NQN)), "recorded");
     }
 }

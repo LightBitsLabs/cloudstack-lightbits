@@ -377,10 +377,15 @@ the host side:
   host secret. It keeps only a fingerprint (host detail `lightbits.inband.<pool id>`) and
   never logs the key. A host that is already a trusted host of the project under another
   name gets its key set there.
-- Removing a host from CloudStack deletes the trusted host the plugin made for it, best
-  effort: if the cluster call fails, the removal still completes and the management log asks
-  to delete it by hand (`lbcli delete trusted-host`); until then a machine holding the key
-  can still authenticate.
+- Removing a host from CloudStack deletes the trusted host the plugin made for it and takes
+  the host out of every volume ACL of the pool. If the cluster cannot be reached at that
+  moment, the removal still completes, but the revocation is kept as pending (a pool detail
+  `lightbits.revoke.<id>` holding the host's NQN) and retried at the management server's
+  storage statistics poll and at host connects until the cluster confirms it; the management
+  log says so each time. If the same machine is added back to CloudStack first, its pending
+  revocation is dropped. Until a pending revocation completes, the removed machine keeps its
+  access, so restore the API connectivity (or remove its NQN and trusted host by hand with
+  `lbcli`) when the log reports one.
 - The discovery service (port 8009) does not authenticate, so discovery is unchanged.
 - **Two-way (pool option `inbandAuthTwoWay=true`, with `inbandAuth=true`, off by default).**
   The host also checks the cluster. Each host makes a second key, the controller key
