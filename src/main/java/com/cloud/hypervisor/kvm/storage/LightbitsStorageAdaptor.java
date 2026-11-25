@@ -400,7 +400,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // never hand out a path whose namespace was not matched against the volume
         String kernelName = nvme.verifyIdentity(uuid);
         if (twoWay(pool)) {
-            requireTwoWayPaths(kernelName);
+            requireTwoWayPathsUnlessInUse(kernelName, uuid);
         }
         KVMPhysicalDisk disk = new KVMPhysicalDisk(LightbitsNvmeHost.BY_ID_PREFIX + uuid, volumePath, pool);
         disk.setFormat(PhysicalDiskFormat.RAW);
@@ -419,6 +419,26 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         String ctrlKey = hostKey.ensureCtrlKey();
         synchronized (CONNECT_LOCK) {
             nvme.requireTwoWayPaths(kernelName, ctrlKey);
+        }
+    }
+
+    /**
+     * The two-way check of a lookup. A lookup also serves operations that hand nothing to a VM:
+     * a detach looks the disk up before it removes it from the VM, and so do volume statistics.
+     * A device a VM on this host already holds open is therefore looked up without the check;
+     * every handoff (attach, VM start, migration onto the host) also goes through
+     * {@link #connectPhysicalDisk}, whose check has no such exception.
+     */
+    private void requireTwoWayPathsUnlessInUse(String kernelName, String uuid) {
+        try {
+            requireTwoWayPaths(kernelName);
+        } catch (CloudRuntimeException e) {
+            if (!nvme.openByVm(kernelName)) {
+                throw e;
+            }
+            LOG.info("Lightbits: volume {} ({}) is already in use by a VM on this host; looked up although this host's"
+                    + " paths are not all two-way yet (a new handoff of a volume is still refused until they are)", uuid,
+                    kernelName);
         }
     }
 

@@ -355,4 +355,31 @@ class LightbitsStorageAdaptorTest {
                 Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.0.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true"), true);
         assertEquals(tmp.resolve("lightbits").resolve("auth.json"), a.configFor(oneWay).apply("10.0.0.1:8009"));
     }
+
+    @Test
+    void aTwoWayLookupOfAVolumeAVmAlreadyUsesIsNotRefusedAHandoffStillIs(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
+        LightbitsStorageAdaptor a = new LightbitsStorageAdaptor(new LightbitsNvmeHost(sys), new LightbitsHostKey(tmp.resolve("lightbits"), tmp,
+                (Integer) java.nio.file.Files.getAttribute(tmp, "unix:uid")));
+        KVMStoragePool twoWay = a.createStoragePool(POOL_B, "10.0.1.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.1.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true",
+                        LightbitsStorageAdaptor.DETAIL_INBAND_TWO_WAY, "true"), true);
+        sys.controller("nvme3", "traddr=10.0.1.1,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme3/dhchap_ctrl_secret", "none");   // a path made before two-way
+        deviceAppears();
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> a.getPhysicalDisk(VOL, twoWay));
+        assertTrue(e.getMessage().contains("not handed over"), e.getMessage());
+
+        // a VM on this host already has the device open (a detach or a statistics read looks it up)
+        sys.files.put("/proc/4711/comm", "qemu-kvm");
+        sys.files.put("/proc/4711/fd/21", "");
+        sys.links.put("/proc/4711/fd/21", "/dev/nvme3n2");
+        assertNotNull(a.getPhysicalDisk(VOL, twoWay));
+        // a handoff goes through the connect, which still refuses
+        sys.results.put("nvme discover -t tcp -a 10.0.1.1 -s 8009 -o json", new LightbitsNvmeHost.Result(0,
+                "{\"genctr\":1,\"records\":[{\"trtype\":\"tcp\",\"subtype\":\"nvme subsystem\",\"traddr\":\"10.0.1.1\","
+                        + "\"trsvcid\":\"4420\",\"subnqn\":\"" + NQN + "\"}]}"));
+        e = assertThrows(CloudRuntimeException.class, () -> a.connectPhysicalDisk(VOL, twoWay, null, false));
+        assertTrue(e.getMessage().contains("not handed over"), e.getMessage());
+    }
 }
