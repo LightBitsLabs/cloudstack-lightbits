@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+- Documentation of two-way in-band authentication states what it checks (INSTALL.md, "What two-way
+  checks").
+
+### Known limitations
+- Two-way in-band authentication (`inbandAuthTwoWay=true`) checks the cluster only on connections
+  the cluster authenticates, which it does once in-band authentication is enforced on the
+  cluster; before that it checks nothing. Like any Linux NVMe/TCP host, the host also accepts a
+  target that does not ask for authentication, so two-way does not replace an isolated storage
+  network. The CHANGELOG entries of 0.1.0-rc.1 and 0.1.0-rc.2 ("the host checks the cluster
+  too") should be read with this.
+
 ## [0.1.0-rc.2] - 2026-11-25
 
 Second release candidate for 0.1.0: hardening of in-band authentication and host removal, and

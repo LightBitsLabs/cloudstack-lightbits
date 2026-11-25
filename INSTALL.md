@@ -300,7 +300,7 @@ environment and security needs.
 |---|---|---|---|
 | `ipAcl=true` ([Volume IP ACL](#volume-ip-acl)) | A volume accepts connections only from the data IPs of the hosts it is attached to, so a machine that copies a host's NQN from elsewhere on the network is still refused | Current agents on every host; a host whose data IP changes must be reconnected; hosts with several data NICs have all their addresses listed | The storage network is shared with machines outside CloudStack, or the cluster was installed in explicit-allow mode (there it is required) |
 | `inbandAuth=true` ([In-band authentication](#in-band-authentication)) | Each host proves itself to the cluster with its own secret key (DH-HMAC-CHAP), so knowing a host's NQN and IP is not enough to connect | A coordinated rollout: every host and client of the cluster must hold its key before the cluster admin turns enforcement on (cluster-wide); key handling and rotation | Policy requires authenticated storage access, or untrusted machines can reach the storage network |
-| `inbandAuthTwoWay=true` (with `inbandAuth`) | Each host also verifies the cluster, so a host cannot be pointed at an impostor target | A second key per host; same rollout as `inbandAuth` | Policy requires mutual authentication |
+| `inbandAuthTwoWay=true` (with `inbandAuth`) | Each host also verifies the cluster when the cluster authenticates the connection, which it does once enforcement is on: a cluster that cannot prove the controller key is refused | A second key per host; same rollout as `inbandAuth`; enforcement on the cluster; an isolated storage network still needed (see [What two-way checks](#what-two-way-checks)) | Policy requires mutual authentication |
 | `inbandKeyGeneration` ([Rotating the keys](#rotating-the-keys)) | Replaces the in-band keys of every host from CloudStack | A maintenance cycle per host | Policy requires periodic key rotation |
 
 ### Volume IP ACL
@@ -394,8 +394,8 @@ the host side:
   agent then connects the pool with its own configuration file
   (`/etc/nvme/lightbits/auth-<pool uuid>.json`), written just before each connect from the
   discovery log page of the endpoint it uses: nvme-cli takes a controller key only per port.
-  A path made that way refuses a cluster that cannot prove the key. Without the option the
-  authentication is one-way: the cluster checks the host, the host does not check the
+  A path made that way refuses a cluster that cannot prove the key (see "What two-way checks"
+  below). Without the option the authentication is one-way: the cluster checks the host, the host does not check the
   cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way
   pool keeps a target secret a two-way pool set. Readiness for a two-way pool also needs the
   current controller key registered and on every path; move hosts onto new paths as in step
@@ -417,6 +417,21 @@ the host side:
      (`cmk migrate virtualmachine virtualmachineid=<vm-id> hostid=<moved-host-id>`), since
      CloudStack may otherwise pick a host that is not moved yet, then put it in maintenance,
      wait as in 1, disconnect it from the subsystem, cancel maintenance and reconnect it.
+
+#### What two-way checks
+
+The host checks the cluster during the authentication the cluster asks for when a path
+connects. The cluster asks for it only once the cluster admin has turned in-band
+authentication enforcement on, so:
+
+- **Before enforcement is on, two-way checks nothing.** The keys are registered and the paths
+  hold the controller key, but no connection is authenticated in either direction.
+- **With enforcement on**, every connect to the cluster is authenticated both ways, and a path
+  to a target that answers with a wrong controller key is refused.
+- **Like any Linux NVMe/TCP host, the host accepts a target that does not ask for
+  authentication at all.** Two-way therefore does not replace a protected storage network:
+  keep the NVMe/TCP network isolated to the KVM hosts and the cluster (a dedicated VLAN or
+  fabric), so no other machine can answer at the cluster's addresses.
 
   The moved hosts need room for the VMs of the next host, as for any maintenance.
 
