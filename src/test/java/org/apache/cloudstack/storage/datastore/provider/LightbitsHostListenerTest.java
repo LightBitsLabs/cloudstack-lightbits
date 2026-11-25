@@ -788,6 +788,31 @@ class LightbitsHostListenerTest {
     }
 
     @Test
+    void aHostWideRotationReachesAnotherPoolThisHostStillKeysHostWide() throws Exception {
+        // POOL's scope cannot be read (no cluster answer): its rotation is of the host-wide keys
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        option(LightbitsPoolConfig.KEY_INBAND_KEY_GENERATION, "2");
+        putDetail(LightbitsTrustedHosts.generationDetailKey(POOL), "1");
+        long other = POOL + 1;
+        Map<String, String> od = new HashMap<>(LightbitsPoolConfig.fromUrl("lightbits://10.0.0.1/default?environment=cs1", "jwt")
+                .toDetailsWithoutSecret());
+        od.put(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        od.put(LightbitsPoolConfig.KEY_INBAND_KEY_GENERATION, "5");
+        od.put("lightbits.subsystemnqn", SUB);   // its scope is stored, but this host connected it host-wide
+        otherPoolDetails.put(other, od);
+        refs.add(new StoragePoolHostVO(other, HOST, ""));
+        putDetail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other), "host-wide");
+        putDetail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other), "fingerprint-of-old-key");
+        scopedAgent(true);
+        listener.hostConnect(HOST, POOL);
+        assertTrue(nqnCommands().get(0).isRotateKeys());
+        assertNull(nqnCommands().get(0).getKeyScope(), "the host-wide keys rotate");
+        assertEquals("5", detail(LightbitsTrustedHosts.generationDetailKey(other)), "the other pool's generation is recorded");
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY),
+                detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other)), "and it gets the rotated key");
+    }
+
+    @Test
     void aRotationMovesAHostWidePoolOfTheSameClusterToTheRotatedKeys() throws Exception {
         long other = hostWidePoolOfTheSameCluster(true);
         scopedAgent(true);
