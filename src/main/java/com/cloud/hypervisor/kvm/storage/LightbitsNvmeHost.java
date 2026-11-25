@@ -500,6 +500,30 @@ class LightbitsNvmeHost {
     }
 
     /**
+     * True when a QEMU process on this host holds the namespace's device open: a VM already uses
+     * the volume. Read only on the path that would otherwise refuse a lookup, so the scan of
+     * /proc is not paid by every lookup.
+     */
+    boolean openByVm(String kernelName) {
+        String device = "/dev/" + kernelName;
+        for (String pid : sys.list("/proc")) {
+            if (pid.isEmpty() || !pid.chars().allMatch(Character::isDigit)) {
+                continue;
+            }
+            String comm = sys.read("/proc/" + pid + "/comm");
+            if (comm == null || !comm.startsWith("qemu")) {
+                continue;
+            }
+            for (String fd : sys.list("/proc/" + pid + "/fd")) {
+                if (device.equals(sys.canonical("/proc/" + pid + "/fd/" + fd))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * A rejected controller is recorded with its controller ID: Linux reuses a controller name
      * once the controller is gone, and a new controller under that name (a path made later with
      * the right keys) is not the rejected one. An unreadable ID counts as the same controller.

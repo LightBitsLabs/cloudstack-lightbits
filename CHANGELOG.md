@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 - With `ipAcl=true`, the management log line with a host's data IPs is written whenever they
   change, not only when they are first recorded.
+- Two-way in-band authentication: a volume can be detached from a running VM on a host whose
+  paths are not yet all two-way. The check that refuses such a host now applies to a lookup only
+  when no VM on the host holds the volume's device open (a detach and the volume statistics look
+  the volume up too); attach, VM start and migration onto the host still check every path.
 
 ### Changed
 - README and INSTALL.md: a quick start for a first trial; the security options presented as

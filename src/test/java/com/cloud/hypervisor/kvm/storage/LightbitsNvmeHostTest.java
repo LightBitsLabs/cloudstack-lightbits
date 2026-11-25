@@ -651,6 +651,22 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
+    void aDeviceIsOpenByAVmOnlyWhenAQemuProcessHoldsIt() {
+        assertFalse(host.openByVm("nvme3n1"), "no process");
+        sys.files.put("/proc/self/comm", "java");
+        sys.files.put("/proc/812/comm", "bash");
+        sys.files.put("/proc/812/fd/3", "");
+        sys.links.put("/proc/812/fd/3", "/dev/nvme3n1");   // a shell reading the device is not a VM
+        sys.files.put("/proc/4711/comm", "qemu-kvm");
+        sys.files.put("/proc/4711/fd/0", "");
+        sys.files.put("/proc/4711/fd/21", "");
+        sys.links.put("/proc/4711/fd/21", "/dev/nvme3n2");
+        assertFalse(host.openByVm("nvme3n1"));
+        assertTrue(host.openByVm("nvme3n2"));
+        assertFalse(host.openByVm("nvme3n"), "the whole device name, not a prefix");
+    }
+
+    @Test
     void aRejectedPathThatCouldNotBeDisconnectedBlocksTheHandoff() {
         String ctrl = "DHHC-1:00:ctrl:";
         sys.files.put("/sys/block/nvme3n1/device/subsysnqn", NQN);
