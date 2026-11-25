@@ -334,7 +334,7 @@ class LightbitsStorageAdaptorTest {
     }
 
     @Test
-    void aTwoWayPoolConnectsWithItsOwnConfigBuiltFromDiscovery(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+    void aTwoWayPoolConnectsTheDiscoveredPortsWithBothKeys(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
         java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
         LightbitsStorageAdaptor a = new LightbitsStorageAdaptor(new LightbitsNvmeHost(sys), new LightbitsHostKey(tmp.resolve("lightbits"), tmp,
                 (Integer) java.nio.file.Files.getAttribute(tmp, "unix:uid")));
@@ -345,11 +345,18 @@ class LightbitsStorageAdaptorTest {
         KVMStoragePool twoWay = a.createStoragePool(POOL_B, "10.0.1.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
                 Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.1.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true",
                         LightbitsStorageAdaptor.DETAIL_INBAND_TWO_WAY, "true"), true);
-        java.nio.file.Path cfg = a.configFor(twoWay).apply("10.0.1.1:8009");
-        assertEquals(tmp.resolve("lightbits").resolve("auth-" + POOL_B + ".json"), cfg);
-        String json = java.nio.file.Files.readString(cfg);
-        assertTrue(json.contains("\"traddr\":\"10.0.1.1\"") && json.contains("dhchap_ctrl_key"), "per-port keys");
+        List<LightbitsNvmeHost.Target> targets = a.targetsFor(twoWay).apply("10.0.1.1:8009");
+        assertEquals(1, targets.size());
+        assertTrue(targets.get(0).options.contains("traddr=10.0.1.1,") && targets.get(0).options.contains("dhchap_ctrl_secret=DHHC-1:"),
+                "the port with both keys");
         assertTrue(java.nio.file.Files.exists(tmp.resolve("lightbits").resolve("dhchap-ctrl-key")));
+        sys.commands.clear();
+        // no device appears in this fake: the connect before the wait is what is checked here
+        assertThrows(CloudRuntimeException.class, () -> a.connectPhysicalDisk(VOL, twoWay, null, false));
+        assertTrue(sys.fabrics.stream().anyMatch(o -> o.contains("traddr=10.0.1.1,")), "connected directly");
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme connect-all")), "a two-way pool never runs connect-all");
+        assertEquals(1, sys.commands.stream().filter(c -> c.startsWith("nvme discover")).count(),
+                "the connect reads the discovery log page once: the ports connected are the ports of that read");
         assertTrue(sys.commands.stream().noneMatch(c -> c.contains("DHHC-1")), "no key on any command line");
         KVMStoragePool oneWay = a.createStoragePool(POOL_A, "10.0.0.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
                 Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.0.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true"), true);

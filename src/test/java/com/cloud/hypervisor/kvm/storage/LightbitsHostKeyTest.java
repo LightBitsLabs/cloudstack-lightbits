@@ -244,36 +244,33 @@ class LightbitsHostKeyTest {
     }
 
     @Test
-    void theTwoWayConfigNamesEveryPortWithBothKeysAndSkipsOddValues() throws IOException {
-        java.nio.file.Path f = key.ensureTwoWayConfig(POOL, List.of(
+    void theTwoWayTargetsCarryBothKeysForEveryPortAndSkipOddValues() throws IOException {
+        java.nio.file.Path leftover = key.twoWayConfigFile(POOL);
+        key.ensure();
+        Files.writeString(leftover, "[]\n");   // a per-pool file an earlier version wrote
+        List<LightbitsNvmeHost.Target> t = key.twoWayTargets(POOL, List.of(
                 new LightbitsHostKey.Port(SUB, "10.0.0.1", "4420"),
                 new LightbitsHostKey.Port(SUB, "10.0.0.2", "4420"),
-                new LightbitsHostKey.Port(SUB, "10.0.0.3\",\"x", "4420"),
+                new LightbitsHostKey.Port(SUB, "10.0.0.3,hostnqn=x", "4420"),
                 new LightbitsHostKey.Port("not-an-nqn", "10.0.0.4", "4420")));
         String k = key.ensure();
         String c = key.ensureCtrlKey();
-        assertEquals(nvme.resolve("lightbits").resolve("auth-" + POOL + ".json"), f);
-        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(f)));
-        String json = Files.readString(f);
-        com.fasterxml.jackson.databind.JsonNode root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
-        com.fasterxml.jackson.databind.JsonNode h = root.get(0);
-        assertEquals(NQN, h.get("hostnqn").asText());
-        assertEquals(k, h.get("dhchap_key").asText());
-        com.fasterxml.jackson.databind.JsonNode ports = h.get("subsystems").get(0).get("ports");
-        assertEquals(SUB, h.get("subsystems").get(0).get("nqn").asText());
-        assertEquals(2, ports.size(), "the port with an odd address and the one with no NQN are left out");
-        assertEquals("10.0.0.2", ports.get(1).get("traddr").asText());
-        assertEquals(k, ports.get(0).get("dhchap_key").asText());
-        assertEquals(c, ports.get(0).get("dhchap_ctrl_key").asText());
-        assertThrows(CloudRuntimeException.class, () -> key.ensureTwoWayConfig("../etc", List.of()), "the pool UUID is checked");
+        assertEquals(2, t.size(), "the port with an odd address and the one with no NQN are left out");
+        String o = t.get(1).options;
+        assertTrue(o.startsWith("transport=tcp,traddr=10.0.0.2,trsvcid=4420,nqn=" + SUB + ",hostnqn=" + NQN + ",hostid="), "addressing");
+        assertTrue(o.endsWith(",dhchap_secret=" + k + ",dhchap_ctrl_secret=" + c), "both keys");
+        assertEquals(SUB + " 10.0.0.1:4420", t.get(0).port());
+        assertFalse(Files.exists(leftover), "the earlier per-pool file, which holds the keys, is removed");
+        assertThrows(CloudRuntimeException.class, () -> key.twoWayTargets("../etc", List.of()), "the pool UUID is checked");
     }
 
     @Test
     void anUntrustedTwoWayConfigRotatesEveryKey() throws IOException {
         String k = key.ensure();
         String c = key.ensureCtrlKey();
-        java.nio.file.Path f = key.ensureTwoWayConfig(POOL, List.of(new LightbitsHostKey.Port(SUB, "10.0.0.1", "4420")));
-        java.nio.file.Path planted = Files.writeString(tmp.resolve("planted.json"), Files.readString(f));
+        java.nio.file.Path f = key.twoWayConfigFile(POOL);   // a per-pool file an earlier version wrote
+        java.nio.file.Path planted = Files.writeString(tmp.resolve("planted.json"), "[]\n");
+        Files.writeString(f, "[]\n");
         Files.delete(f);
         Files.createSymbolicLink(f, planted);
         String k2 = key.ensure();
@@ -286,7 +283,7 @@ class LightbitsHostKeyTest {
     void deletingTheKeysMakesNewOnesNextTime() throws IOException {
         String k = key.ensure();
         String c = key.ensureCtrlKey();
-        key.ensureTwoWayConfig(POOL, List.of(new LightbitsHostKey.Port(SUB, "10.0.0.1", "4420")));
+        Files.writeString(key.twoWayConfigFile(POOL), "[]\n");   // a per-pool file an earlier version wrote
         key.deleteKeys();
         try (var files = Files.list(nvme.resolve("lightbits"))) {
             assertEquals(0, files.count(), "no key or configuration file is left");

@@ -275,19 +275,22 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      * host loses its paths once the cluster turns in-band authentication on.
      */
     /**
-     * Connect a pool (the caller holds the connect lock). For a two-way pool, a path this connect
-     * made without the controller key is dropped again, so two-way never quietly runs one-way.
+     * Connect a pool (the caller holds the connect lock). A two-way pool connects only the data
+     * ports of one discovery read, each with both keys ({@link LightbitsNvmeHost#connectDirect});
+     * a path that still turns up without the controller key (made by a one-way pool of the same
+     * cluster, for example) is dropped again, so two-way never quietly runs one-way.
      */
     private boolean connectPool(KVMStoragePool pool, List<String> endpoints, long timeoutMillis,
                                 java.util.function.Function<String, java.nio.file.Path> configFor) {
         boolean twoWay = twoWay(pool);
         if (twoWay) {
-            nvme.forgetVanishedRejections();   // before connect-all can reuse a rejected controller's name
+            nvme.forgetVanishedRejections();   // before a connect can reuse a rejected controller's name
         }
         java.util.Set<String> before = twoWay ? nvme.pathNames() : null;
         boolean answered;
         try {
-            answered = nvme.connectWith(endpoints, timeoutMillis, configFor);
+            answered = twoWay ? nvme.connectDirect(endpoints, timeoutMillis, targetsFor(pool))
+                    : nvme.connectWith(endpoints, timeoutMillis, configFor);
         } catch (RuntimeException e) {
             // a connect that failed may still have made paths: they get the same check
             if (twoWay) {
@@ -343,24 +346,24 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     }
 
     /**
-     * The configuration file to connect a pool with, chosen per discovery endpoint: none for a
-     * pool without in-band authentication, the shared one-way file ({@link #authConfig}) for
-     * one-way, and for two-way the pool's own file with the host and controller keys on every
-     * data port the endpoint advertises (read just before the connect, from its discovery log
-     * page; nvme-cli takes a controller key only per port). A key that cannot be prepared, or a
-     * discovery that fails, counts as that endpoint failing.
+     * The configuration file for {@code nvme connect-all}: none for a pool without in-band
+     * authentication, the shared one-way file ({@link #authConfig}) otherwise. A two-way pool
+     * does not use connect-all ({@link #targetsFor}).
      */
     java.util.function.Function<String, java.nio.file.Path> configFor(KVMStoragePool pool) {
         java.nio.file.Path oneWay = authConfig(pool);
-        if (oneWay == null) {
-            return null;
-        }
-        Map<String, String> details = pool.getDetails();
-        if (!"true".equals(details.get(DETAIL_INBAND_TWO_WAY))) {
-            return endpoint -> oneWay;
-        }
+        return oneWay == null ? null : endpoint -> oneWay;
+    }
+
+    /**
+     * Two-way: the data ports to connect through a discovery endpoint, read from its discovery
+     * log page just before the connect (the discovery service does not authenticate), each with
+     * the host and controller keys. A key that cannot be prepared, or a discovery that fails,
+     * counts as that endpoint failing.
+     */
+    java.util.function.Function<String, List<LightbitsNvmeHost.Target>> targetsFor(KVMStoragePool pool) {
         String poolUuid = pool.getUuid();
-        return endpoint -> hostKey.ensureTwoWayConfig(poolUuid, nvme.discover(endpoint, DISCOVER_TIMEOUT_MILLIS));
+        return endpoint -> hostKey.twoWayTargets(poolUuid, nvme.discover(endpoint, DISCOVER_TIMEOUT_MILLIS));
     }
 
     java.nio.file.Path authConfig(KVMStoragePool pool) {

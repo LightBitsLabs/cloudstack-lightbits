@@ -391,13 +391,21 @@ the host side:
   The host also checks the cluster. Each host makes a second key, the controller key
   (`/etc/nvme/lightbits/dhchap-ctrl-key`, same rules as the host key), and the management
   server registers it as the trusted host's target secret (`targetSecretType=Enabled`). The
-  agent then connects the pool with its own configuration file
-  (`/etc/nvme/lightbits/auth-<pool uuid>.json`), written just before each connect from the
-  discovery log page of the endpoint it uses: nvme-cli takes a controller key only per port.
+  agent then connects the pool without `nvme connect-all`: it reads the discovery log page of
+  the endpoint it uses once, and makes one path to each data port listed there with both keys
+  (written to the kernel through `/dev/nvme-fabrics`, never on a command line or in a file).
+  Every path it makes holds the controller key; a port added to the discovery log page later
+  gets a path at the next connect. A per-pool configuration file an earlier version wrote
+  (`/etc/nvme/lightbits/auth-<pool uuid>.json`) is deleted at the pool's next connect.
   A path made that way refuses a cluster that cannot prove the key (see "What two-way checks"
   below). Without the option the authentication is one-way: the cluster checks the host, the host does not check the
   cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way
-  pool keeps a target secret a two-way pool set. Readiness for a two-way pool also needs the
+  pool keeps a target secret a two-way pool set. Make every pool of a cluster two-way, or
+  none: a one-way pool connects with `nvme connect-all` and the host key only, and its paths
+  to the cluster's subsystem also carry the two-way pool's volumes. Such a path stays until
+  it is disconnected by hand (`nvme disconnect -d <controller>`, as the refusal message says);
+  until then new handoffs of the two-way pool's volumes on that host are refused and the
+  readiness line lists the host. Readiness for a two-way pool also needs the
   current controller key registered and on every path; move hosts onto new paths as in step
   4 after turning the option on. **Until a host is moved, new attaches, VM starts and
   migrations onto it fail for this pool's volumes:** the agent refuses to hand a volume to a VM

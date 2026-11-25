@@ -88,7 +88,7 @@ public class LightbitsHostKey {
         return dir.resolve("dhchap-ctrl-key");
     }
 
-    /** The two-way nvme-cli configuration of one pool (per-port keys from its discovery log page). */
+    /** The two-way nvme-cli configuration of one pool that earlier versions wrote (removed on use). */
     Path twoWayConfigFile(String poolUuid) {
         if (poolUuid == null || !UUID.matcher(poolUuid).matches()) {
             throw new CloudRuntimeException("Lightbits: not a pool UUID: " + poolUuid);
@@ -328,50 +328,36 @@ public class LightbitsHostKey {
     private static final Pattern SERVICE = Pattern.compile("[0-9]{1,5}");
 
     /**
-     * The two-way nvme-cli configuration for one pool, written if it changed: the host entry
-     * with the host key, and every data port of {@code ports} with the host key and the
-     * controller key ({@code nvme connect-all} takes a controller key only per port). Ports with
-     * an NQN, address or service that does not look like one are left out, so no value needs
-     * escaping. Returns the file.
+     * The two-way connections for one pool: every data port of {@code ports} with the options
+     * that connect it with the host key and the controller key (written to /dev/nvme-fabrics,
+     * never to a command line or a file). Ports with an NQN, address or service that does not
+     * look like one are left out, so no value can add an option. A per-pool configuration file
+     * an earlier version wrote for this pool holds the keys too and is removed.
      */
-    public Path ensureTwoWayConfig(String poolUuid, java.util.List<Port> ports) {
+    public java.util.List<LightbitsNvmeHost.Target> twoWayTargets(String poolUuid, java.util.List<Port> ports) {
         String key = ensure();
         String ctrl = ensureCtrlKey();
         synchronized (LOCK) {
             try {
+                Files.deleteIfExists(twoWayConfigFile(poolUuid));
                 String nqn = read(nvmeDir.resolve("hostnqn"));
+                if (nqn == null || !HOST_NQN.matcher(nqn).matches()) {
+                    throw new CloudRuntimeException("Lightbits: this host's NQN (" + nvmeDir.resolve("hostnqn") + ") is missing or not an NQN");
+                }
                 String hostId = hostId(nqn, read(nvmeDir.resolve("hostid")));
-                java.util.Map<String, java.util.List<Port>> bySubsystem = new java.util.LinkedHashMap<>();
+                java.util.List<LightbitsNvmeHost.Target> out = new java.util.ArrayList<>();
                 for (Port p : ports) {
                     if (p.subsystemNqn != null && HOST_NQN.matcher(p.subsystemNqn).matches() && p.address != null
                             && ADDRESS.matcher(p.address).matches() && p.service != null && SERVICE.matcher(p.service).matches()) {
-                        bySubsystem.computeIfAbsent(p.subsystemNqn, k -> new java.util.ArrayList<>()).add(p);
+                        out.add(new LightbitsNvmeHost.Target(p.subsystemNqn, p.address, p.service, "transport=tcp,traddr=" + p.address
+                                + ",trsvcid=" + p.service + ",nqn=" + p.subsystemNqn + ",hostnqn=" + nqn + ",hostid=" + hostId
+                                + ",dhchap_secret=" + key + ",dhchap_ctrl_secret=" + ctrl));
                     }
                 }
-                StringBuilder b = new StringBuilder("[{\"hostnqn\":\"").append(nqn).append("\",\"hostid\":\"").append(hostId)
-                        .append("\",\"dhchap_key\":\"").append(key).append("\",\"subsystems\":[");
-                boolean firstSub = true;
-                for (java.util.Map.Entry<String, java.util.List<Port>> e : bySubsystem.entrySet()) {
-                    b.append(firstSub ? "" : ",").append("{\"nqn\":\"").append(e.getKey()).append("\",\"ports\":[");
-                    firstSub = false;
-                    boolean firstPort = true;
-                    for (Port p : e.getValue()) {
-                        b.append(firstPort ? "" : ",").append("{\"transport\":\"tcp\",\"traddr\":\"").append(p.address)
-                                .append("\",\"trsvcid\":\"").append(p.service).append("\",\"dhchap_key\":\"").append(key)
-                                .append("\",\"dhchap_ctrl_key\":\"").append(ctrl).append("\"}");
-                        firstPort = false;
-                    }
-                    b.append("]}");
-                }
-                String config = b.append("]}]\n").toString();
-                Path file = twoWayConfigFile(poolUuid);
-                if (!config.equals(read(file) + "\n")) {
-                    writePrivate(file, config);
-                }
-                return file;
+                return out;
             } catch (IOException e) {
-                throw new CloudRuntimeException("Lightbits: could not write this host's two-way in-band authentication"
-                        + " configuration in " + dir + ": " + e.getMessage(), e);
+                throw new CloudRuntimeException("Lightbits: could not prepare this host's two-way in-band authentication"
+                        + " connections in " + dir + ": " + e.getMessage(), e);
             }
         }
     }
