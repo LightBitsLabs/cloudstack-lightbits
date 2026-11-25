@@ -25,6 +25,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   target that does not ask for authentication, so two-way does not replace an isolated storage
   network. The CHANGELOG entries of 0.1.0-rc.1 and 0.1.0-rc.2 ("the host checks the cluster
   too") should be read with this.
+- Two-way: a one-way pool of the same cluster still connects with `nvme connect-all` and the
+  host key only, and its paths also carry the two-way pool's volumes until the two-way pool's
+  next connect drops them (new handoffs are refused and the host is reported not ready in the
+  meantime). Make every pool of a cluster two-way, or none (INSTALL.md, "In-band
+  authentication").
 - A pending revocation that neither the database nor the local file could keep, or whose
   management server is lost before it completes, is not retried by another management server:
   keep the removed machine fenced and remove its access by hand (INSTALL.md, "Removing a host").
