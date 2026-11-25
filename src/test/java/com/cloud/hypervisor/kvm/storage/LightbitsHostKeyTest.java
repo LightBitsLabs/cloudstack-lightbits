@@ -321,6 +321,16 @@ class LightbitsHostKeyTest {
     }
 
     @Test
+    void anOperatorsOwnFileInTheDirectoryIsNeitherCheckedNorDeleted() throws IOException {
+        String k = key.ensure();
+        Path backup = Files.writeString(key.keyFile().getParent().resolve("notes.txt"), "mine");
+        Path linked = key.keyFile().getParent().resolve("old-backup.json");
+        Files.createSymbolicLink(linked, backup);
+        assertEquals(k, key.ensure(), "an unmanaged link does not make the keys untrusted");
+        assertTrue(Files.exists(backup) && Files.isSymbolicLink(linked), "and is left alone");
+    }
+
+    @Test
     void aClusterThatRotatedKeepsItsOwnKeysAfterAnUntrustedFileCleanup() throws IOException {
         String hostWide = key.ensure();
         LightbitsHostKey a = key.forScope(SUB);

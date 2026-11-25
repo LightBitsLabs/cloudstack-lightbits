@@ -84,6 +84,11 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
                 if (command.isTwoWay() && answer.getDhchapKey() != null) {
                     ctrlKey(answer, command.getKeyScope());
                 }
+                if (answer.getDhchapKey() != null) {
+                    // after both keys are prepared: preparing one can copy a flagged host-wide key
+                    // into this cluster and flag it too
+                    exposure(answer, command.getKeyScope());
+                }
             }
             return answer;
         } catch (Exception e) {
@@ -119,6 +124,10 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
             keyless = null;
         }
         answer.withInbandAuth(key, keyless, null);
+    }
+
+    /** Whether the keys just reported may have been copied; left unset (unknown) when it cannot be checked. */
+    void exposure(LightbitsGetHostNqnAnswer answer, String scope) {
         try {
             answer.withKeysPossiblyExposed(keysFor(scope).keysPossiblyExposed());
         } catch (RuntimeException e) {

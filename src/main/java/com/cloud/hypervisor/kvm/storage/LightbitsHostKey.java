@@ -187,6 +187,12 @@ public class LightbitsHostKey {
     public void deleteKeys() {
         synchronized (LOCK) {
             try {
+                if (legacy != null && !Files.exists(ownMarker(), LinkOption.NOFOLLOW_LINKS)) {
+                    // from now on this cluster's keys are its own: never copied from the host-wide ones
+                    // again. The mark goes first: if it cannot be written, nothing is deleted and the
+                    // rotation is refused, so no later preparation copies the host-wide keys back.
+                    writePrivate(ownMarker(), "");
+                }
                 java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), ctrlKeyFile(), configFile()));
                 if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
                     try (java.util.stream.Stream<Path> list = Files.list(dir)) {
@@ -199,11 +205,6 @@ public class LightbitsHostKey {
                     Files.deleteIfExists(f);
                 }
                 Files.deleteIfExists(rotationMarker());   // replaced: no longer possibly exposed
-                if (legacy != null && !Files.exists(ownMarker(), LinkOption.NOFOLLOW_LINKS)) {
-                    // from now on this cluster's keys are its own: never copied from the host-wide ones again
-                    Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
-                    Files.move(tmp, ownMarker(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                }
             } catch (IOException e) {
                 throw new CloudRuntimeException("Lightbits: could not delete this host's in-band authentication keys in " + dir
                         + ": " + e.getMessage(), e);
@@ -251,7 +252,10 @@ public class LightbitsHostKey {
         java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), configFile(), ctrlKeyFile()));
         if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
             try (java.util.stream.Stream<Path> list = Files.list(dir)) {
-                list.filter(f -> !files.contains(f) && !f.getFileName().toString().startsWith(".tmp-")).forEach(files::add);
+                // only the files managed here: an operator's own file (a backup, a directory) is neither
+                // checked nor deleted
+                list.filter(f -> !files.contains(f) && (MANAGED_FILE.matcher(f.getFileName().toString()).matches()
+                        || POOL_CONFIG.matcher(f.getFileName().toString()).matches())).forEach(files::add);
             }
         }
         boolean untrusted = false;
@@ -345,6 +349,10 @@ public class LightbitsHostKey {
             "(?:dhchap-(?:ctrl-)?key|auth|rotation-required|own-keys)(-[0-9a-f]{12})(?:\\.json)?");
 
     private static final Pattern KEY_FILE = Pattern.compile("dhchap-(?:ctrl-)?key(|-[0-9a-f]{12})");
+
+    /** Every file this class manages: keys, configurations and marks, host-wide or per cluster. */
+    private static final Pattern MANAGED_FILE = Pattern.compile(
+            "(?:dhchap-(?:ctrl-)?key|auth|rotation-required|own-keys)(?:-[0-9a-f]{12})?(?:\\.json)?");
 
     /** Marks a cluster whose keys were rotated at least once: they are no longer copied from the host-wide ones. */
     Path ownMarker() {
