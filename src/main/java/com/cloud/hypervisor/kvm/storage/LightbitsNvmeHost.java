@@ -405,12 +405,20 @@ class LightbitsNvmeHost {
      * left in sysfs, since some nvme-cli builds return 0 when a controller deletion fails.
      */
     List<String> disconnectIdleSubsystems() {
+        return disconnectIdleSubsystems(null);
+    }
+
+    /** {@link #disconnectIdleSubsystems()} for one subsystem (one cluster); null: every Lightbits subsystem. */
+    List<String> disconnectIdleSubsystems(String subsystem) {
         List<String> disconnected = new ArrayList<>();
         for (String subsys : sys.list(SUBSYSTEMS)) {
             String dir = SUBSYSTEMS + "/" + subsys;
             String nqn = sys.read(dir + "/subsysnqn");
             if (nqn == null || !SUBSYS_NQN.matcher(nqn).matches()) {
                 continue;
+            }
+            if (subsystem != null && !subsystem.trim().equals(nqn.trim())) {
+                continue;   // another cluster's subsystem: its keys are not the ones rotated
             }
             // With native NVMe multipath a namespace shows directly under the subsystem
             // (nvme3n1); without it (nvme_core.multipath=N) it shows under a controller
@@ -740,11 +748,9 @@ class LightbitsNvmeHost {
         }
         REJECTED.keySet().retainAll(new java.util.HashSet<>(listed));
         for (Path p : paths()) {
-            if (subsystem != null) {
-                String nqn = sys.read("/sys/class/nvme/" + p.controller + "/subsysnqn");
-                if (nqn != null && !subsystem.trim().equals(nqn.trim())) {
-                    continue;
-                }
+            // the NQN paths() read: a second read that failed would let another cluster's path through
+            if (subsystem != null && !subsystem.trim().equals(p.subsysNqn == null ? null : p.subsysNqn.trim())) {
+                continue;
             }
             // a path an earlier connect rejected but could not disconnect stays rejected
             if (before.contains(p.controller) && !rejected(p.controller)) {

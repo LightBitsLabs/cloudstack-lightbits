@@ -359,16 +359,19 @@ IP ACLs, and a volume left with one host's address refuses every other host.
 it holds the key registered for it as a trusted host. With `inbandAuth=true` the plugin does
 the host side:
 - Each KVM host makes its own key, one per Lightbits cluster, the first time it is needed and
-  keeps it under `/etc/nvme/lightbits/` (`dhchap-key-<cluster id>`), with an nvme-cli
-  configuration file next to it (`auth-<cluster id>.json`); the directory is 0700 and the
-  files 0600. The cluster id is a digest of the cluster's subsystem NQN, which the management
-  server reads from the cluster. Because each cluster has its own keys, a cluster (or anyone
-  holding its project token, which can read the trusted host's secrets) cannot use a host's
-  keys against another cluster. A host that already had a key from an earlier version keeps
-  using it for each cluster (its paths hold it) until that cluster's keys are rotated; from
-  then on they are the cluster's own. The agent connects with
-  `nvme connect-all --config=<that file>`, so the key never appears on a command line. A
-  cluster with in-band authentication off ignores the key.
+  keeps it under `/etc/nvme/lightbits/` (`dhchap-key-<cluster id>`); the directory is 0700 and
+  the files 0600. The cluster id is a digest of the cluster's subsystem NQN, which the
+  management server reads from the cluster. A host that already had a key from an earlier
+  version keeps using it for each cluster (its paths hold it) until that cluster's keys are
+  rotated; until then its clusters share that key. After a rotation the keys are the cluster's
+  own: a cluster (or anyone holding its project token, which can read the trusted host's
+  secrets) cannot use them against another cluster. The agent connects a pool by reading the
+  discovery log page of the cluster and making one path to each of that cluster's data ports
+  with the cluster's key, written to the kernel through `/dev/nvme-fabrics`, so the key never
+  appears on a command line. It does not use `nvme connect-all` for these pools: with keys per
+  cluster, nvme-cli (libnvme 1.16) can send the key of a path the host already has to another
+  cluster instead of the configured one, and that cluster refuses it. A cluster with in-band
+  authentication off ignores the key.
   Key files found readable by other users (copied in or made by hand with a wider mode) are
   made root-only again but may already have been copied: the host is then listed in the
   readiness line as needing a key rotation (see [Rotating the keys](#rotating-the-keys))
@@ -397,9 +400,8 @@ the host side:
   The host also checks the cluster. Each host makes a second key, the controller key
   (`/etc/nvme/lightbits/dhchap-ctrl-key`, same rules as the host key), and the management
   server registers it as the trusted host's target secret (`targetSecretType=Enabled`). The
-  agent then connects the pool without `nvme connect-all`: it reads the discovery log page of
-  the endpoint it uses once, and makes one path to each data port listed there with both keys
-  (written to the kernel through `/dev/nvme-fabrics`, never on a command line or in a file).
+  agent connects the pool as above, with both keys on each path: it reads the discovery log
+  page of the endpoint it uses once, and makes one path to each data port listed there.
   Every path it makes holds the controller key; a port added to the discovery log page later
   gets a path at the next connect. A per-pool configuration file an earlier version wrote
   (`/etc/nvme/lightbits/auth-<pool uuid>.json`) is deleted at the pool's next connect.
@@ -407,8 +409,8 @@ the host side:
   below). Without the option the authentication is one-way: the cluster checks the host, the host does not check the
   cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way
   pool keeps a target secret a two-way pool set. Make every pool of a cluster two-way, or
-  none: a one-way pool connects with `nvme connect-all` and the host key only, and its paths
-  to the cluster's subsystem also carry the two-way pool's volumes. Such a path stays until
+  none: a one-way pool's paths hold the host key only, and its paths to the cluster's
+  subsystem also carry the two-way pool's volumes. Such a path stays until
   it is disconnected by hand (`nvme disconnect -d <controller>`, as the refusal message says);
   until then new handoffs of the two-way pool's volumes on that host are refused and the
   readiness line lists the host. Readiness for a two-way pool also needs the

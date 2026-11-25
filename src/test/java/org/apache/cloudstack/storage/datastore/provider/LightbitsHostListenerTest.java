@@ -171,21 +171,7 @@ class LightbitsHostListenerTest {
             sent.add((Command) a[1]);
             return agent.apply((Command) a[1]);
         } : null));
-        StoragePool pool = fake(StoragePool.class, m -> {
-            switch (m.getName()) {
-                case "getId": return a -> POOL;
-                case "getUuid": return a -> "387e455e-bb68-498f-9ef3-04c463815e5d";
-                case "getPoolType": return a -> StoragePoolType.IscsiLUN;
-                case "getHostAddress": return a -> "10.0.0.1";
-                case "getPath": return a -> "/default";
-                case "getPort": return a -> 443;
-                default: return null;
-            }
-        });
-        Object store = Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {DataStore.class, StoragePool.class},
-                (proxy, m, a) -> m.getDeclaringClass() == StoragePool.class || m.getName().startsWith("get")
-                        ? safeInvoke(m, pool, a) : null);
-        inject(listener, "dataStoreMgr", fake(DataStoreManager.class, m -> m.getName().equals("getDataStore") ? a -> store : null));
+        inject(listener, "dataStoreMgr", fake(DataStoreManager.class, m -> m.getName().equals("getDataStore") ? a -> storeFor((Long) a[0]) : null));
         inject(listener, "hostDao", fake(HostDao.class, m -> m.getName().equals("findById") ? a -> {
             HostVO h = new HostVO(HOST_UUID);   // the constructor takes the guid; the uuid is set below
             h.setUuid(HOST_UUID);
@@ -268,6 +254,28 @@ class LightbitsHostListenerTest {
             work.run();
             return true;
         };
+    }
+
+    /** The pool's store: POOL keeps its UUID, any other pool id gets its own. */
+    static String poolUuid(long id) {
+        return id == POOL ? "387e455e-bb68-498f-9ef3-04c463815e5d" : String.format("00000000-0000-0000-0000-%012d", id);
+    }
+
+    private Object storeFor(long id) {
+        StoragePool pool = fake(StoragePool.class, m -> {
+            switch (m.getName()) {
+                case "getId": return a -> id;
+                case "getUuid": return a -> poolUuid(id);
+                case "getPoolType": return a -> StoragePoolType.IscsiLUN;
+                case "getHostAddress": return a -> "10.0.0.1";
+                case "getPath": return a -> "/default";
+                case "getPort": return a -> 443;
+                default: return null;
+            }
+        });
+        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {DataStore.class, StoragePool.class},
+                (proxy, m, a) -> m.getDeclaringClass() == StoragePool.class || m.getName().startsWith("get")
+                        ? safeInvoke(m, pool, a) : null);
     }
 
     private static Object safeInvoke(java.lang.reflect.Method m, Object target, Object[] a) throws Exception {
@@ -727,9 +735,10 @@ class LightbitsHostListenerTest {
         listener.hostConnect(HOST, POOL);
         assertEquals(sub, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", POOL)), "the scope this connect used is recorded");
         // the other pool shares the cluster's trusted host: it is given to the agent again with the scope
-        assertEquals(2, sent.stream().filter(c -> c instanceof ModifyStoragePoolCommand
+        assertTrue(sent.stream().anyMatch(c -> c instanceof ModifyStoragePoolCommand
+                && poolUuid(other).equals(((ModifyStoragePoolCommand) c).getPool().getUuid())
                 && sub.equals(((ModifyStoragePoolCommand) c).getDetails().get(
-                        com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE))).count(),
+                        com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE))),
                 "the other pool is registered on the agent again, with the scope");
         assertEquals(sub, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other)), "and the host records it");
         assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(otherKey), "and its records follow the cluster's key");
@@ -758,10 +767,24 @@ class LightbitsHostListenerTest {
         return other;
     }
 
+    /** modifyOk false: the agent refuses the other pools' registrations (POOL's own succeeds). */
     private void scopedAgent(boolean modifyOk) {
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
                 ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeyScope(((LightbitsGetHostNqnCommand) cmd).getKeyScope())
-                : modifyOk ? new Answer(cmd) : new Answer(cmd, false, "boom");
+                : modifyOk || !(cmd instanceof ModifyStoragePoolCommand)
+                        || poolUuid(POOL).equals(((ModifyStoragePoolCommand) cmd).getPool().getUuid())
+                        ? new Answer(cmd) : new Answer(cmd, false, "boom");
+    }
+
+    @Test
+    void aPoolTheAgentDidNotTakeAsksForNoKeysThisConnect() throws Exception {
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        agent = cmd -> cmd instanceof ModifyStoragePoolCommand ? new Answer(cmd, false, "boom") : nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN);
+        listener.hostConnect(HOST, POOL);
+        assertTrue(nqnCommands().stream().noneMatch(LightbitsGetHostNqnCommand::isInbandAuth),
+                "no key request while the agent may hold the pool with other keys");
+        assertEquals(NQN, detail("nvme.hostnqn"), "the NQN is still recorded");
+        wm.verify(0, putRequestedFor(urlEqualTo(P + "/trustedHostSecrets/" + TH_NAME)));
     }
 
     @Test

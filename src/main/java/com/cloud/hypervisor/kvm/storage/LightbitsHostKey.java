@@ -60,6 +60,8 @@ public class LightbitsHostKey {
     private static final Pattern KEY = Pattern.compile("DHHC-1:0[0-3]:([A-Za-z0-9+/]+={0,2}):");
     private static final Pattern HOST_NQN = Pattern.compile("nqn\\.[A-Za-z0-9:._-]{1,220}");
     private static final Pattern UUID = Pattern.compile("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}");
+    /** A per-pool two-way configuration file of an earlier version: auth-<pool uuid>.json. */
+    private static final Pattern POOL_CONFIG = Pattern.compile("auth-[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\\.json");
     private static final Set<PosixFilePermission> DIR_MODE = PosixFilePermissions.fromString("rwx------");
     private static final Set<PosixFilePermission> FILE_MODE = PosixFilePermissions.fromString("rw-------");
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -188,7 +190,9 @@ public class LightbitsHostKey {
                 java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), ctrlKeyFile(), configFile()));
                 if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
                     try (java.util.stream.Stream<Path> list = Files.list(dir)) {
-                        list.filter(f -> f.getFileName().toString().matches("auth-.+\\.json")).forEach(files::add);
+                        // the per-pool two-way files of earlier versions (auth-<pool uuid>.json), not
+                        // another cluster's configuration (auth-<scope id>.json): its keys are not rotated
+                        list.filter(f -> POOL_CONFIG.matcher(f.getFileName().toString()).matches()).forEach(files::add);
                     }
                 }
                 for (Path f : files) {
@@ -461,8 +465,19 @@ public class LightbitsHostKey {
      * an earlier version wrote for this pool holds the keys too and is removed.
      */
     public java.util.List<LightbitsNvmeHost.Target> twoWayTargets(String poolUuid, java.util.List<Port> ports) {
+        return targets(poolUuid, ports, true);
+    }
+
+    /**
+     * The in-band connections for one pool: as {@link #twoWayTargets}, with the controller key only
+     * when {@code twoWay}. A one-way pool connects this way too, not through {@code nvme connect-all
+     * --config}: libnvme 1.16 connects with the key of a controller this host already has to another
+     * cluster instead of the configuration file's key (and reports success), which a cluster with
+     * its own key refuses.
+     */
+    public java.util.List<LightbitsNvmeHost.Target> targets(String poolUuid, java.util.List<Port> ports, boolean twoWay) {
         String key = ensure();
-        String ctrl = ensureCtrlKey();
+        String ctrl = twoWay ? ensureCtrlKey() : null;
         synchronized (LOCK) {
             try {
                 Files.deleteIfExists(twoWayConfigFile(poolUuid));
@@ -477,12 +492,12 @@ public class LightbitsHostKey {
                             && ADDRESS.matcher(p.address).matches() && p.service != null && SERVICE.matcher(p.service).matches()) {
                         out.add(new LightbitsNvmeHost.Target(p.subsystemNqn, p.address, p.service, "transport=tcp,traddr=" + p.address
                                 + ",trsvcid=" + p.service + ",nqn=" + p.subsystemNqn + ",hostnqn=" + nqn + ",hostid=" + hostId
-                                + ",dhchap_secret=" + key + ",dhchap_ctrl_secret=" + ctrl));
+                                + ",dhchap_secret=" + key + (twoWay ? ",dhchap_ctrl_secret=" + ctrl : "")));
                     }
                 }
                 return out;
             } catch (IOException e) {
-                throw new CloudRuntimeException("Lightbits: could not prepare this host's two-way in-band authentication"
+                throw new CloudRuntimeException("Lightbits: could not prepare this host's in-band authentication"
                         + " connections in " + dir + ": " + e.getMessage(), e);
             }
         }

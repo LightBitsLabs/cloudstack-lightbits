@@ -380,6 +380,15 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
+    void aScopedIdleDisconnectLeavesTheOtherClustersSubsystemsAlone() {
+        String other = "nqn.2016-01.com.lightbitslabs:uuid:db336dd6-5e4c-4fc4-b7ff-9b74f95f75a2";
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        subsystem("nvme-subsys4", other, "nvme4");
+        assertEquals(List.of(NQN), host.disconnectIdleSubsystems(NQN));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -n " + other)), sys.commands.toString());
+    }
+
+    @Test
     void aSubsystemWithANamespaceIsNeverDisconnected() {
         subsystem("nvme-subsys3", NQN, "nvme3", "nvme3n2", "ng3n2");
         subsystem("nvme-subsys4", NQN + "-b", "nvme6", "nvme6c6n1");
@@ -643,6 +652,29 @@ class LightbitsNvmeHostTest {
         assertNotEquals(c, key.ensureCtrlKey(), "a new controller key");
         assertTrue(java.nio.file.Files.list(tmp.resolve("lightbits")).noneMatch(f -> f.getFileName().toString().startsWith("auth-")),
                 "the old two-way configurations are gone");
+    }
+
+    @Test
+    void aRotationForOneClusterKeepsTheOtherClustersKeysConfigurationAndPaths(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp)
+            throws Exception {
+        String other = "nqn.2016-01.com.lightbitslabs:uuid:db336dd6-5e4c-4fc4-b7ff-9b74f95f75a2";
+        LightbitsHostKey base = keyIn(tmp);
+        LightbitsHostKey a = base.forScope(NQN);
+        LightbitsHostKey b = base.forScope(other);
+        String ka = a.ensure();
+        String kb = b.ensure();
+        java.nio.file.Path configB = b.configFile();
+        java.nio.file.Path leftover = base.twoWayConfigFile("387e455e-bb68-498f-9ef3-04c463815e5d");
+        java.nio.file.Files.writeString(leftover, "[]\n");
+        subsystem("nvme-subsys3", NQN, "nvme3");      // cluster A: idle
+        subsystem("nvme-subsys4", other, "nvme4");    // cluster B: idle too
+        LightbitsStorageAdaptor.rotateInbandKeys(host, a, NQN);
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -n " + other)), "cluster B's paths are kept");
+        assertNotEquals(ka, a.ensure(), "a new cluster A key");
+        assertEquals(kb, b.ensure(), "cluster B's key is kept");
+        assertTrue(java.nio.file.Files.exists(configB), "cluster B's configuration is kept");
+        assertFalse(java.nio.file.Files.exists(leftover), "a per-pool file of an earlier version is removed");
     }
 
     @Test

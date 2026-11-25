@@ -277,10 +277,12 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      * host loses its paths once the cluster turns in-band authentication on.
      */
     /**
-     * Connect a pool (the caller holds the connect lock). A two-way pool connects only the data
-     * ports of one discovery read, each with both keys ({@link LightbitsNvmeHost#connectDirect});
-     * a path that still turns up without the controller key (made by a one-way pool of the same
-     * cluster, for example) is dropped again, so two-way never quietly runs one-way.
+     * Connect a pool (the caller holds the connect lock). A pool with in-band authentication
+     * connects only the data ports of one discovery read, each with this host's key for the pool's
+     * cluster (and the controller key for two-way), written to the kernel directly
+     * ({@link LightbitsNvmeHost#connectDirect}); a pool without it uses {@code nvme connect-all}.
+     * For two-way, a path that still turns up without the controller key (made by a one-way pool
+     * of the same cluster, for example) is dropped again, so two-way never quietly runs one-way.
      */
     private boolean connectPool(KVMStoragePool pool, List<String> endpoints, long timeoutMillis,
                                 java.util.function.Function<String, java.nio.file.Path> configFor) {
@@ -289,9 +291,10 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             nvme.forgetVanishedRejections();   // before a connect can reuse a rejected controller's name
         }
         java.util.Set<String> before = twoWay ? nvme.pathNames() : null;
+        boolean inband = inbandAuth(pool);
         boolean answered;
         try {
-            answered = twoWay ? nvme.connectDirect(endpoints, timeoutMillis, targetsFor(pool))
+            answered = inband ? nvme.connectDirect(endpoints, timeoutMillis, targetsFor(pool))
                     : nvme.connectWith(endpoints, timeoutMillis, configFor);
         } catch (RuntimeException e) {
             // a connect that failed may still have made paths: they get the same check
@@ -349,7 +352,7 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
 
     static void rotateInbandKeys(LightbitsNvmeHost nvme, LightbitsHostKey hostKey, String scope) {
         synchronized (CONNECT_LOCK) {
-            List<String> dropped = nvme.disconnectIdleSubsystems();
+            List<String> dropped = nvme.disconnectIdleSubsystems(scope);
             int left;
             try {
                 left = nvme.lightbitsPathCount(scope);
@@ -377,14 +380,31 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
     }
 
     /**
-     * Two-way: the data ports to connect through a discovery endpoint, read from its discovery
-     * log page just before the connect (the discovery service does not authenticate), each with
-     * the host and controller keys. A key that cannot be prepared, or a discovery that fails,
-     * counts as that endpoint failing.
+     * In-band authentication: the data ports to connect through a discovery endpoint, read from
+     * its discovery log page just before the connect (the discovery service does not
+     * authenticate), only those of the pool's cluster when its key scope is known, each with this
+     * host's key for that cluster (and the controller key for two-way). A key that cannot be
+     * prepared, or a discovery that fails, counts as that endpoint failing.
      */
     java.util.function.Function<String, List<LightbitsNvmeHost.Target>> targetsFor(KVMStoragePool pool) {
         String poolUuid = pool.getUuid();
-        return endpoint -> keys(pool).twoWayTargets(poolUuid, nvme.discover(endpoint, DISCOVER_TIMEOUT_MILLIS));
+        String kept = keyScope(pool);
+        String scope = kept == null || kept.isBlank() ? null : kept.trim();
+        return endpoint -> {
+            List<LightbitsHostKey.Port> ports = nvme.discover(endpoint, DISCOVER_TIMEOUT_MILLIS);
+            if (scope != null) {
+                // this cluster's keys go only to this cluster's subsystem
+                ports = ports.stream().filter(p -> scope.equals(p.subsystemNqn == null ? null : p.subsystemNqn.trim()))
+                        .collect(java.util.stream.Collectors.toList());
+            }
+            return keys(pool).targets(poolUuid, ports, twoWay(pool));
+        };
+    }
+
+    /** The pool has in-band authentication on (detail from the management server). */
+    static boolean inbandAuth(KVMStoragePool pool) {
+        Map<String, String> d = pool == null ? null : pool.getDetails();
+        return d != null && "true".equals(d.get(DETAIL_INBAND_AUTH));
     }
 
     java.nio.file.Path authConfig(KVMStoragePool pool) {

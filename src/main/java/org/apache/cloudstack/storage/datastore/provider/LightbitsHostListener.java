@@ -95,7 +95,8 @@ public class LightbitsHostListener implements HypervisorHostListener {
         String scope = inbandKeyScope(poolId);
         ModifyStoragePoolCommand cmd = new ModifyStoragePoolCommand(true, pool, discoveryDetails(poolId, scope));
         Answer answer = agentMgr.easySend(hostId, cmd);
-        if (answer == null || !answer.getResult()) {
+        boolean registered = answer != null && answer.getResult();
+        if (!registered) {
             String detail = answer == null ? "no answer" : answer.getDetails();
             // Tolerate per-pool registration failure instead of aborting the whole host
             // connect. Throwing here propagates through StoragePoolMonitor.processConnect
@@ -114,7 +115,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
         // A removal mark is never cleared here: it counts while a removal can be active and then
         // expires on its own (LightbitsHostGate.MARK_HOLD_MILLIS), so no connect can drop the mark
         // of an active removal, and an abandoned one does not undo this connect's registration.
-        ensureHostDetails(hostId, poolId, scope);
+        ensureHostDetails(hostId, poolId, scope, registered);
         retryRevocations(poolId);
         return true;
     }
@@ -161,10 +162,22 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * With the pool option ipAcl the agent is asked on every connect, also for its data IPs
      * toward the pool's cluster (see {@link #recordDataIps}).
      */
-    private void ensureHostDetails(long hostId, long poolId, String scope) {
+    private void ensureHostDetails(long hostId, long poolId, String scope, boolean registered) {
         org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
         boolean wantIps = cfg != null && cfg.isIpAcl();
         boolean wantAuth = cfg != null && cfg.isInbandAuth();
+        if (wantAuth && !registered) {
+            // the agent may still hold the pool with other keys (or none): keys made or registered
+            // now could differ from the ones its connects use; the NQN and data IPs are still recorded
+            LOG.warn("Lightbits: pool {} is not registered on host {}; its in-band keys are asked for and registered at its next"
+                    + " connect", poolId, hostId);
+            wantAuth = false;
+            if (!wantIps) {
+                ensureHostDetails(hostId, poolId, cfg, false, false, scope);
+                return;
+            }
+        }
+        boolean auth = wantAuth;
         if (!wantIps && !wantAuth) {
             ensureHostDetails(hostId, poolId, cfg, false, false, scope);
             return;
@@ -175,12 +188,31 @@ public class LightbitsHostListener implements HypervisorHostListener {
         // last, so an older report cannot overwrite a newer one. Without the lock in time this
         // connect only records the host NQN, and the next connect reports again.
         if (!hostGateLocker.run(reportLockName(hostId), REPORT_LOCK_SECONDS,
-                () -> ensureHostDetails(hostId, poolId, cfg, wantIps, wantAuth, scope))) {
+                () -> ensureHostDetails(hostId, poolId, cfg, wantIps, auth && !movedMeanwhile(hostId, poolId, scope), scope))) {
             LOG.warn("Lightbits: the report lock of host {} was busy for {} s; its {} for pool {} are recorded at its next"
                     + " connect", hostId, REPORT_LOCK_SECONDS,
-                    wantIps && wantAuth ? "data IPs and in-band key" : wantIps ? "data IPs" : "in-band key", poolId);
+                    wantIps && auth ? "data IPs and in-band key" : wantIps ? "data IPs" : "in-band key", poolId);
             ensureHostDetails(hostId, poolId, cfg, false, false, scope);
         }
+    }
+
+    /**
+     * Under the report lock: true when this connect read no scope but another connect of the host
+     * moved the pool to its cluster's keys while this one waited. A report with the host-wide key
+     * would then replace the cluster's trusted-host secret with a key the pool no longer uses; the
+     * key report is skipped (the other connect registered the current one).
+     */
+    private boolean movedMeanwhile(long hostId, long poolId, String scope) {
+        if (scope != null) {
+            return false;
+        }
+        String recorded = value(hostId, LightbitsTrustedHosts.perPool(HOST_SCOPE_DETAIL, poolId));
+        if (recorded == null || HOST_WIDE.equals(recorded)) {
+            return false;
+        }
+        LOG.info("Lightbits: pool {} moved to its cluster's keys on host {} during this connect; this connect does not report"
+                + " its keys again", poolId, hostId);
+        return true;
     }
 
     static final int REPORT_LOCK_SECONDS = 120;
@@ -664,11 +696,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * then uses its host-wide keys, as with a management server of an earlier version.
      */
     String keyScope(long poolId) {
-        String kept = storagePoolDetailsDao.listDetailsKeyPairs(poolId).get(KEY_SCOPE_DETAIL);
-        if (kept != null && !kept.isBlank()) {
-            return kept.trim();
-        }
         try {
+            String kept = storagePoolDetailsDao.listDetailsKeyPairs(poolId).get(KEY_SCOPE_DETAIL);
+            if (kept != null && !kept.isBlank()) {
+                return kept.trim();
+            }
             LightbitsPoolConfig cfg = poolSecrets.apply(poolId);
             String scope = clients.apply(cfg).clusterSubsystemNqn();
             if (scope != null) {
