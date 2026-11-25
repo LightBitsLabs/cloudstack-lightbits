@@ -24,6 +24,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   onto the host) only when every path of the volume's subsystem holds the host's current
   controller key and none is a path it rejected but could not disconnect; otherwise it
   refuses with how to move the host onto two-way paths. Running VMs are not affected.
+- Removing a host no longer forgets a revocation the cluster could not take: each pool records
+  it as pending before it removes the host from the volume ACLs and deletes its trusted host,
+  and clears it only when the cluster confirms both. Pending revocations are retried at the
+  storage statistics poll and at host connects, and logged until they complete; one for a
+  machine added back to CloudStack is dropped.
 
 ### Known limitations
 - Two-way: a migration onto a host whose paths do not hold its current controller key is
@@ -31,6 +36,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   pool with running VMs therefore needs the host order in INSTALL.md: one host emptied before
   the option is turned on, and VMs migrated by hand onto moved hosts before each further
   maintenance.
+- A pending revocation that the database cannot save while the host is being removed (CloudStack
+  removes the host whatever the plugin returns) is kept in memory, saved again on each retry and
+  logged as an error; a management server restart before it is saved or confirmed loses it.
+- A host added back with the NQN of a removed host records it under a lock that pending
+  revocations of that NQN also take, so a retry cannot take the new host out. If that lock stays
+  busy for 60 s the host records nothing for that NQN in that connect and does so at its next
+  connect; until then volumes cannot be attached to it.
 
 ## [0.1.0-rc.1] - 2026-11-24
 

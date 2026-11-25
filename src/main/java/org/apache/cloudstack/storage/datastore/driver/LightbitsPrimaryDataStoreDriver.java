@@ -287,6 +287,22 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     }
 
     /** Rebuild the validated pool config (incl. environment) from persisted details. */
+    /**
+     * The storage statistics poll also retries the pool's pending revocations of removed hosts
+     * (see LightbitsRevocations): a periodic task that already reaches the cluster. A failure
+     * here never costs the statistics.
+     */
+    private void retryRevocations(long poolId, LightbitsPoolConfig cfg) {
+        try {
+            if (!org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.pending(storagePoolDetailsDao, poolId).isEmpty()) {
+                org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.retry(storagePoolDetailsDao, hostDetailsDao,
+                        HOST_NQN_DETAIL, poolId, cfg, clientFor(cfg), hostGateLocker);
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not retry the pending revocations of pool {}: {}", poolId, e.getMessage());
+        }
+    }
+
     LightbitsPoolConfig configForPool(long poolId) {
         return org.apache.cloudstack.storage.datastore.util.LightbitsPoolSecret.load(storagePoolDetailsDao, poolId);
     }
@@ -963,6 +979,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         try {
             long poolId = storagePool.getId();
             LightbitsPoolConfig cfg = configForPool(poolId);
+            // first, so a capacity read that fails or reports nothing does not skip the retries
+            retryRevocations(poolId, cfg);
             LightbitsApiClient.NodeCapacity nc = clientFor(cfg).nodeCapacity();
             if (nc.effectivePhysicalBytes <= 0) {
                 LOG.warn("Lightbits: nodes report no effective capacity for pool {}; skipping stats cycle", poolId);

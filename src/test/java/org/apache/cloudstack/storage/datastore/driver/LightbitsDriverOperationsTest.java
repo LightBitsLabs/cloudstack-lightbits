@@ -193,6 +193,24 @@ class LightbitsDriverOperationsTest {
             v.setEtag(String.valueOf(Integer.parseInt(v.getEtag()) + 1));
         }
 
+        /** Effective capacity the nodes report; 0 models a cluster that reports none. */
+        long effectiveBytes = 30L << 40;
+
+        @Override
+        public NodeCapacity nodeCapacity() {
+            return new NodeCapacity(3, effectiveBytes, 20L << 40);
+        }
+
+        @Override
+        public List<TrustedHost> listTrustedHosts() {
+            return new ArrayList<>();
+        }
+
+        @Override
+        public List<Volume> listVolumes() {
+            return new ArrayList<>(volumes.values());
+        }
+
         @Override
         public boolean qosPolicyExists(String policyName) {
             return policies.contains(policyName);
@@ -275,6 +293,14 @@ class LightbitsDriverOperationsTest {
                         ? new DetailVO((Long) a[0], (String) a[1], hostDetails.get((String) a[1])) : null;
                 case "findByName": return a -> hostDetails.containsKey((String) a[0])
                         ? new ArrayList<>(List.of(new DetailVO(1L, (String) a[0], hostDetails.get((String) a[0])))) : new ArrayList<>();
+                default: return null;
+            }
+        }));
+        inject(driver, "storagePoolDetailsDao", fake(org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao.class, n -> {
+            switch (n) {
+                case "listDetailsKeyPairs": return a -> new HashMap<>(poolDetails);
+                case "addDetail": return a -> poolDetails.put((String) a[1], (String) a[2]);
+                case "removeDetail": return a -> poolDetails.remove((String) a[1]);
                 default: return null;
             }
         }));
@@ -605,5 +631,33 @@ class LightbitsDriverOperationsTest {
         assertEquals(0, driver.getUsedIops(null));
         assertFalse(driver.isVmInfoNeeded());
         assertFalse(driver.isVmTagsNeeded("x"));
+    }
+
+    @Test
+    void theStatisticsPollRetriesAPendingRevocation() {
+        String gone = "nqn.2014-08.org.nvmexpress:uuid:00000000-0000-0000-0000-00000000dead";
+        Volume v = cluster.add(volName(), 1L << 30, List.of(gone));
+        org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.record(
+                fake(org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao.class,
+                        n -> n.equals("addDetail") ? a -> poolDetails.put((String) a[1], (String) a[2]) : null), POOL, gone);
+        com.cloud.utils.Pair<Long, Long> stats = driver.getStorageStats(fake(com.cloud.storage.StoragePool.class,
+                n -> n.equals("getId") ? a -> POOL : null));
+        assertNotNull(stats, "the statistics are still returned");
+        assertEquals(List.of("ALLOW_NONE"), v.getAcl().getValues(), "the removed host is taken out");
+        assertTrue(poolDetails.keySet().stream().noneMatch(k -> k.startsWith(
+                org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.DETAIL_PREFIX)), "and the record cleared");
+    }
+
+    @Test
+    void theStatisticsPollRetriesARevocationEvenWhenTheClusterReportsNoCapacity() {
+        String gone = "nqn.2014-08.org.nvmexpress:uuid:00000000-0000-0000-0000-00000000beef";
+        Volume v = cluster.add(volName(), 1L << 30, List.of(gone));
+        org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.record(
+                fake(org.apache.cloudstack.storage.datastore.db.StoragePoolDetailsDao.class,
+                        n -> n.equals("addDetail") ? a -> poolDetails.put((String) a[1], (String) a[2]) : null), POOL, gone);
+        cluster.effectiveBytes = 0;
+        assertNull(driver.getStorageStats(fake(com.cloud.storage.StoragePool.class, n -> n.equals("getId") ? a -> POOL : null)),
+                "no statistics this cycle");
+        assertEquals(List.of("ALLOW_NONE"), v.getAcl().getValues(), "the removed host is taken out all the same");
     }
 }
