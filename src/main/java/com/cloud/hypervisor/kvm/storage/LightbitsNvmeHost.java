@@ -281,7 +281,8 @@ class LightbitsNvmeHost {
      * discovery read can add a port that lacks the controller key: every path this makes holds
      * it, and the kernel refuses a cluster that answers with another key. A port that already
      * has a path is left as it is. An endpoint counts as answered when at least one of its ports
-     * is connected; the ports that failed are logged. Otherwise as {@link #connectWith}.
+     * is connected; the ports that failed are logged. All ports of an endpoint share its timeout.
+     * Otherwise as {@link #connectWith}.
      */
     boolean connectDirect(List<String> endpoints, long endpointTimeoutMillis,
                           java.util.function.Function<String, List<Target>> targetsFor) {
@@ -307,13 +308,21 @@ class LightbitsNvmeHost {
             }
             int connected = 0;
             List<String> portFailures = new ArrayList<>();
+            // one time budget for all the endpoint's ports, as connect-all had: unreachable ports
+            // do not add up while the caller holds the agent-wide connect lock
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(endpointTimeoutMillis);
             for (Target t : targets) {
                 if (present.contains(t.port())) {
                     connected++;
                     continue;
                 }
+                long remaining = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                if (remaining <= 0) {
+                    portFailures.add(t + " (not tried: the endpoint's " + endpointTimeoutMillis + " ms ran out)");
+                    continue;
+                }
                 try {
-                    sys.connectFabrics(t.options, endpointTimeoutMillis);
+                    sys.connectFabrics(t.options, remaining);
                     connected++;
                 } catch (RuntimeException e) {
                     String why = String.valueOf(e.getMessage());

@@ -55,10 +55,20 @@ class LightbitsNvmeHostTest {
         /** Options written to /dev/nvme-fabrics, and the error the kernel gives per address. */
         final List<String> fabrics = new ArrayList<>();
         final Map<String, String> fabricsErrors = new HashMap<>();
+        final List<Long> fabricsTimeouts = new ArrayList<>();
+        long fabricsDelayMillis;
 
         @Override
         public void connectFabrics(String options, long timeoutMillis) {
             fabrics.add(options);
+            fabricsTimeouts.add(timeoutMillis);
+            if (fabricsDelayMillis > 0) {
+                try {
+                    Thread.sleep(fabricsDelayMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             for (Map.Entry<String, String> e : fabricsErrors.entrySet()) {
                 if (options.contains("traddr=" + e.getKey() + ",")) {
                     throw new com.cloud.utils.exception.CloudRuntimeException(e.getValue());
@@ -565,6 +575,16 @@ class LightbitsNvmeHostTest {
                     "a failed discovery and an endpoint whose every port failed are both passed over");
             assertTrue(sys.fabrics.get(sys.fabrics.size() - 1).contains("traddr=10.0.0.5,"));
         }
+    }
+
+    @Test
+    void theDataPortsOfAnEndpointShareItsTimeout() {
+        sys.fabricsDelayMillis = 100;
+        assertTrue(host.connectDirect(List.of("10.0.0.1:8009"), 150,
+                endpoint -> List.of(target("10.0.0.2"), target("10.0.0.3"), target("10.0.0.4"))));
+        assertEquals(2, sys.fabrics.size(), "the third port is not tried once the endpoint's time ran out");
+        assertTrue(sys.fabricsTimeouts.get(0) <= 150 && sys.fabricsTimeouts.get(1) < sys.fabricsTimeouts.get(0),
+                String.valueOf(sys.fabricsTimeouts));
     }
 
     @Test
