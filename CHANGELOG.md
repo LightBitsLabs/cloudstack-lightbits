@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 - README and INSTALL.md: a quick start for a first trial; the security options presented as
   optional, with what each adds and costs.
+- In-band authentication keys found readable by other users than root are still made root-only
+  and kept (so the host keeps working), but are now flagged as possibly copied: the agent
+  reports it, the management log warns, and the readiness line lists the host until its keys
+  are rotated.
 
 ## [0.1.0-rc.1] - 2026-11-24
 

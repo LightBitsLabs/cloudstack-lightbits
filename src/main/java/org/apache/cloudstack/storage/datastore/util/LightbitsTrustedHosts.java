@@ -56,6 +56,8 @@ public final class LightbitsTrustedHosts {
     private LightbitsTrustedHosts() {
     }
 
+    /** Host detail: "true" while the host's keys may have been copied (were readable by other users) and are not rotated. */
+    public static final String KEYS_EXPOSED_DETAIL = "lightbits.keysexposed";
     /** Host detail: the fingerprint of the host's current controller key (two-way), as the agent last reported it. */
     public static final String CURRENT_CTRL_KEY_DETAIL = "lightbits.inbandctrlkey";
     /** Host detail: Lightbits paths of the host whose controller key is not the current one, as last reported. */
