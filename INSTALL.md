@@ -10,10 +10,31 @@ The plugin is a single jar dropped onto an existing CloudStack deployment — no
 source changes. The **same jar** goes on the management server and every KVM host, because it
 contains both the management-side storage provider and the agent-side `StorageAdaptor`.
 
+## Quick start: a first trial
+
+To try the plugin, you need only the core steps below; everything in
+[5. Optional security features](#5-optional-security-features) is off by default and can be
+added later, when and if you need it. One exception: on a cluster installed in explicit-allow
+mode, a volume created without an IP ACL gets `ALLOW_NONE` and no host can connect to it, so
+add `&ipAcl=true` to the pool URL there (see [Volume IP ACL](#volume-ip-acl)).
+
+1. Check the [prerequisites](#prerequisites) (CloudStack with KVM hosts, a Lightbits cluster
+   reachable from them, `nvme-cli` on the hosts) and
+   [create a project-scoped token](#creating-a-project-scoped-jwt).
+2. [Install the jar](#1-install-the-jar) on the management server and every KVM host.
+3. [Add a primary storage pool](#3-add-the-primary-storage-pool). The minimum URL is
+   `lightbits://<api-host>/<project>?environment=<name>&fingerprint=<SHA-256 fingerprint>`
+   (the default is 3 replicas: on a cluster with fewer nodes add `&replicas=1`, or
+   `&replicas=2` on two nodes); see
+   [TLS](#tls-verifying-the-cluster-certificate) for the fingerprint.
+4. [Create an offering](#4-use-it) with storage tag `lightbits` and deploy a VM with it.
+   Snapshots, revert, volume from snapshot, grow and live migration then work as on any
+   CloudStack primary storage.
+
 ## Prerequisites
 
-- Apache CloudStack **4.22.x** (KVM), management server + KVM hosts already deployed
-- A LightOS cluster reachable from:
+- Apache CloudStack **4.22.x or 4.23.x** (KVM), management server + KVM hosts already deployed
+- A Lightbits cluster reachable from:
   - the **management server** on the API port (`443`)
   - every **KVM host** on NVMe/TCP (`4420`) and discovery (`8009`)
 - On each KVM host: `nvme-cli` and the `nvme-tcp` kernel module
@@ -264,9 +285,27 @@ limit. To apply the new policy at once, use one of these:
 Check the policy the cluster applies with `lbcli get volume` (`qosPolicyName`) or in the
 management server log ("QoS policy changed from ... to ...").
 
+## 5. Optional security features
+
+None of these is needed to run the plugin or to try it (except `ipAcl=true` on a cluster
+installed in explicit-allow mode, see below). On their own, Lightbits volumes accept only the
+NQNs of the hosts CloudStack attaches them to (the host NQN ACL the plugin always manages).
+An NQN is an identifier, not a credential: a machine on the storage network that copies an
+allowed NQN is let in, which the IP ACL and in-band authentication below address. The API
+connection is always TLS-verified. The options below add further
+layers. Each one has a value and an operational cost, so turn on the ones that fit your
+environment and security needs.
+
+| Option (pool) | What it adds | What it costs to run | Consider it when |
+|---|---|---|---|
+| `ipAcl=true` ([Volume IP ACL](#volume-ip-acl)) | A volume accepts connections only from the data IPs of the hosts it is attached to, so a machine that copies a host's NQN from elsewhere on the network is still refused | Current agents on every host; a host whose data IP changes must be reconnected; hosts with several data NICs have all their addresses listed | The storage network is shared with machines outside CloudStack, or the cluster was installed in explicit-allow mode (there it is required) |
+| `inbandAuth=true` ([In-band authentication](#in-band-authentication)) | Each host proves itself to the cluster with its own secret key (DH-HMAC-CHAP), so knowing a host's NQN and IP is not enough to connect | A coordinated rollout: every host and client of the cluster must hold its key before the cluster admin turns enforcement on (cluster-wide); key handling and rotation | Policy requires authenticated storage access, or untrusted machines can reach the storage network |
+| `inbandAuthTwoWay=true` (with `inbandAuth`) | Each host also verifies the cluster, so a host cannot be pointed at an impostor target | A second key per host; same rollout as `inbandAuth` | Policy requires mutual authentication |
+| `inbandKeyGeneration` ([Rotating the keys](#rotating-the-keys)) | Replaces the in-band keys of every host from CloudStack | A maintenance cycle per host | Policy requires periodic key rotation |
+
 ### Volume IP ACL
 
-**Pool option `ipAcl=true`, off by default.** A Lightbits volume has two access lists: the
+**Pool option `ipAcl=true`, optional, off by default.** A Lightbits volume has two access lists: the
 host NQNs allowed to connect (the plugin always manages this one) and the IP addresses they
 may connect from (`IPAcl`, `ALLOW_ANY` by default). The cluster lets a host see a volume
 only when both allow it. With `ipAcl=true` the plugin also manages the IP list:
@@ -304,9 +343,10 @@ without asking the plugin: anything but `true` or `false` makes the pool's volum
 fail, naming the option, until it is corrected. Each reconnect records the
 host's data IP and sets the IP ACL of the volumes it has. Upgrade the agent on every host
 first: an older agent reports no data IP, and its host is refused access to the pool's
-volumes with an error naming the host. Check a host with
-`cmk list resourcedetails resourcetype=Host resourceid=<host-id> key=lightbits.dataips.<pool id>`
-and a volume with `lbcli get volume` (`IPAcl`).
+volumes with an error naming the host. The management server logs a host's addresses when it
+first records them and whenever they change ("Lightbits: host <id> data IPs for pool <pool
+id>: ... (were ...)"); a reconnect with unchanged addresses logs nothing. After a reconnect,
+check a volume with `lbcli get volume` (`IPAcl`).
 
 To turn it off, first have the cluster admin set `lbcli update volume --ip-acl ALLOW_ANY` on
 the pool's volumes, then remove the detail: with the option off the plugin no longer changes
@@ -314,7 +354,7 @@ IP ACLs, and a volume left with one host's address refuses every other host.
 
 ### In-band authentication
 
-**Pool option `inbandAuth=true`, off by default.** With NVMe in-band authentication
+**Pool option `inbandAuth=true`, optional, off by default.** With NVMe in-band authentication
 (DH-HMAC-CHAP) turned on, the cluster lets a host open an I/O path only when the host proves
 it holds the key registered for it as a trusted host. With `inbandAuth=true` the plugin does
 the host side:
