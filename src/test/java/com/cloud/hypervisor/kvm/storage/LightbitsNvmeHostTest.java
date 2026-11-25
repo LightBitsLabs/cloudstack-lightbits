@@ -52,6 +52,30 @@ class LightbitsNvmeHostTest {
         boolean disconnectRemoves = true;
         final java.util.Set<String> unreadable = new java.util.HashSet<>();
         int slept;
+        /** Options written to /dev/nvme-fabrics, and the error the kernel gives per address. */
+        final List<String> fabrics = new ArrayList<>();
+        final Map<String, String> fabricsErrors = new HashMap<>();
+        final List<Long> fabricsTimeouts = new ArrayList<>();
+        long fabricsDelayMillis;
+        long nanos;
+
+        @Override
+        public long nanoTime() {
+            return nanos;
+        }
+
+        @Override
+        public void connectFabrics(String options, long timeoutMillis) {
+            fabrics.add(options);
+            fabricsTimeouts.add(timeoutMillis);
+            nanos += java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(fabricsDelayMillis);
+            for (Map.Entry<String, String> e : fabricsErrors.entrySet()) {
+                if (options.contains("traddr=" + e.getKey() + ",")) {
+                    throw new com.cloud.utils.exception.CloudRuntimeException(e.getValue());
+                }
+            }
+            onConnect.run();
+        }
 
         @Override
         public LightbitsNvmeHost.Result run(long timeoutMillis, String... argv) {
@@ -511,6 +535,71 @@ class LightbitsNvmeHostTest {
         assertTrue(sys.commands.stream().noneMatch(c -> c.contains("DHHC-1")), "no key on any command line");
     }
 
+    private static LightbitsNvmeHost.Target target(String address) {
+        return new LightbitsNvmeHost.Target(NQN, address, "4420", "transport=tcp,traddr=" + address + ",trsvcid=4420,nqn=" + NQN
+                + ",dhchap_secret=DHHC-1:00:host:,dhchap_ctrl_secret=DHHC-1:00:ctrl:");
+    }
+
+    @Test
+    void aTwoWayConnectMakesExactlyTheDiscoveredPortsWithoutConnectAll() {
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420,src_addr=10.0.0.9", "connecting");   // already there, any state
+        boolean answered = host.connectDirect(List.of("10.0.0.1:8009"), 1000,
+                endpoint -> List.of(target("10.0.0.1"), target("10.0.0.2"), target("10.0.0.3")));
+        assertTrue(answered);
+        assertEquals(2, sys.fabrics.size(), "one controller per port, none for the port that has a path");
+        assertTrue(sys.fabrics.get(0).contains("traddr=10.0.0.2,") && sys.fabrics.get(1).contains("traddr=10.0.0.3,"));
+        assertTrue(sys.fabrics.stream().allMatch(o -> o.contains("dhchap_ctrl_secret=DHHC-1:00:ctrl:")), "every port gets the controller key");
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme connect")), "no nvme-cli connect, so no second discovery");
+        assertTrue(sys.commands.stream().noneMatch(c -> c.contains("DHHC-1")), "no key on any command line");
+        assertFalse(target("10.0.0.2").toString().contains("DHHC-1"), "a target prints without its keys");
+    }
+
+    @Test
+    void aTwoWayConnectGoesOnWhenSomePortsFailAndTriesTheNextEndpointWhenAllDo() {
+        sys.fabricsErrors.put("10.0.0.2", "Operation already in progress");   // made meanwhile: connected
+        sys.fabricsErrors.put("10.0.0.3", "Key was rejected by service");
+        assertTrue(host.connectDirect(List.of("10.0.0.1:8009"), 1000, endpoint -> List.of(target("10.0.0.2"), target("10.0.0.3"))));
+
+        sys.fabrics.clear();
+        sys.fabricsErrors.put("10.0.0.4", "Key was rejected by service");
+        // the first endpoint tried rotates: each endpoint behaves the same whatever the order
+        java.util.function.Function<String, List<LightbitsNvmeHost.Target>> perEndpoint = endpoint -> {
+            if (endpoint.startsWith("10.0.0.1:")) {
+                throw new CloudRuntimeException("'nvme discover' failed");
+            }
+            return endpoint.startsWith("10.0.0.2:") ? List.of(target("10.0.0.4")) : List.of(target("10.0.0.5"));
+        };
+        for (int i = 0; i < 3; i++) {
+            sys.fabrics.clear();
+            assertTrue(host.connectDirect(List.of("10.0.0.1:8009", "10.0.0.2:8009", "10.0.0.3:8009"), 1000, perEndpoint),
+                    "a failed discovery and an endpoint whose every port failed are both passed over");
+            assertTrue(sys.fabrics.get(sys.fabrics.size() - 1).contains("traddr=10.0.0.5,"));
+        }
+    }
+
+    @Test
+    void theDataPortsOfAnEndpointShareItsTimeout() {
+        sys.fabricsDelayMillis = 100;
+        assertTrue(host.connectDirect(List.of("10.0.0.1:8009"), 150,
+                endpoint -> List.of(target("10.0.0.2"), target("10.0.0.3"), target("10.0.0.4"))));
+        assertEquals(2, sys.fabrics.size(), "the third port is not tried once the endpoint's time ran out");
+        assertTrue(sys.fabricsTimeouts.get(0) <= 150 && sys.fabricsTimeouts.get(1) < sys.fabricsTimeouts.get(0),
+                String.valueOf(sys.fabricsTimeouts));
+    }
+
+    @Test
+    void aTwoWayConnectThatNoEndpointServesFailsWithoutALivePath() {
+        sys.fabricsErrors.put("10.0.0.4", "Key was rejected by service");
+        CloudRuntimeException e = assertThrows(CloudRuntimeException.class, () -> host.connectDirect(List.of("10.0.0.1:8009"), 1000,
+                endpoint -> List.of(target("10.0.0.4"))));
+        assertTrue(e.getMessage().contains("Key was rejected by service") && !e.getMessage().contains("DHHC-1"), e.getMessage());
+        e = assertThrows(CloudRuntimeException.class, () -> host.connectDirect(List.of("10.0.0.1:8009"), 1000, endpoint -> List.of()));
+        assertTrue(e.getMessage().contains("lists no data port"), e.getMessage());
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");
+        assertFalse(host.connectDirect(List.of("10.0.0.1:8009"), 1000, endpoint -> List.of(target("10.0.0.4"))),
+                "with a live path the call goes on, reporting that no endpoint answered");
+    }
+
     @Test
     void pathsWithoutTheCurrentControllerKeyAreCounted() {
         String ctrl = "DHHC-1:00:ctrl:";
@@ -533,7 +622,8 @@ class LightbitsNvmeHostTest {
         LightbitsHostKey key = keyIn(tmp);
         String k = key.ensure();
         String c = key.ensureCtrlKey();
-        key.ensureTwoWayConfig("387e455e-bb68-498f-9ef3-04c463815e5d", List.of());
+        // a per-pool two-way configuration an earlier version left behind
+        java.nio.file.Files.writeString(key.twoWayConfigFile("387e455e-bb68-498f-9ef3-04c463815e5d"), "[]\n");
         subsystem("nvme-subsys3", NQN, "nvme3");
         sys.controller("nvme3", "traddr=10.0.0.1,trsvcid=4420", "live");
         // the disconnect removes the controller with its subsystem, as the kernel does
@@ -648,6 +738,22 @@ class LightbitsNvmeHostTest {
         sys.unreadable.clear();
         sys.unreadable.add("/sys/block/nvme3n1/device/subsysnqn");
         assertThrows(CloudRuntimeException.class, () -> host.requireTwoWayPaths("nvme3n1", ctrl));
+    }
+
+    @Test
+    void aDeviceIsOpenByAVmOnlyWhenAQemuProcessHoldsIt() {
+        assertFalse(host.openByVm("nvme3n1"), "no process");
+        sys.files.put("/proc/self/comm", "java");
+        sys.files.put("/proc/812/comm", "bash");
+        sys.files.put("/proc/812/fd/3", "");
+        sys.links.put("/proc/812/fd/3", "/dev/nvme3n1");   // a shell reading the device is not a VM
+        sys.files.put("/proc/4711/comm", "qemu-kvm");
+        sys.files.put("/proc/4711/fd/0", "");
+        sys.files.put("/proc/4711/fd/21", "");
+        sys.links.put("/proc/4711/fd/21", "/dev/nvme3n2");
+        assertFalse(host.openByVm("nvme3n1"));
+        assertTrue(host.openByVm("nvme3n2"));
+        assertFalse(host.openByVm("nvme3n"), "the whole device name, not a prefix");
     }
 
     @Test

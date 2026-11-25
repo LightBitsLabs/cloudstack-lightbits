@@ -83,13 +83,111 @@ public final class LightbitsRevocations {
             dao.addDetail(poolId, key, nqn, false);
         } catch (RuntimeException e) {
             // CloudStack removes the host whatever its listeners return, so the revocation cannot
-            // hold the removal up: keep it in memory, saved again on each retry pass.
+            // hold the removal up: keep it in memory and in a local file, saved again on each retry pass.
+            loadUnsaved();
             unsaved(poolId).put(key, nqn);
-            LOG.error("Lightbits: could not save the pending revocation of removed host {} on pool {} ({}); it is kept in"
-                    + " memory and retried, but a management server restart before it is saved or confirmed loses it."
-                    + " Check that no volume ACL of the pool lists the NQN and that its trusted host is gone", nqn, poolId,
-                    e.getMessage());
+            boolean kept = writeUnsaved();
+            LOG.error("Lightbits: could not save the pending revocation of removed host {} on pool {} ({}); it is kept"
+                    + (kept ? " in memory and in " + fallbackFile + " on this management server" : " in memory only (the local"
+                    + " file could not be written either)") + " and retried until the database takes it. If this management"
+                    + " server is lost before then, keep the removed machine fenced and remove the NQN from the pool's volume"
+                    + " ACLs and trusted hosts by hand (INSTALL.md, \"Removing a host\")", nqn, poolId, e.getMessage());
         }
+    }
+
+    /**
+     * Local copy of the records the database refused, on the management server (one line per
+     * record: pool id, record key, NQN; no secret). Read back after a restart of this management
+     * server, so a restart before the database takes them does not lose them.
+     */
+    static java.nio.file.Path fallbackFile = java.nio.file.Paths.get("/var/lib/cloudstack/lightbits/pending-revocations");
+
+    private static final java.util.concurrent.atomic.AtomicBoolean LOADED = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * Read the local copy once per process, into the records kept in memory. It holds the same
+     * monitor as {@link #writeUnsaved()}, so no caller rewrites the file while it is being read.
+     */
+    static synchronized void loadUnsaved() {
+        if (!LOADED.compareAndSet(false, true)) {
+            return;
+        }
+        java.nio.file.Path f = fallbackFile;
+        if (!java.nio.file.Files.isRegularFile(f, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            return;
+        }
+        try {
+            int n = 0;
+            for (String line : utf8Lines(java.nio.file.Files.readAllBytes(f))) {
+                String[] p = line.trim().split(" ");
+                if (p.length != 3 || !p[1].startsWith(DETAIL_PREFIX) || p[2].isEmpty()) {
+                    continue;
+                }
+                try {
+                    unsaved(Long.parseLong(p[0])).putIfAbsent(p[1], p[2]);
+                    n++;
+                } catch (NumberFormatException e) {
+                    // not a record line
+                }
+            }
+            if (n > 0) {
+                LOG.warn("Lightbits: read {} pending revocation(s) the database had refused from {}; retrying them", n, f);
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            LOG.error("Lightbits: could not read the pending revocations kept in {}: {}", f, e.getMessage());
+        }
+    }
+
+    /** The lines of {@code bytes} decoded as UTF-8; a line that is not valid UTF-8 is skipped, the others are kept. */
+    static List<String> utf8Lines(byte[] bytes) {
+        List<String> lines = new java.util.ArrayList<>();
+        int start = 0;
+        for (int i = 0; i <= bytes.length; i++) {
+            if (i == bytes.length || bytes[i] == '\n') {
+                try {
+                    lines.add(StandardCharsets.UTF_8.newDecoder()
+                            .decode(java.nio.ByteBuffer.wrap(bytes, start, i - start)).toString());
+                } catch (java.nio.charset.CharacterCodingException e) {
+                    // a damaged line: skipped
+                }
+                start = i + 1;
+            }
+        }
+        return lines;
+    }
+
+    /** Write the records kept in memory to the local copy (or remove it when none is left). */
+    private static synchronized boolean writeUnsaved() {
+        java.nio.file.Path f = fallbackFile;
+        StringBuilder b = new StringBuilder();
+        for (Map.Entry<Long, Map<String, String>> pool : UNSAVED.entrySet()) {
+            for (Map.Entry<String, String> r : pool.getValue().entrySet()) {
+                b.append(pool.getKey()).append(' ').append(r.getKey()).append(' ').append(r.getValue()).append('\n');
+            }
+        }
+        try {
+            if (b.length() == 0) {
+                java.nio.file.Files.deleteIfExists(f);
+                return true;
+            }
+            java.nio.file.Path dir = f.getParent();
+            java.nio.file.Files.createDirectories(dir,
+                    java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")));
+            java.nio.file.Path tmp = java.nio.file.Files.createTempFile(dir, "pending-revocations", ".tmp",
+                    java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")));
+            java.nio.file.Files.write(tmp, b.toString().getBytes(StandardCharsets.UTF_8));
+            java.nio.file.Files.move(tmp, f, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            return true;
+        } catch (java.io.IOException | RuntimeException e) {
+            LOG.error("Lightbits: could not write the pending revocations to {}: {}", f, e.getMessage());
+            return false;
+        }
+    }
+
+    /** Test hook: forget what this process holds, as a restart would (the local copy stays). */
+    static void forgetUnsavedForTest() {
+        UNSAVED.clear();
+        LOADED.set(false);
     }
 
     /** Records whose save failed (record key to NQN), per pool; lost at a management server restart. */
@@ -101,14 +199,19 @@ public final class LightbitsRevocations {
 
     /** Every record of the pool, saved or kept in memory (record key to NQN); in memory only if the read fails. */
     static Map<String, String> records(StoragePoolDetailsDao dao, long poolId) {
+        loadUnsaved();
         // a record kept in memory is saved now, under its own key, if the database takes it
+        boolean saved = false;
         for (Map.Entry<String, String> e : new java.util.HashMap<>(unsaved(poolId)).entrySet()) {
             try {
                 dao.addDetail(poolId, e.getKey(), e.getValue(), false);
-                unsaved(poolId).remove(e.getKey(), e.getValue());
+                saved |= unsaved(poolId).remove(e.getKey(), e.getValue());
             } catch (RuntimeException ex) {
-                // stays in memory for the next pass
+                // stays in memory (and in the local copy) for the next pass
             }
+        }
+        if (saved) {
+            writeUnsaved();
         }
         Map<String, String> out = new java.util.LinkedHashMap<>(unsaved(poolId));
         Map<String, String> details;
@@ -153,9 +256,13 @@ public final class LightbitsRevocations {
 
     /** Delete exactly these records (the ones an action looked at); later ones stay. */
     static void delete(StoragePoolDetailsDao dao, long poolId, java.util.Set<String> keys) {
+        boolean local = false;
         for (String key : keys) {
-            unsaved(poolId).remove(key);
+            local |= unsaved(poolId).remove(key) != null;
             dao.removeDetail(poolId, key);
+        }
+        if (local) {
+            writeUnsaved();
         }
     }
 

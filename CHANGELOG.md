@@ -14,6 +14,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   counts and the readiness line are per pool, so a host's paths to another cluster no longer
   make a pool report it not ready. An agent or management server of an earlier version uses
   the host-wide key as before.
+- Documentation of two-way in-band authentication states what it checks (INSTALL.md, "What two-way
+  checks").
+- A pending revocation of a removed host that the database cannot save is also kept in a local
+  file on the management server (`/var/lib/cloudstack/lightbits/pending-revocations`, root only),
+  so a restart of that management server no longer loses it. INSTALL.md, "Removing a host",
+  gives the manual procedure for the case where that management server is lost.
+- Two-way in-band authentication connects a pool without `nvme connect-all`: the agent reads the
+  discovery log page once and makes one path per listed data port with both keys, written to
+  `/dev/nvme-fabrics`. No path of a two-way pool is made without the controller key, and the
+  per-pool configuration files (`/etc/nvme/lightbits/auth-<pool uuid>.json`) are no longer
+  written; one left by an earlier version is deleted at the pool's next connect.
+
+### Known limitations
+- Per-cluster keys: a pool a host connected before its cluster's subsystem NQN could be read
+  keeps the host-wide key on that host and moves to the cluster's key at a later connect. If
+  that move fails during a key rotation of another pool of the same cluster and project (the
+  agent does not take the pool again), the pool keeps the old key until the host's next
+  connect, and a path of it that reconnects meanwhile is refused; reconnect the host. This needs
+  an agent failure during a rotation, so it is documented rather than handled in code.
+- Two-way in-band authentication (`inbandAuthTwoWay=true`) checks the cluster only on connections
+  the cluster authenticates, which it does once in-band authentication is enforced on the
+  cluster; before that it checks nothing. Like any Linux NVMe/TCP host, the host also accepts a
+  target that does not ask for authentication, so two-way does not replace an isolated storage
+  network. The CHANGELOG entries of 0.1.0-rc.1 and 0.1.0-rc.2 ("the host checks the cluster
+  too") should be read with this.
+- Two-way: a one-way pool of the same cluster still connects with `nvme connect-all` and the
+  host key only, and its paths also carry the two-way pool's volumes. Such a path stays until
+  it is disconnected by hand (`nvme disconnect -d <controller>`); meanwhile new handoffs of the
+  two-way pool's volumes on that host are refused and the host is reported not ready. Make
+  every pool of a cluster two-way, or none (INSTALL.md, "In-band authentication").
+- A pending revocation that neither the database nor the local file could keep, or whose
+  management server is lost before it completes, is not retried by another management server:
+  keep the removed machine fenced and remove its access by hand (INSTALL.md, "Removing a host").
+  This needs a database failure during the removal plus the loss of that server, so it is
+  documented rather than handled in code.
+
+## [0.1.0-rc.2] - 2026-11-25
+
+Second release candidate for 0.1.0: hardening of in-band authentication and host removal, and
+documentation for a first trial. For evaluation and pre-production testing, not yet a
+general-availability release. Built for CloudStack 4.22.1.0 and 4.23.0.0 (KVM); lab-validated on
+CloudStack 4.23.0.0 with Lightbits 3.22.1. Upgrading from 0.1.0-rc.1: install the same jar on the
+management server and every KVM host; no other step. With `inbandAuthTwoWay=true` on a pool with
+running VMs, follow the host order in INSTALL.md ("In-band authentication").
+
+### Fixed
+- With `ipAcl=true`, the management log line with a host's data IPs is written whenever they
+  change, not only when they are first recorded.
+- Two-way in-band authentication: a volume can be detached from a running VM on a host whose
+  paths are not yet all two-way. The check that refuses such a host now applies to a lookup only
+  when no VM on the host holds the volume's device open (a detach and the volume statistics look
+  the volume up too); attach, VM start and migration onto the host still check every path.
+
+### Changed
+- README and INSTALL.md: a quick start for a first trial; the security options presented as
+  optional, with what each adds and costs.
 - In-band authentication keys found readable by other users than root are still made root-only
   and kept (so the host keeps working), but are now flagged as possibly copied: the agent
   reports it, the management log warns, and the readiness line lists the host until its keys
@@ -29,12 +85,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   machine added back to CloudStack is dropped.
 
 ### Known limitations
-- Per-cluster keys: a pool a host connected before its cluster's subsystem NQN could be read
-  keeps the host-wide key on that host and moves to the cluster's key at a later connect. If
-  that move fails during a key rotation of another pool of the same cluster and project (the
-  agent does not take the pool again), the pool keeps the old key until the host's next
-  connect, and a path of it that reconnects meanwhile is refused; reconnect the host. This needs
-  an agent failure during a rotation, so it is documented rather than handled in code.
 - Two-way: a migration onto a host whose paths do not hold its current controller key is
   refused, and CloudStack stops a VM that maintenance cannot migrate. Turning two-way on for a
   pool with running VMs therefore needs the host order in INSTALL.md: one host emptied before

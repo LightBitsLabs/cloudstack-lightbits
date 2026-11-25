@@ -370,15 +370,16 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     + " the IP ACLs of its volumes", hostId, poolId, ips);
         }
         String value = String.join(",", ips);
+        String before = current == null ? null : current.getValue();
         if (current == null) {
             hostDetailsDao.persist(new DetailVO(hostId, key, value));
-        } else if (!value.equals(current.getValue())) {
+        } else if (!value.equals(before)) {
             current.setValue(value);
             hostDetailsDao.update(current.getId(), current);
         }
-        if (current == null || !value.equals(current.getValue())) {
+        if (!value.equals(before)) {
             LOG.info("Lightbits: host {} data IPs for pool {}: {} (were {})", hostId, poolId, value,
-                    current == null ? "unknown" : current.getValue());
+                    before == null ? "unknown" : before);
         }
         try {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =

@@ -1,6 +1,6 @@
 # Installing the Lightbits CloudStack plugin
 
-> **Status: release candidate (`0.1.0-rc.1`).** Feature-complete for 0.1.0 and validated in the
+> **Status: release candidate (`0.1.0-rc.2`).** Feature-complete for 0.1.0 and validated in the
 > lab; for evaluation and pre-production testing, not yet a general-availability release.
 > These steps reflect the current standalone (out-of-tree) install model. Built and unit-tested
 > for CloudStack 4.22.1.0 and 4.23.0.0 (KVM); lab-validated on CloudStack 4.23.0.0 with
@@ -10,10 +10,31 @@ The plugin is a single jar dropped onto an existing CloudStack deployment — no
 source changes. The **same jar** goes on the management server and every KVM host, because it
 contains both the management-side storage provider and the agent-side `StorageAdaptor`.
 
+## Quick start: a first trial
+
+To try the plugin, you need only the core steps below; everything in
+[5. Optional security features](#5-optional-security-features) is off by default and can be
+added later, when and if you need it. One exception: on a cluster installed in explicit-allow
+mode, a volume created without an IP ACL gets `ALLOW_NONE` and no host can connect to it, so
+add `&ipAcl=true` to the pool URL there (see [Volume IP ACL](#volume-ip-acl)).
+
+1. Check the [prerequisites](#prerequisites) (CloudStack with KVM hosts, a Lightbits cluster
+   reachable from them, `nvme-cli` on the hosts) and
+   [create a project-scoped token](#creating-a-project-scoped-jwt).
+2. [Install the jar](#1-install-the-jar) on the management server and every KVM host.
+3. [Add a primary storage pool](#3-add-the-primary-storage-pool). The minimum URL is
+   `lightbits://<api-host>/<project>?environment=<name>&fingerprint=<SHA-256 fingerprint>`
+   (the default is 3 replicas: on a cluster with fewer nodes add `&replicas=1`, or
+   `&replicas=2` on two nodes); see
+   [TLS](#tls-verifying-the-cluster-certificate) for the fingerprint.
+4. [Create an offering](#4-use-it) with storage tag `lightbits` and deploy a VM with it.
+   Snapshots, revert, volume from snapshot, grow and live migration then work as on any
+   CloudStack primary storage.
+
 ## Prerequisites
 
-- Apache CloudStack **4.22.x** (KVM), management server + KVM hosts already deployed
-- A LightOS cluster reachable from:
+- Apache CloudStack **4.22.x or 4.23.x** (KVM), management server + KVM hosts already deployed
+- A Lightbits cluster reachable from:
   - the **management server** on the API port (`443`)
   - every **KVM host** on NVMe/TCP (`4420`) and discovery (`8009`)
 - On each KVM host: `nvme-cli` and the `nvme-tcp` kernel module
@@ -264,9 +285,27 @@ limit. To apply the new policy at once, use one of these:
 Check the policy the cluster applies with `lbcli get volume` (`qosPolicyName`) or in the
 management server log ("QoS policy changed from ... to ...").
 
+## 5. Optional security features
+
+None of these is needed to run the plugin or to try it (except `ipAcl=true` on a cluster
+installed in explicit-allow mode, see below). On their own, Lightbits volumes accept only the
+NQNs of the hosts CloudStack attaches them to (the host NQN ACL the plugin always manages).
+An NQN is an identifier, not a credential: a machine on the storage network that copies an
+allowed NQN is let in, which the IP ACL and in-band authentication below address. The API
+connection is always TLS-verified. The options below add further
+layers. Each one has a value and an operational cost, so turn on the ones that fit your
+environment and security needs.
+
+| Option (pool) | What it adds | What it costs to run | Consider it when |
+|---|---|---|---|
+| `ipAcl=true` ([Volume IP ACL](#volume-ip-acl)) | A volume accepts connections only from the data IPs of the hosts it is attached to, so a machine that copies a host's NQN from elsewhere on the network is still refused | Current agents on every host; a host whose data IP changes must be reconnected; hosts with several data NICs have all their addresses listed | The storage network is shared with machines outside CloudStack, or the cluster was installed in explicit-allow mode (there it is required) |
+| `inbandAuth=true` ([In-band authentication](#in-band-authentication)) | Each host proves itself to the cluster with its own secret key (DH-HMAC-CHAP), so knowing a host's NQN and IP is not enough to connect | A coordinated rollout: every host and client of the cluster must hold its key before the cluster admin turns enforcement on (cluster-wide); key handling and rotation | Policy requires authenticated storage access, or untrusted machines can reach the storage network |
+| `inbandAuthTwoWay=true` (with `inbandAuth`) | Each host also verifies the cluster when the cluster authenticates the connection, which it does once enforcement is on: a cluster that cannot prove the controller key is refused | A second key per host; same rollout as `inbandAuth`; enforcement on the cluster; an isolated storage network still needed (see [What two-way checks](#what-two-way-checks)) | Policy requires mutual authentication |
+| `inbandKeyGeneration` ([Rotating the keys](#rotating-the-keys)) | Replaces the in-band keys of every host from CloudStack | A maintenance cycle per host | Policy requires periodic key rotation |
+
 ### Volume IP ACL
 
-**Pool option `ipAcl=true`, off by default.** A Lightbits volume has two access lists: the
+**Pool option `ipAcl=true`, optional, off by default.** A Lightbits volume has two access lists: the
 host NQNs allowed to connect (the plugin always manages this one) and the IP addresses they
 may connect from (`IPAcl`, `ALLOW_ANY` by default). The cluster lets a host see a volume
 only when both allow it. With `ipAcl=true` the plugin also manages the IP list:
@@ -304,9 +343,10 @@ without asking the plugin: anything but `true` or `false` makes the pool's volum
 fail, naming the option, until it is corrected. Each reconnect records the
 host's data IP and sets the IP ACL of the volumes it has. Upgrade the agent on every host
 first: an older agent reports no data IP, and its host is refused access to the pool's
-volumes with an error naming the host. Check a host with
-`cmk list resourcedetails resourcetype=Host resourceid=<host-id> key=lightbits.dataips.<pool id>`
-and a volume with `lbcli get volume` (`IPAcl`).
+volumes with an error naming the host. The management server logs a host's addresses when it
+first records them and whenever they change ("Lightbits: host <id> data IPs for pool <pool
+id>: ... (were ...)"); a reconnect with unchanged addresses logs nothing. After a reconnect,
+check a volume with `lbcli get volume` (`IPAcl`).
 
 To turn it off, first have the cluster admin set `lbcli update volume --ip-acl ALLOW_ANY` on
 the pool's volumes, then remove the detail: with the option off the plugin no longer changes
@@ -314,7 +354,7 @@ IP ACLs, and a volume left with one host's address refuses every other host.
 
 ### In-band authentication
 
-**Pool option `inbandAuth=true`, off by default.** With NVMe in-band authentication
+**Pool option `inbandAuth=true`, optional, off by default.** With NVMe in-band authentication
 (DH-HMAC-CHAP) turned on, the cluster lets a host open an I/O path only when the host proves
 it holds the key registered for it as a trusted host. With `inbandAuth=true` the plugin does
 the host side:
@@ -350,20 +390,28 @@ the host side:
   storage statistics poll and at host connects until the cluster confirms it; the management
   log says so each time. If the same machine is added back to CloudStack first, its pending
   revocation is dropped. Until a pending revocation completes, the removed machine keeps its
-  access, so restore the API connectivity (or remove its NQN and trusted host by hand with
-  `lbcli`) when the log reports one.
+  access, so restore the API connectivity (or remove its NQN and trusted host by hand, see
+  "Removing a host" below) when the log reports one.
 - The discovery service (port 8009) does not authenticate, so discovery is unchanged.
 - **Two-way (pool option `inbandAuthTwoWay=true`, with `inbandAuth=true`, off by default).**
   The host also checks the cluster. Each host makes a second key, the controller key
   (`/etc/nvme/lightbits/dhchap-ctrl-key`, same rules as the host key), and the management
   server registers it as the trusted host's target secret (`targetSecretType=Enabled`). The
-  agent then connects the pool with its own configuration file
-  (`/etc/nvme/lightbits/auth-<pool uuid>.json`), written just before each connect from the
-  discovery log page of the endpoint it uses: nvme-cli takes a controller key only per port.
-  A path made that way refuses a cluster that cannot prove the key. Without the option the
-  authentication is one-way: the cluster checks the host, the host does not check the
+  agent then connects the pool without `nvme connect-all`: it reads the discovery log page of
+  the endpoint it uses once, and makes one path to each data port listed there with both keys
+  (written to the kernel through `/dev/nvme-fabrics`, never on a command line or in a file).
+  Every path it makes holds the controller key; a port added to the discovery log page later
+  gets a path at the next connect. A per-pool configuration file an earlier version wrote
+  (`/etc/nvme/lightbits/auth-<pool uuid>.json`) is deleted at the pool's next connect.
+  A path made that way refuses a cluster that cannot prove the key (see "What two-way checks"
+  below). Without the option the authentication is one-way: the cluster checks the host, the host does not check the
   cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way
-  pool keeps a target secret a two-way pool set. Readiness for a two-way pool also needs the
+  pool keeps a target secret a two-way pool set. Make every pool of a cluster two-way, or
+  none: a one-way pool connects with `nvme connect-all` and the host key only, and its paths
+  to the cluster's subsystem also carry the two-way pool's volumes. Such a path stays until
+  it is disconnected by hand (`nvme disconnect -d <controller>`, as the refusal message says);
+  until then new handoffs of the two-way pool's volumes on that host are refused and the
+  readiness line lists the host. Readiness for a two-way pool also needs the
   current controller key registered and on every path; move hosts onto new paths as in step
   4 after turning the option on. **Until a host is moved, new attaches, VM starts and
   migrations onto it fail for this pool's volumes:** the agent refuses to hand a volume to a VM
@@ -383,6 +431,21 @@ the host side:
      (`cmk migrate virtualmachine virtualmachineid=<vm-id> hostid=<moved-host-id>`), since
      CloudStack may otherwise pick a host that is not moved yet, then put it in maintenance,
      wait as in 1, disconnect it from the subsystem, cancel maintenance and reconnect it.
+
+#### What two-way checks
+
+The host checks the cluster during the authentication the cluster asks for when a path
+connects. The cluster asks for it only once the cluster admin has turned in-band
+authentication enforcement on, so:
+
+- **Before enforcement is on, two-way checks nothing.** The keys are registered and the paths
+  hold the controller key, but no connection is authenticated in either direction.
+- **With enforcement on**, every connect to the cluster is authenticated both ways, and a path
+  to a target that answers with a wrong controller key is refused.
+- **Like any Linux NVMe/TCP host, the host accepts a target that does not ask for
+  authentication at all.** Two-way therefore does not replace a protected storage network:
+  keep the NVMe/TCP network isolated to the KVM hosts and the cluster (a dedicated VLAN or
+  fabric), so no other machine can answer at the cluster's addresses.
 
   The moved hosts need room for the VMs of the next host, as for any maintenance.
 
@@ -531,6 +594,35 @@ A host NQN can be a trusted host in only one project of a cluster. If the host i
 trusted host of another project, the pool cannot change it and logs that the host is
 registered elsewhere; the host still connects, because every pool on the host uses the same
 key, as long as that registration holds it.
+
+### Removing a host
+
+Removing a host from CloudStack revokes its access on the cluster: its NQN leaves the ACL of
+every volume of the pool, its address leaves every volume IP ACL, and the trusted host the
+plugin made for it is deleted. When the cluster cannot take that at once, the revocation is
+kept as pending and retried (see "In-band authentication" above).
+
+If the management server cannot save a pending revocation in its database either, it logs an
+ERROR (`could not save the pending revocation of removed host ...`), keeps the revocation in
+memory and in `/var/lib/cloudstack/lightbits/pending-revocations` on that management server
+(root only), and keeps retrying. A restart of the same management server picks the file up
+again. If that management server is lost (or the file could not be written, which the same
+ERROR says) before the revocation completes, nothing retries it. In that case:
+
+1. Keep the removed machine fenced: powered off, or cut from the storage network, until step 3
+   is done. Do not reinstall it and add it back first.
+2. Find the volumes of the pool's project whose `acl` lists its NQN (the NQN is in the ERROR
+   line) or, with the IP ACL option, whose `IPAcl` lists one of its data IP addresses (its NQN
+   may already be gone from a volume whose IP ACL still has its address):
+   `lbcli list volumes --project-name=<project> -o json`.
+3. For each such volume, set the ACL again without that NQN (and the IP ACL without its
+   address); `--acl` and `--ip-acl` replace the whole list, so give the remaining entries:
+   `lbcli update volume --project-name=<project> --uuid=<volume uuid> --acl <remaining NQNs>`.
+   With in-band authentication, delete its trusted host:
+   `lbcli delete trusted-host --project-name=<project> --name=cs-<environment>-host-<host uuid>`.
+
+A host that disconnects its paths cleanly loses nothing by this; the procedure is for a host
+that may still hold paths or keys while it should not.
 
 ## TLS: verifying the cluster certificate
 
