@@ -402,9 +402,10 @@ the host side:
   cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way
   pool keeps a target secret a two-way pool set. Make every pool of a cluster two-way, or
   none: a one-way pool connects with `nvme connect-all` and the host key only, and its paths
-  to the cluster's subsystem also carry the two-way pool's volumes. The two-way pool drops
-  such a path at its next connect; until then new handoffs of its volumes on that host are
-  refused and the readiness line lists the host. Readiness for a two-way pool also needs the
+  to the cluster's subsystem also carry the two-way pool's volumes. Such a path stays until
+  it is disconnected by hand (`nvme disconnect -d <controller>`, as the refusal message says);
+  until then new handoffs of the two-way pool's volumes on that host are refused and the
+  readiness line lists the host. Readiness for a two-way pool also needs the
   current controller key registered and on every path; move hosts onto new paths as in step
   4 after turning the option on. **Until a host is moved, new attaches, VM starts and
   migrations onto it fail for this pool's volumes:** the agent refuses to hand a volume to a VM

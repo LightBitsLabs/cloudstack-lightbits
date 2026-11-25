@@ -57,18 +57,18 @@ class LightbitsNvmeHostTest {
         final Map<String, String> fabricsErrors = new HashMap<>();
         final List<Long> fabricsTimeouts = new ArrayList<>();
         long fabricsDelayMillis;
+        long nanos;
+
+        @Override
+        public long nanoTime() {
+            return nanos;
+        }
 
         @Override
         public void connectFabrics(String options, long timeoutMillis) {
             fabrics.add(options);
             fabricsTimeouts.add(timeoutMillis);
-            if (fabricsDelayMillis > 0) {
-                try {
-                    Thread.sleep(fabricsDelayMillis);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
+            nanos += java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(fabricsDelayMillis);
             for (Map.Entry<String, String> e : fabricsErrors.entrySet()) {
                 if (options.contains("traddr=" + e.getKey() + ",")) {
                     throw new com.cloud.utils.exception.CloudRuntimeException(e.getValue());

@@ -77,6 +77,11 @@ class LightbitsNvmeHost {
         default List<String> listOrNull(String dir) {
             return list(dir);
         }
+        /** Monotonic time in nanoseconds (a test moves it by hand). */
+        default long nanoTime() {
+            return System.nanoTime();
+        }
+
         /**
          * Make one NVMe controller: write {@code options} to /dev/nvme-fabrics, as nvme-cli does.
          * The options carry the keys, so they never reach a command line or a message. Throws
@@ -310,13 +315,13 @@ class LightbitsNvmeHost {
             List<String> portFailures = new ArrayList<>();
             // one time budget for all the endpoint's ports, as connect-all had: unreachable ports
             // do not add up while the caller holds the agent-wide connect lock
-            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(endpointTimeoutMillis);
+            long deadline = sys.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(endpointTimeoutMillis);
             for (Target t : targets) {
                 if (present.contains(t.port())) {
                     connected++;
                     continue;
                 }
-                long remaining = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                long remaining = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(deadline - sys.nanoTime());
                 if (remaining <= 0) {
                     portFailures.add(t + " (not tried: the endpoint's " + endpointTimeoutMillis + " ms ran out)");
                     continue;
