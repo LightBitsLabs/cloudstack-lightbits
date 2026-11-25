@@ -61,7 +61,7 @@ class LightbitsNvmeHost {
     private static final String SUBSYSTEMS = "/sys/class/nvme-subsystem";
     private static final AtomicInteger ROTATION = new AtomicInteger();
     /** Two-way: paths rejected for lacking the controller key that could not be disconnected (agent-wide). */
-    private static final java.util.Set<String> REJECTED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final java.util.Map<String, String> REJECTED = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** The host, as far as this class needs it. Replaced by a fake in unit tests. */
     interface Sys {
@@ -456,6 +456,80 @@ class LightbitsNvmeHost {
         return n;
     }
 
+    /**
+     * Two-way: before a namespace is handed to a VM, every path of its subsystem on this host must
+     * hold the current controller key, and none may be one a connect rejected but could not
+     * disconnect. Otherwise I/O could go over a path on which the host does not check the cluster;
+     * the handoff is refused with what to do. Paths the host cannot read make it refuse too.
+     */
+    void requireTwoWayPaths(String kernelName, String currentCtrlKey) {
+        String subsystem = sys.read("/sys/block/" + kernelName + "/device/subsysnqn");
+        if (subsystem == null) {
+            throw new CloudRuntimeException("Lightbits: could not read the subsystem of " + kernelName
+                    + " to check its two-way authentication paths");
+        }
+        List<String> controllers = sys.listOrNull("/sys/class/nvme");
+        if (controllers == null) {
+            throw new CloudRuntimeException("Lightbits: could not list /sys/class/nvme to check this host's two-way paths");
+        }
+        List<String> unsafe = new ArrayList<>();
+        for (String ctrl : controllers) {
+            String nqn = sys.read("/sys/class/nvme/" + ctrl + "/subsysnqn");
+            if (nqn == null) {
+                throw new CloudRuntimeException("Lightbits: could not read the subsystem NQN of " + ctrl
+                        + " to check this host's two-way paths");
+            }
+            if (!subsystem.trim().equals(nqn.trim())) {
+                continue;
+            }
+            String secret = sys.read("/sys/class/nvme/" + ctrl + "/dhchap_ctrl_secret");
+            if (secret == null || !secret.trim().equals(currentCtrlKey) || rejected(ctrl)) {
+                String address = sys.read("/sys/class/nvme/" + ctrl + "/address");
+                unsafe.add(ctrl + (address == null ? "" : " (" + address + ")"));
+            }
+        }
+        if (!unsafe.isEmpty()) {
+            throw new CloudRuntimeException("Lightbits: the pool uses two-way in-band authentication, but path(s) " + unsafe
+                    + " of subsystem " + subsystem.trim() + " on this host do not hold its current controller key, so the host"
+                    + " would not check the cluster on them; the volume is not handed over. Move the host onto two-way paths"
+                    + " in the host order of INSTALL.md (\"In-band authentication\"): migrate its VMs to hosts already moved"
+                    + " (CloudStack stops a VM that maintenance cannot migrate), put it in maintenance, disconnect its Lightbits"
+                    + " paths (nvme disconnect -n " + subsystem.trim() + "), cancel maintenance and reconnect the host."
+                    + " Running VMs are not affected.");
+        }
+    }
+
+    /**
+     * A rejected controller is recorded with its controller ID: Linux reuses a controller name
+     * once the controller is gone, and a new controller under that name (a path made later with
+     * the right keys) is not the rejected one. An unreadable ID counts as the same controller.
+     */
+    private String controllerId(String ctrl) {
+        String id = sys.read("/sys/class/nvme/" + ctrl + "/cntlid");
+        return id == null ? "" : id.trim();
+    }
+
+    private boolean rejected(String ctrl) {
+        String recorded = REJECTED.get(ctrl);
+        if (recorded == null) {
+            return false;
+        }
+        String now = controllerId(ctrl);
+        return recorded.isEmpty() || now.isEmpty() || recorded.equals(now);
+    }
+
+    private void reject(String ctrl) {
+        REJECTED.put(ctrl, controllerId(ctrl));
+    }
+
+    /** Forget rejected controllers that are gone, before a connect can reuse their names. */
+    void forgetVanishedRejections() {
+        List<String> listed = sys.listOrNull("/sys/class/nvme");
+        if (listed != null) {
+            REJECTED.keySet().retainAll(new java.util.HashSet<>(listed));
+        }
+    }
+
     /** The controller names of this host's Lightbits paths, any state. */
     java.util.Set<String> pathNames() {
         java.util.Set<String> out = new java.util.HashSet<>();
@@ -479,17 +553,17 @@ class LightbitsNvmeHost {
         if (listed == null) {
             throw new CloudRuntimeException("Lightbits: could not list /sys/class/nvme to check this host's two-way paths");
         }
-        REJECTED.retainAll(new java.util.HashSet<>(listed));
+        REJECTED.keySet().retainAll(new java.util.HashSet<>(listed));
         for (Path p : paths()) {
             // a path an earlier connect rejected but could not disconnect stays rejected
-            if (before.contains(p.controller) && !REJECTED.contains(p.controller)) {
+            if (before.contains(p.controller) && !rejected(p.controller)) {
                 continue;
             }
             String secret = sys.read("/sys/class/nvme/" + p.controller + "/dhchap_ctrl_secret");
             if (secret == null || !secret.trim().equals(currentCtrlKey)) {
                 Result r = sys.run(30_000, "nvme", "disconnect", "-d", p.controller);
                 if (!r.ok() || sys.exists("/sys/class/nvme/" + p.controller)) {
-                    REJECTED.add(p.controller);
+                    reject(p.controller);
                     throw new CloudRuntimeException("Lightbits: path " + p.controller + " (" + p.address + ") was made without this"
                             + " host's controller key (two-way) and could not be disconnected (exit " + r.exit + ": " + r.output
                             + "); disconnect it by hand (nvme disconnect -d " + p.controller + ")");

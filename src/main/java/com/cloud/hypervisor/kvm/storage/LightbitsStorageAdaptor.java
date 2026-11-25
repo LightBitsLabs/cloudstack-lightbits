@@ -184,6 +184,9 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         // Throws with a diagnosis (paths, ACL hint) rather than returning false: the caller
         // would turn false into a generic "failed to connect disks".
         String device = nvme.waitForDevice(uuid, DEFAULT_WAIT_SECS, nvme.hostNqn());
+        if (twoWay(pool)) {
+            requireTwoWayPaths(nvme.verifyIdentity(uuid));
+        }
         LOG.info("Lightbits volume {} verified at {}", uuid, device);
         nvme.warnOnDegradedPaths(endpoints.size());
         return true;
@@ -277,8 +280,10 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
      */
     private boolean connectPool(KVMStoragePool pool, List<String> endpoints, long timeoutMillis,
                                 java.util.function.Function<String, java.nio.file.Path> configFor) {
-        boolean twoWay = pool.getDetails() != null && "true".equals(pool.getDetails().get(DETAIL_INBAND_AUTH))
-                && "true".equals(pool.getDetails().get(DETAIL_INBAND_TWO_WAY));
+        boolean twoWay = twoWay(pool);
+        if (twoWay) {
+            nvme.forgetVanishedRejections();   // before connect-all can reuse a rejected controller's name
+        }
         java.util.Set<String> before = twoWay ? nvme.pathNames() : null;
         boolean answered;
         try {
@@ -298,6 +303,12 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
             nvme.dropNewPathsWithoutCtrlKey(before, hostKey.ensureCtrlKey());
         }
         return answered;
+    }
+
+    /** The pool uses two-way in-band authentication (both details from the management server). */
+    static boolean twoWay(KVMStoragePool pool) {
+        Map<String, String> d = pool == null ? null : pool.getDetails();
+        return d != null && "true".equals(d.get(DETAIL_INBAND_AUTH)) && "true".equals(d.get(DETAIL_INBAND_TWO_WAY));
     }
 
     /**
@@ -388,11 +399,27 @@ public class LightbitsStorageAdaptor implements StorageAdaptor {
         }
         // never hand out a path whose namespace was not matched against the volume
         String kernelName = nvme.verifyIdentity(uuid);
+        if (twoWay(pool)) {
+            requireTwoWayPaths(kernelName);
+        }
         KVMPhysicalDisk disk = new KVMPhysicalDisk(LightbitsNvmeHost.BY_ID_PREFIX + uuid, volumePath, pool);
         disk.setFormat(PhysicalDiskFormat.RAW);
         disk.setSize(nvme.sizeBytes(kernelName));
         disk.setVirtualSize(disk.getSize());
         return disk;
+    }
+
+    /**
+     * The two-way check before a handoff, under the connect lock: a connect holds it until it has
+     * dropped the paths it made without the controller key, so the check never sees a connect
+     * half done. A later connect that cannot drop such a path fails and marks it rejected, which
+     * the next check refuses.
+     */
+    private void requireTwoWayPaths(String kernelName) {
+        String ctrlKey = hostKey.ensureCtrlKey();
+        synchronized (CONNECT_LOCK) {
+            nvme.requireTwoWayPaths(kernelName, ctrlKey);
+        }
     }
 
     @Override

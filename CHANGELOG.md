@@ -5,7 +5,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- With `ipAcl=true`, the management log line with a host's data IPs is written whenever they
+  change, not only when they are first recorded.
+
 ### Changed
+- README and INSTALL.md: a quick start for a first trial; the security options presented as
+  optional, with what each adds and costs.
+- In-band authentication keys found readable by other users than root are still made root-only
+  and kept (so the host keeps working), but are now flagged as possibly copied: the agent
+  reports it, the management log warns, and the readiness line lists the host until its keys
+  are rotated.
+- Two-way in-band authentication: the agent hands a volume to a VM (attach, VM start, migration
+  onto the host) only when every path of the volume's subsystem holds the host's current
+  controller key and none is a path it rejected but could not disconnect; otherwise it
+  refuses with how to move the host onto two-way paths. Running VMs are not affected.
 - Removing a host no longer forgets a revocation the cluster could not take: each pool records
   it as pending before it removes the host from the volume ACLs and deletes its trusted host,
   and clears it only when the cluster confirms both. Pending revocations are retried at the
@@ -13,6 +27,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   machine added back to CloudStack is dropped.
 
 ### Known limitations
+- Two-way: a migration onto a host whose paths do not hold its current controller key is
+  refused, and CloudStack stops a VM that maintenance cannot migrate. Turning two-way on for a
+  pool with running VMs therefore needs the host order in INSTALL.md: one host emptied before
+  the option is turned on, and VMs migrated by hand onto moved hosts before each further
+  maintenance.
 - A pending revocation that the database cannot save while the host is being removed (CloudStack
   removes the host whatever the plugin returns) is kept in memory, saved again on each retry and
   logged as an error; a management server restart before it is saved or confirmed loses it.

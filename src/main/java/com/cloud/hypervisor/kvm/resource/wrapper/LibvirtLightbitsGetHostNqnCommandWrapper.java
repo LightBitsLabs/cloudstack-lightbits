@@ -113,6 +113,11 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
             keyless = null;
         }
         answer.withInbandAuth(key, keyless, null);
+        try {
+            answer.withKeysPossiblyExposed(hostKey().keysPossiblyExposed());
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not check whether this host's in-band authentication keys need rotating: {}", e.getMessage());
+        }
     }
 
     /**
