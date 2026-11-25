@@ -315,15 +315,16 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     + " the IP ACLs of its volumes", hostId, poolId, ips);
         }
         String value = String.join(",", ips);
+        String before = current == null ? null : current.getValue();
         if (current == null) {
             hostDetailsDao.persist(new DetailVO(hostId, key, value));
-        } else if (!value.equals(current.getValue())) {
+        } else if (!value.equals(before)) {
             current.setValue(value);
             hostDetailsDao.update(current.getId(), current);
         }
-        if (current == null || !value.equals(current.getValue())) {
+        if (!value.equals(before)) {
             LOG.info("Lightbits: host {} data IPs for pool {}: {} (were {})", hostId, poolId, value,
-                    current == null ? "unknown" : current.getValue());
+                    before == null ? "unknown" : before);
         }
         try {
             org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg =
@@ -367,6 +368,16 @@ public class LightbitsHostListener implements HypervisorHostListener {
         }
         setHostDetail(hostId, LightbitsTrustedHosts.KEYLESS_DETAIL,
                 answer.getKeylessPaths() == null ? null : String.valueOf(answer.getKeylessPaths()));
+        // only a report changes the stored state: a host whose check failed keeps its warning
+        if (answer.getKeysPossiblyExposed() != null) {
+            setHostDetail(hostId, LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, answer.isKeysPossiblyExposed() ? "true" : null);
+        }
+        if (answer.isKeysPossiblyExposed()) {
+            LOG.warn("Lightbits: host {} reports that its in-band authentication key files were readable by other users"
+                    + " than root before they were made root-only again; the keys may have been copied. Rotate them: raise"
+                    + " the pool detail {} and cycle the host (INSTALL.md, \"Rotating the keys\")", hostId,
+                    LightbitsPoolConfig.KEY_INBAND_KEY_GENERATION);
+        }
         String fp = LightbitsTrustedHosts.fingerprint(key);
         // host-wide: a pool whose registration holds another fingerprint no longer counts this host as ready
         setHostDetail(hostId, LightbitsTrustedHosts.CURRENT_KEY_DETAIL, fp);
@@ -489,6 +500,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
         java.util.List<String> keyless = new java.util.ArrayList<>();
         java.util.List<String> optional = new java.util.ArrayList<>();
         java.util.List<String> pendingRotation = new java.util.ArrayList<>();
+        java.util.List<String> exposed = new java.util.ArrayList<>();
         java.util.List<StoragePoolHostVO> refs = storagePoolHostDao.listByPoolId(poolId);
         org.apache.cloudstack.storage.datastore.util.LightbitsPoolConfig cfg = poolConfigOrNull(poolId);
         if (cfg == null) {
@@ -517,6 +529,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     optional.add("unknown".equals(opt.getValue()) ? label + " (authRequired not reported)" : label);
                 }
             }
+            if ("true".equals(value(id, LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL))) {
+                exposed.add(label);
+            }
             String gen = value(id, LightbitsTrustedHosts.generationDetailKey(poolId));
             if (gen != null && generation(gen) < cfg.getInbandKeyGeneration()) {
                 pendingRotation.add(label);
@@ -535,7 +550,9 @@ public class LightbitsHostListener implements HypervisorHostListener {
         String optionalNote = (optional.isEmpty() ? "" : " Trusted hosts with authRequired=false (they may still connect"
                 + " without a key; the cluster admin sets this): " + optional + ".")
                 + (pendingRotation.isEmpty() ? "" : " Hosts still on keys older than key generation "
-                + cfg.getInbandKeyGeneration() + " (each rotates at a reconnect right after a maintenance cycle: cmk reconnect host): " + pendingRotation + ".");
+                + cfg.getInbandKeyGeneration() + " (each rotates at a reconnect right after a maintenance cycle: cmk reconnect host): " + pendingRotation + ".")
+                + (exposed.isEmpty() ? "" : " Hosts whose keys may have been copied (their key files were readable by other"
+                + " users) and should be rotated: " + exposed + ".");
         if (unregistered.isEmpty() && keyless.isEmpty()) {
             LOG.info("Lightbits: the {} host(s) of pool {} are ready for in-band authentication: all are trusted hosts and"
                     + " connect with their keys{}.{} Enforcement is cluster-wide: the cluster admin turns it on (lbcli enable"

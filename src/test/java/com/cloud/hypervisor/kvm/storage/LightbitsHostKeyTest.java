@@ -92,7 +92,7 @@ class LightbitsHostKeyTest {
     }
 
     @Test
-    void reusedFilesWithAWiderModeAreMadeRootOnlyAndKept() throws IOException {
+    void reusedFilesWithAWiderModeAreMadeRootOnlyKeptAndFlaggedForRotation() throws IOException {
         Path dir = Files.createDirectories(nvme.resolve("lightbits"));
         Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxr-xr-x"));
         Files.writeString(key.keyFile(), KNOWN + "\n");
@@ -105,6 +105,34 @@ class LightbitsHostKeyTest {
         assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.keyFile())));
         assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.configFile())));
         assertEquals(LightbitsHostKey.config(NQN, HOST_ID, KNOWN), Files.readString(key.configFile()));
+        assertTrue(key.keysPossiblyExposed(), "keys that were readable by others are flagged for rotation");
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.rotationMarker())));
+        assertEquals(KNOWN, key.ensure(), "still kept on later calls (a live host keeps working)");
+        assertTrue(key.keysPossiblyExposed(), "and still flagged");
+        key.deleteKeys();
+        assertNotEquals(KNOWN, key.ensure(), "a rotation replaces them");
+        assertFalse(key.keysPossiblyExposed(), "new keys are not flagged");
+    }
+
+    @Test
+    void ownerOnlyModesAreTightenedWithoutAFlag() throws IOException {
+        Path dir = Files.createDirectories(nvme.resolve("lightbits"));
+        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Files.writeString(key.keyFile(), KNOWN + "\n");
+        Files.setPosixFilePermissions(key.keyFile(), PosixFilePermissions.fromString("rwx------"));
+
+        assertEquals(KNOWN, key.ensure());
+        assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(key.keyFile())));
+        assertEquals("rwx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(dir)));
+        assertFalse(key.keysPossiblyExposed(), "a key only root could read, in a traversable directory, is not exposed");
+    }
+
+    @Test
+    void freshKeysAreNotFlagged() {
+        key.ensure();
+        key.ensureCtrlKey();
+        key.ensure();
+        assertFalse(key.keysPossiblyExposed());
     }
 
     @Test
