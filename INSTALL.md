@@ -391,9 +391,12 @@ the host side:
   The host also checks the cluster. Each host makes a second key, the controller key
   (`/etc/nvme/lightbits/dhchap-ctrl-key`, same rules as the host key), and the management
   server registers it as the trusted host's target secret (`targetSecretType=Enabled`). The
-  agent then connects the pool with its own configuration file
-  (`/etc/nvme/lightbits/auth-<pool uuid>.json`), written just before each connect from the
-  discovery log page of the endpoint it uses: nvme-cli takes a controller key only per port.
+  agent then connects the pool without `nvme connect-all`: it reads the discovery log page of
+  the endpoint it uses once, and makes one path to each data port listed there with both keys
+  (written to the kernel through `/dev/nvme-fabrics`, never on a command line or in a file).
+  Every path it makes holds the controller key; a port added to the discovery log page later
+  gets a path at the next connect. A per-pool configuration file an earlier version wrote
+  (`/etc/nvme/lightbits/auth-<pool uuid>.json`) is deleted at the pool's next connect.
   A path made that way refuses a cluster that cannot prove the key (see "What two-way checks"
   below). Without the option the authentication is one-way: the cluster checks the host, the host does not check the
   cluster. A trusted host is shared by every pool of its project on the cluster, so a one-way

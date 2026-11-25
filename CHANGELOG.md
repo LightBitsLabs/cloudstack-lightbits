@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   file on the management server (`/var/lib/cloudstack/lightbits/pending-revocations`, root only),
   so a restart of that management server no longer loses it. INSTALL.md, "Removing a host",
   gives the manual procedure for the case where that management server is lost.
+- Two-way in-band authentication connects a pool without `nvme connect-all`: the agent reads the
+  discovery log page once and makes one path per listed data port with both keys, written to
+  `/dev/nvme-fabrics`. No path of a two-way pool is made without the controller key, and the
+  per-pool configuration files (`/etc/nvme/lightbits/auth-<pool uuid>.json`) are no longer
+  written; one left by an earlier version is deleted at the pool's next connect.
 
 ### Known limitations
 - Two-way in-band authentication (`inbandAuthTwoWay=true`) checks the cluster only on connections

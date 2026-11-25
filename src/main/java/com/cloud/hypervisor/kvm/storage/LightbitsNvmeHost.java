@@ -77,6 +77,16 @@ class LightbitsNvmeHost {
         default List<String> listOrNull(String dir) {
             return list(dir);
         }
+        /**
+         * Make one NVMe controller: write {@code options} to /dev/nvme-fabrics, as nvme-cli does.
+         * The options carry the keys, so they never reach a command line or a message. Throws
+         * with the kernel's error (for example "Operation already in progress" for a port this
+         * host is connected to already, "Key was rejected by service" for a failed
+         * authentication) or after {@code timeoutMillis}.
+         */
+        default void connectFabrics(String options, long timeoutMillis) {
+            throw new UnsupportedOperationException("connectFabrics");
+        }
         void sleep(long millis);
     }
 
@@ -115,6 +125,33 @@ class LightbitsNvmeHost {
         @Override
         public String toString() {
             return controller + " " + address + " " + state;
+        }
+    }
+
+    /**
+     * One data port a two-way pool connects to directly, and the options written to
+     * /dev/nvme-fabrics for it. The options hold the keys: {@link #toString()} leaves them out.
+     */
+    static final class Target {
+        final String subsysNqn;
+        final String address;
+        final String service;
+        final String options;
+
+        Target(String subsysNqn, String address, String service, String options) {
+            this.subsysNqn = subsysNqn;
+            this.address = address;
+            this.service = service;
+            this.options = options;
+        }
+
+        String port() {
+            return subsysNqn + " " + address + ":" + service;
+        }
+
+        @Override
+        public String toString() {
+            return address + ":" + service;
         }
     }
 
@@ -206,14 +243,7 @@ class LightbitsNvmeHost {
      */
     boolean connectWith(List<String> endpoints, long endpointTimeoutMillis,
                         java.util.function.Function<String, java.nio.file.Path> configFor) {
-        if (endpoints.isEmpty()) {
-            throw new CloudRuntimeException("Lightbits: the storage pool has no NVMe discovery endpoint");
-        }
-        Result mod = sys.run(30_000, "modprobe", "nvme-tcp");
-        if (!mod.ok()) {
-            throw new CloudRuntimeException("Lightbits: 'modprobe nvme-tcp' failed (exit " + mod.exit + "): " + mod.output
-                    + ". The host needs the nvme-tcp kernel module.");
-        }
+        prepareConnect(endpoints);
         List<String> failures = new ArrayList<>();
         int start = Math.floorMod(ROTATION.getAndIncrement(), endpoints.size());
         for (int i = 0; i < endpoints.size(); i++) {
@@ -241,15 +271,108 @@ class LightbitsNvmeHost {
             }
             failures.add(endpoint + " (exit " + r.exit + (r.output.isEmpty() ? "" : ": " + r.output) + ")");
         }
+        return noEndpointAnswered("'nvme connect-all' failed", failures);
+    }
+
+    /**
+     * Two-way: connect exactly the data ports {@code targetsFor} returns for an endpoint (built
+     * from that endpoint's discovery log page, read once), one controller per port written to
+     * /dev/nvme-fabrics with both keys. There is no {@code nvme connect-all}, so no second
+     * discovery read can add a port that lacks the controller key: every path this makes holds
+     * it, and the kernel refuses a cluster that answers with another key. A port that already
+     * has a path is left as it is. An endpoint counts as answered when at least one of its ports
+     * is connected; the ports that failed are logged. Otherwise as {@link #connectWith}.
+     */
+    boolean connectDirect(List<String> endpoints, long endpointTimeoutMillis,
+                          java.util.function.Function<String, List<Target>> targetsFor) {
+        prepareConnect(endpoints);
+        List<String> failures = new ArrayList<>();
+        int start = Math.floorMod(ROTATION.getAndIncrement(), endpoints.size());
+        for (int i = 0; i < endpoints.size(); i++) {
+            String endpoint = endpoints.get((start + i) % endpoints.size());
+            List<Target> targets;
+            try {
+                targets = targetsFor.apply(endpoint);
+            } catch (RuntimeException e) {
+                failures.add(endpoint + " (" + e.getMessage() + ")");
+                continue;
+            }
+            if (targets.isEmpty()) {
+                failures.add(endpoint + " (its discovery log page lists no data port)");
+                continue;
+            }
+            java.util.Set<String> present = new java.util.HashSet<>();
+            for (Path p : paths()) {
+                present.add(p.subsysNqn + " " + addressPart(p.address, "traddr") + ":" + addressPart(p.address, "trsvcid"));
+            }
+            int connected = 0;
+            List<String> portFailures = new ArrayList<>();
+            for (Target t : targets) {
+                if (present.contains(t.port())) {
+                    connected++;
+                    continue;
+                }
+                try {
+                    sys.connectFabrics(t.options, endpointTimeoutMillis);
+                    connected++;
+                } catch (RuntimeException e) {
+                    String why = String.valueOf(e.getMessage());
+                    if (why.contains("already in progress")) {
+                        connected++;   // made meanwhile (the kernel refuses a second path to the same port)
+                    } else {
+                        portFailures.add(t + " (" + why + ")");
+                    }
+                }
+            }
+            if (connected > 0) {
+                if (!portFailures.isEmpty()) {
+                    LOG.warn("Lightbits: connected {} of the {} data port(s) {} advertises; failed: {}", connected, targets.size(),
+                            endpoint, portFailures);
+                }
+                if (!failures.isEmpty()) {
+                    LOG.warn("Lightbits: NVMe discovery succeeded via {} after failing via {}; check those endpoints",
+                            endpoint, failures);
+                }
+                return true;
+            }
+            failures.add(endpoint + " (no data port could be connected: " + portFailures + ")");
+        }
+        return noEndpointAnswered("connecting the advertised data ports failed", failures);
+    }
+
+    /** One field ({@code traddr}, {@code trsvcid}) of a controller's sysfs address, or "" if absent. */
+    static String addressPart(String address, String field) {
+        if (address != null) {
+            for (String kv : address.split(",")) {
+                if (kv.startsWith(field + "=")) {
+                    return kv.substring(field.length() + 1).trim();
+                }
+            }
+        }
+        return "";
+    }
+
+    private void prepareConnect(List<String> endpoints) {
+        if (endpoints.isEmpty()) {
+            throw new CloudRuntimeException("Lightbits: the storage pool has no NVMe discovery endpoint");
+        }
+        Result mod = sys.run(30_000, "modprobe", "nvme-tcp");
+        if (!mod.ok()) {
+            throw new CloudRuntimeException("Lightbits: 'modprobe nvme-tcp' failed (exit " + mod.exit + "): " + mod.output
+                    + ". The host needs the nvme-tcp kernel module.");
+        }
+    }
+
+    private boolean noEndpointAnswered(String what, List<String> failures) {
         List<Path> live = livePaths();
         if (live.isEmpty()) {
-            throw new CloudRuntimeException("Lightbits: could not connect this host to the cluster: 'nvme connect-all' failed"
+            throw new CloudRuntimeException("Lightbits: could not connect this host to the cluster: " + what
                     + " for every discovery endpoint " + failures + " and the host has no live NVMe/TCP path to a"
                     + " Lightbits cluster. Check the data network and that the discovery service (port "
                     + DEFAULT_DISCOVERY_PORT + ") is reachable from this host.");
         }
-        LOG.warn("Lightbits: 'nvme connect-all' failed for every discovery endpoint {}; continuing on the {} live"
-                + " path(s) this host already has", failures, live.size());
+        LOG.warn("Lightbits: {} for every discovery endpoint {}; continuing on the {} live"
+                + " path(s) this host already has", what, failures, live.size());
         return false;
     }
 
@@ -842,6 +965,34 @@ class LightbitsNvmeHost {
                 Thread.sleep(millis);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            }
+        }
+
+        @Override
+        public void connectFabrics(String options, long timeoutMillis) {
+            // the kernel makes the controller inside the write, which can block (a port that does
+            // not answer): it runs on its own thread, and a timeout leaves it to finish there
+            java.util.concurrent.FutureTask<Void> task = new java.util.concurrent.FutureTask<>(() -> {
+                try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(Paths.get("/dev/nvme-fabrics"),
+                        java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE)) {
+                    ch.write(java.nio.ByteBuffer.wrap(options.getBytes(StandardCharsets.US_ASCII)));
+                    ch.read(java.nio.ByteBuffer.allocate(256));   // "instance=N,cntlid=M"
+                }
+                return null;
+            });
+            Thread t = new Thread(task, "lightbits-nvme-connect");
+            t.setDaemon(true);
+            t.start();
+            try {
+                task.get(timeoutMillis, TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException e) {
+                throw new CloudRuntimeException("timed out after " + (timeoutMillis / 1000) + "s");
+            } catch (java.util.concurrent.ExecutionException e) {
+                Throwable c = e.getCause() == null ? e : e.getCause();
+                throw new CloudRuntimeException(c.getMessage() == null ? c.getClass().getSimpleName() : c.getMessage());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CloudRuntimeException("interrupted");
             }
         }
     }
