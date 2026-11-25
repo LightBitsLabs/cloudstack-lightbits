@@ -29,6 +29,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   machine added back to CloudStack is dropped.
 
 ### Known limitations
+- Per-cluster keys: a pool a host connected before its cluster's subsystem NQN could be read
+  keeps the host-wide key on that host and moves to the cluster's key at a later connect. If
+  that move fails during a key rotation of another pool of the same cluster and project (the
+  agent does not take the pool again), the pool keeps the old key until the host's next
+  connect, and a path of it that reconnects meanwhile is refused; reconnect the host. This needs
+  an agent failure during a rotation, so it is documented rather than handled in code.
 - Two-way: a migration onto a host whose paths do not hold its current controller key is
   refused, and CloudStack stops a VM that maintenance cannot migrate. Turning two-way on for a
   pool with running VMs therefore needs the host order in INSTALL.md: one host emptied before

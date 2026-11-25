@@ -269,7 +269,11 @@ public class LightbitsHostListener implements HypervisorHostListener {
                     // shared by every in-band pool of the host, whatever cluster each is on.
                     boolean hostWide = scope != null && report.getKeyScope() == null;
                     if (!hostWide && !adoptable.isEmpty()) {
-                        adoptScope(hostId, adoptable.keySet(), scope, hostNqn, report, rotated);
+                        // a pool the agent could not be given with the scope still uses its host-wide
+                        // keys: it gets no rotated keys and no generation, so it rotates at its next connect
+                        for (Long failed : adoptScope(hostId, adoptable.keySet(), scope, hostNqn, report, rotated)) {
+                            otherGenerations.remove(failed);
+                        }
                     }
                     if (rotated) {
                         registerWithOtherPools(hostId, hostWide ? allGenerations : otherGenerations, hostNqn, report);
@@ -720,14 +724,15 @@ public class LightbitsHostListener implements HypervisorHostListener {
     }
 
     /**
-     * The other in-band pools of the host whose kept scope is this one but which the host still
-     * keys host-wide (recorded so at their last connect), with their key generations.
+     * The other in-band pools of the host whose scope is this one but which the host still keys
+     * host-wide (recorded so at their last connect), with their key generations. A pool whose scope
+     * is not kept yet is read from its cluster now ({@link #keyScope}).
      */
     private java.util.Map<Long, Integer> hostWidePoolsOfScope(long hostId, long poolId, String scope) {
         java.util.Map<Long, Integer> out = new java.util.LinkedHashMap<>();
         for (java.util.Map.Entry<Long, Integer> e : otherPoolGenerations(hostId, poolId, null, true).entrySet()) {
             if (HOST_WIDE.equals(value(hostId, LightbitsTrustedHosts.perPool(HOST_SCOPE_DETAIL, e.getKey())))
-                    && scope.equals(keptScope(e.getKey()))) {
+                    && scope.equals(keyScope(e.getKey()))) {
                 out.put(e.getKey(), e.getValue());
             }
         }
@@ -739,16 +744,18 @@ public class LightbitsHostListener implements HypervisorHostListener {
      * record the scope for the host; without a rotation, register the keys with each pool (with
      * a rotation, the caller registers them with the generations). Their paths still hold the
      * host-wide key, which the scoped one starts as a copy of (or, after a rotation, none: the
-     * rotation needed them idle).
+     * rotation needed them idle). Returns the pools the agent could not be given with the scope.
      */
-    private void adoptScope(long hostId, java.util.Set<Long> pools, String scope, String nqn, LightbitsGetHostNqnAnswer report,
-                            boolean rotated) {
+    private java.util.Set<Long> adoptScope(long hostId, java.util.Set<Long> pools, String scope, String nqn,
+                                           LightbitsGetHostNqnAnswer report, boolean rotated) {
+        java.util.Set<Long> failed = new java.util.HashSet<>();
         for (Long other : pools) {
             StoragePool p = (StoragePool) dataStoreMgr.getDataStore(other, DataStoreRole.Primary);
             Answer a = agentMgr.easySend(hostId, new ModifyStoragePoolCommand(true, p, discoveryDetails(other, scope)));
             if (a == null || !a.getResult()) {
                 LOG.warn("Lightbits: could not give pool {} to host {} with its cluster's key scope ({}); it moves at its next"
                         + " connect", other, hostId, a == null ? "no answer" : a.getDetails());
+                failed.add(other);
                 continue;
             }
             setHostDetail(hostId, LightbitsTrustedHosts.perPool(HOST_SCOPE_DETAIL, other), scope);
@@ -760,6 +767,7 @@ public class LightbitsHostListener implements HypervisorHostListener {
                 }
             }
         }
+        return failed;
     }
 
     /** The pool's key scope as kept, without reading the cluster; null when not known yet. */
