@@ -96,6 +96,8 @@ class LightbitsHostListenerTest {
     private final Map<Long, DetailVO> details = new LinkedHashMap<>();
     private long nextDetailId = 1;
     private final Map<String, String> poolDetails = new HashMap<>();
+    /** Details of other pools, by pool id; a pool not in here shares {@link #poolDetails}. */
+    private final Map<Long, Map<String, String>> otherPoolDetails = new HashMap<>();
     private final List<StoragePoolHostVO> refs = new ArrayList<>();
     private final List<Command> sent = new ArrayList<>();
     private Function<Command, Answer> agent;
@@ -169,21 +171,7 @@ class LightbitsHostListenerTest {
             sent.add((Command) a[1]);
             return agent.apply((Command) a[1]);
         } : null));
-        StoragePool pool = fake(StoragePool.class, m -> {
-            switch (m.getName()) {
-                case "getId": return a -> POOL;
-                case "getUuid": return a -> "387e455e-bb68-498f-9ef3-04c463815e5d";
-                case "getPoolType": return a -> StoragePoolType.IscsiLUN;
-                case "getHostAddress": return a -> "10.0.0.1";
-                case "getPath": return a -> "/default";
-                case "getPort": return a -> 443;
-                default: return null;
-            }
-        });
-        Object store = Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {DataStore.class, StoragePool.class},
-                (proxy, m, a) -> m.getDeclaringClass() == StoragePool.class || m.getName().startsWith("get")
-                        ? safeInvoke(m, pool, a) : null);
-        inject(listener, "dataStoreMgr", fake(DataStoreManager.class, m -> m.getName().equals("getDataStore") ? a -> store : null));
+        inject(listener, "dataStoreMgr", fake(DataStoreManager.class, m -> m.getName().equals("getDataStore") ? a -> storeFor((Long) a[0]) : null));
         inject(listener, "hostDao", fake(HostDao.class, m -> m.getName().equals("findById") ? a -> {
             HostVO h = new HostVO(HOST_UUID);   // the constructor takes the guid; the uuid is set below
             h.setUuid(HOST_UUID);
@@ -217,9 +205,9 @@ class LightbitsHostListenerTest {
         }));
         inject(listener, "storagePoolDetailsDao", fake(StoragePoolDetailsDao.class, m -> {
             switch (m.getName()) {
-                case "listDetailsKeyPairs": return a -> new HashMap<>(poolDetails);
-                case "addDetail": return a -> poolDetails.put((String) a[1], (String) a[2]);
-                case "removeDetail": return a -> poolDetails.remove((String) a[1]);
+                case "listDetailsKeyPairs": return a -> new HashMap<>(detailsOf((Long) a[0]));
+                case "addDetail": return a -> detailsOf((Long) a[0]).put((String) a[1], (String) a[2]);
+                case "removeDetail": return a -> detailsOf((Long) a[0]).remove((String) a[1]);
                 default: return null;
             }
         }));
@@ -252,7 +240,7 @@ class LightbitsHostListenerTest {
                 default: return null;
             }
         }));
-        listener.poolSecrets = id -> LightbitsPoolConfig.fromDetails(new HashMap<>(poolDetails), "jwt");
+        listener.poolSecrets = id -> LightbitsPoolConfig.fromDetails(new HashMap<>(detailsOf(id)), "jwt");
         listener.clients = cfg -> new LightbitsApiClient("http://localhost:" + wm.port(), "jwt", "default",
                 java.net.http.HttpClient.newHttpClient(), 1);
         listener.hostGateLocker = (name, seconds, work) -> {
@@ -266,6 +254,28 @@ class LightbitsHostListenerTest {
             work.run();
             return true;
         };
+    }
+
+    /** The pool's store: POOL keeps its UUID, any other pool id gets its own. */
+    static String poolUuid(long id) {
+        return id == POOL ? "387e455e-bb68-498f-9ef3-04c463815e5d" : String.format("00000000-0000-0000-0000-%012d", id);
+    }
+
+    private Object storeFor(long id) {
+        StoragePool pool = fake(StoragePool.class, m -> {
+            switch (m.getName()) {
+                case "getId": return a -> id;
+                case "getUuid": return a -> poolUuid(id);
+                case "getPoolType": return a -> StoragePoolType.IscsiLUN;
+                case "getHostAddress": return a -> "10.0.0.1";
+                case "getPath": return a -> "/default";
+                case "getPort": return a -> 443;
+                default: return null;
+            }
+        });
+        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {DataStore.class, StoragePool.class},
+                (proxy, m, a) -> m.getDeclaringClass() == StoragePool.class || m.getName().startsWith("get")
+                        ? safeInvoke(m, pool, a) : null);
     }
 
     private static Object safeInvoke(java.lang.reflect.Method m, Object target, Object[] a) throws Exception {
@@ -293,6 +303,10 @@ class LightbitsHostListenerTest {
             }
         }
         return a;
+    }
+
+    private Map<String, String> detailsOf(long poolId) {
+        return otherPoolDetails.getOrDefault(poolId, poolDetails);
     }
 
     private void option(String key, String value) {
@@ -392,8 +406,8 @@ class LightbitsHostListenerTest {
         listener.hostConnect(HOST, POOL);
         String fp = LightbitsTrustedHosts.fingerprint(KEY);
         assertEquals(fp, detail(LightbitsTrustedHosts.detailKey(POOL)));
-        assertEquals(fp, detail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL));
-        assertEquals("0", detail(LightbitsTrustedHosts.KEYLESS_DETAIL));
+        assertEquals(fp, detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, POOL)));
+        assertEquals("0", detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYLESS_DETAIL, POOL)));
         assertEquals("0", detail(LightbitsTrustedHosts.generationDetailKey(POOL)), "a first host starts at generation 0");
         wm.verify(postRequestedFor(urlEqualTo(P + "/trustedHosts")).withRequestBody(matchingJsonPath("$.hostNqn", equalTo(NQN))));
         wm.verify(putRequestedFor(urlEqualTo(P + "/trustedHostSecrets/" + TH_NAME))
@@ -408,14 +422,15 @@ class LightbitsHostListenerTest {
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
                 ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeysPossiblyExposed(true) : new Answer(cmd);
         listener.hostConnect(HOST, POOL);
-        assertEquals("true", detail(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL));
+        assertEquals("true", detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, POOL)));
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN) : new Answer(cmd);
         listener.hostConnect(HOST, POOL);
-        assertEquals("true", detail(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL), "kept while the agent sends no report");
+        String exposed = LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL, POOL);
+        assertEquals("true", detail(exposed), "kept while the agent sends no report");
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
                 ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeysPossiblyExposed(false) : new Answer(cmd);
         listener.hostConnect(HOST, POOL);
-        assertNull(detail(LightbitsTrustedHosts.KEYS_EXPOSED_DETAIL), "cleared once the agent reports the keys are not exposed");
+        assertNull(detail(exposed), "cleared once the agent reports the keys are not exposed");
     }
 
     @Test
@@ -428,20 +443,20 @@ class LightbitsHostListenerTest {
                 .withRequestBody(matchingJsonPath("$.targetSecretType", equalTo("Enabled")))
                 .withRequestBody(matchingJsonPath("$.targetSecret", equalTo(CTRL))));
         assertEquals(LightbitsTrustedHosts.fingerprint(CTRL), detail(LightbitsTrustedHosts.ctrlDetailKey(POOL)));
-        assertEquals(LightbitsTrustedHosts.fingerprint(CTRL), detail(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL));
-        assertEquals("0", detail(LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL));
+        assertEquals(LightbitsTrustedHosts.fingerprint(CTRL), detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_CTRL_KEY_DETAIL, POOL)));
+        assertEquals("0", detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CTRL_KEYLESS_DETAIL, POOL)));
     }
 
     @Test
     void anAgentWithoutAKeyClearsTheRegistrationDetails() throws Exception {
         option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
         putDetail(LightbitsTrustedHosts.detailKey(POOL), "old");
-        putDetail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, "old");
+        putDetail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, POOL), "old");
         agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
                 ? new LightbitsGetHostNqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN, null) : new Answer(cmd);
         listener.hostConnect(HOST, POOL);
         assertNull(detail(LightbitsTrustedHosts.detailKey(POOL)));
-        assertNull(detail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL));
+        assertNull(detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, POOL)));
         wm.verify(0, putRequestedFor(urlEqualTo(P + "/trustedHostSecrets/" + TH_NAME)));
     }
 
@@ -473,7 +488,7 @@ class LightbitsHostListenerTest {
         wm.stubFor(post(urlEqualTo(P + "/trustedHosts")).willReturn(aResponse().withStatus(400).withBody("{\"message\":\"bad\"}")));
         listener.hostConnect(HOST, POOL);
         assertNull(detail(LightbitsTrustedHosts.detailKey(POOL)));
-        assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(LightbitsTrustedHosts.CURRENT_KEY_DETAIL));
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, POOL)));
         // the next connect registers it
         wm.stubFor(post(urlEqualTo(P + "/trustedHosts")).willReturn(aResponse().withStatus(200).withBody("{}")));
         listener.hostConnect(HOST, POOL);
@@ -617,6 +632,23 @@ class LightbitsHostListenerTest {
     }
 
     @Test
+    void theClustersSubsystemNqnScopesTheHostKeysAndIsKept() {
+        String sub = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+        wm.stubFor(get(urlEqualTo("/api/v2/clusterinfo")).willReturn(aResponse().withStatus(200)
+                .withBody("{\"UUID\":\"c1\",\"subsystemNQN\":\"" + sub + "\"}")));
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        listener.hostConnect(HOST, POOL);
+        ModifyStoragePoolCommand modify = (ModifyStoragePoolCommand) sent.get(0);
+        assertEquals(sub, modify.getDetails().get(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE),
+                "the agent gets the scope with the pool");
+        assertEquals(sub, nqnCommands().get(0).getKeyScope(), "and with the key request");
+        assertEquals(sub, poolDetails.get("lightbits.subsystemnqn"), "kept as a pool detail");
+        wm.resetRequests();
+        listener.hostConnect(HOST, POOL);
+        wm.verify(0, getRequestedFor(urlEqualTo("/api/v2/clusterinfo")));
+    }
+
+    @Test
     void aRetryWaitsWhenTheNqnIsBeingRecordedAndAHostRecordsItsNqnUnderTheSameLock() throws Exception {
         poolDetails.put("lightbits.revoke.x", NQN);
         nqnLockBusy = true;
@@ -638,6 +670,34 @@ class LightbitsHostListenerTest {
     }
 
     @Test
+    void theKeyScopeIsReadOnceForTheWholeConnect() {
+        String sub = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+        wm.stubFor(get(urlEqualTo("/api/v2/clusterinfo")).inScenario("ci").whenScenarioStateIs(
+                com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED).willSetStateTo("up")
+                .willReturn(aResponse().withStatus(400).withBody("{}")));
+        wm.stubFor(get(urlEqualTo("/api/v2/clusterinfo")).inScenario("ci").whenScenarioStateIs("up")
+                .willReturn(aResponse().withStatus(200).withBody("{\"UUID\":\"c1\",\"subsystemNQN\":\"" + sub + "\"}")));
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        listener.hostConnect(HOST, POOL);
+        ModifyStoragePoolCommand modify = (ModifyStoragePoolCommand) sent.get(0);
+        assertNull(modify.getDetails().get(com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE));
+        assertNull(nqnCommands().get(0).getKeyScope(), "the key request uses the scope the pool registration got");
+        wm.verify(1, getRequestedFor(urlEqualTo("/api/v2/clusterinfo")));
+    }
+
+    @Test
+    void newKeysAreRegisteredWithTheOtherPoolsOfTheSameKeys() throws Exception {
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        long other = POOL + 1;
+        refs.add(new StoragePoolHostVO(other, HOST, ""));
+        putDetail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other), "fingerprint-of-old-key");
+        listener.hostConnect(HOST, POOL);
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY),
+                detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other)),
+                "the other pool's record follows the host's new key");
+    }
+
+    @Test
     void aHostWhoseNqnLockStaysBusyRecordsNothingForItThisConnect() {
         nqnLockBusy = true;
         listener.hostConnect(HOST, POOL);
@@ -656,5 +716,135 @@ class LightbitsHostListenerTest {
         assertTrue(lockNames.contains(org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.nqnLockName(NQN)));
         assertTrue(poolDetails.entrySet().stream().anyMatch(e -> e.getKey().startsWith(
                 org.apache.cloudstack.storage.datastore.util.LightbitsRevocations.DETAIL_PREFIX) && e.getValue().equals(NQN)), "recorded");
+    }
+
+    @Test
+    void aPoolOfTheSameClusterThisHostKeysHostWideMovesToTheClustersKeys() throws Exception {
+        String sub = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+        poolDetails.put("lightbits.subsystemnqn", sub);
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
+                ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeyScope(((LightbitsGetHostNqnCommand) cmd).getKeyScope())
+                : new Answer(cmd);
+        long other = POOL + 1;
+        refs.add(new StoragePoolHostVO(other, HOST, ""));
+        String otherKey = LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other);
+        // this host connected the other pool before its scope was known: its keys there are host-wide
+        putDetail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other), "host-wide");
+        putDetail(otherKey, "fingerprint-of-old-key");
+        listener.hostConnect(HOST, POOL);
+        assertEquals(sub, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", POOL)), "the scope this connect used is recorded");
+        // the other pool shares the cluster's trusted host: it is given to the agent again with the scope
+        assertTrue(sent.stream().anyMatch(c -> c instanceof ModifyStoragePoolCommand
+                && poolUuid(other).equals(((ModifyStoragePoolCommand) c).getPool().getUuid())
+                && sub.equals(((ModifyStoragePoolCommand) c).getDetails().get(
+                        com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE))),
+                "the other pool is registered on the agent again, with the scope");
+        assertEquals(sub, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other)), "and the host records it");
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY), detail(otherKey), "and its records follow the cluster's key");
+    }
+
+    private static final String SUB = "nqn.2016-01.com.lightbitslabs:uuid:9c17511f-50e4-4620-9d0f-dc139863abcf";
+
+    /** A scoped rotation of POOL with another in-band pool of the host, with its own details, that the host keys host-wide. */
+    private long hostWidePoolOfTheSameCluster(boolean keptScope) throws Exception {
+        poolDetails.put("lightbits.subsystemnqn", SUB);
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        option(LightbitsPoolConfig.KEY_INBAND_KEY_GENERATION, "2");
+        putDetail(LightbitsTrustedHosts.generationDetailKey(POOL), "1");
+        long other = POOL + 1;
+        Map<String, String> od = new HashMap<>(LightbitsPoolConfig.fromUrl("lightbits://10.0.0.1/default?environment=cs1", "jwt")
+                .toDetailsWithoutSecret());
+        od.put(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        od.put(LightbitsPoolConfig.KEY_INBAND_KEY_GENERATION, "5");
+        if (keptScope) {
+            od.put("lightbits.subsystemnqn", SUB);
+        }
+        otherPoolDetails.put(other, od);
+        refs.add(new StoragePoolHostVO(other, HOST, ""));
+        putDetail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other), "host-wide");
+        putDetail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other), "fingerprint-of-old-key");
+        return other;
+    }
+
+    /** modifyOk false: the agent refuses the other pools' registrations (POOL's own succeeds). */
+    private void scopedAgent(boolean modifyOk) {
+        agent = cmd -> cmd instanceof LightbitsGetHostNqnCommand
+                ? nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN).withKeyScope(((LightbitsGetHostNqnCommand) cmd).getKeyScope())
+                : modifyOk || !(cmd instanceof ModifyStoragePoolCommand)
+                        || poolUuid(POOL).equals(((ModifyStoragePoolCommand) cmd).getPool().getUuid())
+                        ? new Answer(cmd) : new Answer(cmd, false, "boom");
+    }
+
+    @Test
+    void aPoolTheAgentDidNotTakeAsksForNoKeysThisConnect() throws Exception {
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        agent = cmd -> cmd instanceof ModifyStoragePoolCommand ? new Answer(cmd, false, "boom") : nqnAnswer((LightbitsGetHostNqnCommand) cmd, NQN);
+        listener.hostConnect(HOST, POOL);
+        assertTrue(nqnCommands().stream().noneMatch(LightbitsGetHostNqnCommand::isInbandAuth),
+                "no key request while the agent may hold the pool with other keys");
+        assertEquals(NQN, detail("nvme.hostnqn"), "the NQN is still recorded");
+        wm.verify(0, putRequestedFor(urlEqualTo(P + "/trustedHostSecrets/" + TH_NAME)));
+    }
+
+    @Test
+    void aHostWideRotationReachesAnotherPoolThisHostStillKeysHostWide() throws Exception {
+        // POOL's scope cannot be read (no cluster answer): its rotation is of the host-wide keys
+        option(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        option(LightbitsPoolConfig.KEY_INBAND_KEY_GENERATION, "2");
+        putDetail(LightbitsTrustedHosts.generationDetailKey(POOL), "1");
+        long other = POOL + 1;
+        Map<String, String> od = new HashMap<>(LightbitsPoolConfig.fromUrl("lightbits://10.0.0.1/default?environment=cs1", "jwt")
+                .toDetailsWithoutSecret());
+        od.put(LightbitsPoolConfig.KEY_INBAND_AUTH, "true");
+        od.put(LightbitsPoolConfig.KEY_INBAND_KEY_GENERATION, "5");
+        od.put("lightbits.subsystemnqn", SUB);   // its scope is stored, but this host connected it host-wide
+        otherPoolDetails.put(other, od);
+        refs.add(new StoragePoolHostVO(other, HOST, ""));
+        putDetail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other), "host-wide");
+        putDetail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other), "fingerprint-of-old-key");
+        scopedAgent(true);
+        listener.hostConnect(HOST, POOL);
+        assertTrue(nqnCommands().get(0).isRotateKeys());
+        assertNull(nqnCommands().get(0).getKeyScope(), "the host-wide keys rotate");
+        assertEquals("5", detail(LightbitsTrustedHosts.generationDetailKey(other)), "the other pool's generation is recorded");
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY),
+                detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other)), "and it gets the rotated key");
+    }
+
+    @Test
+    void aRotationMovesAHostWidePoolOfTheSameClusterToTheRotatedKeys() throws Exception {
+        long other = hostWidePoolOfTheSameCluster(true);
+        scopedAgent(true);
+        listener.hostConnect(HOST, POOL);
+        assertTrue(nqnCommands().get(0).isRotateKeys());
+        assertEquals(SUB, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other)), "adopted");
+        assertEquals("5", detail(LightbitsTrustedHosts.generationDetailKey(other)), "its generation is recorded with the new keys");
+        assertEquals(LightbitsTrustedHosts.fingerprint(KEY),
+                detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other)), "registered with the new keys");
+    }
+
+    @Test
+    void aHostWidePoolWhoseScopeIsNotKeptYetIsReadFromItsCluster() throws Exception {
+        long other = hostWidePoolOfTheSameCluster(false);
+        wm.stubFor(get(urlEqualTo("/api/v2/clusterinfo"))
+                .willReturn(aResponse().withStatus(200).withBody("{\"UUID\":\"c1\",\"subsystemNQN\":\"" + SUB + "\"}")));
+        scopedAgent(true);
+        listener.hostConnect(HOST, POOL);
+        assertEquals(SUB, otherPoolDetails.get(other).get("lightbits.subsystemnqn"), "read and kept");
+        assertEquals(SUB, detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other)), "adopted");
+        assertEquals("5", detail(LightbitsTrustedHosts.generationDetailKey(other)));
+    }
+
+    @Test
+    void aPoolTheAgentCouldNotBeGivenWithTheScopeGetsNoRotatedKeys() throws Exception {
+        long other = hostWidePoolOfTheSameCluster(true);
+        scopedAgent(false);
+        listener.hostConnect(HOST, POOL);
+        assertTrue(nqnCommands().get(0).isRotateKeys());
+        assertEquals("host-wide", detail(LightbitsTrustedHosts.perPool("lightbits.keyscope", other)), "still host-wide");
+        assertNull(detail(LightbitsTrustedHosts.generationDetailKey(other)), "no generation: it rotates at its next connect");
+        assertEquals("fingerprint-of-old-key",
+                detail(LightbitsTrustedHosts.perPool(LightbitsTrustedHosts.CURRENT_KEY_DETAIL, other)), "not registered with the new keys");
     }
 }

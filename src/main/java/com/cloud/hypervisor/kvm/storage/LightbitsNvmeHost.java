@@ -405,12 +405,20 @@ class LightbitsNvmeHost {
      * left in sysfs, since some nvme-cli builds return 0 when a controller deletion fails.
      */
     List<String> disconnectIdleSubsystems() {
+        return disconnectIdleSubsystems(null);
+    }
+
+    /** {@link #disconnectIdleSubsystems()} for one subsystem (one cluster); null: every Lightbits subsystem. */
+    List<String> disconnectIdleSubsystems(String subsystem) {
         List<String> disconnected = new ArrayList<>();
         for (String subsys : sys.list(SUBSYSTEMS)) {
             String dir = SUBSYSTEMS + "/" + subsys;
             String nqn = sys.read(dir + "/subsysnqn");
             if (nqn == null || !SUBSYS_NQN.matcher(nqn).matches()) {
                 continue;
+            }
+            if (subsystem != null && !subsystem.trim().equals(nqn.trim())) {
+                continue;   // another cluster's subsystem: its keys are not the ones rotated
             }
             // With native NVMe multipath a namespace shows directly under the subsystem
             // (nvme3n1); without it (nvme_core.multipath=N) it shows under a controller
@@ -496,7 +504,12 @@ class LightbitsNvmeHost {
      * {@link #paths()}, which skips what it cannot read.
      */
     int pathsWithoutKey(String currentKey) {
-        return pathsWithoutSecret("dhchap_secret", currentKey);
+        return pathsWithoutSecret("dhchap_secret", currentKey, null);
+    }
+
+    /** {@link #pathsWithoutKey(String)} for the paths of one subsystem (one cluster); null: every Lightbits path. */
+    int pathsWithoutKey(String currentKey, String subsystem) {
+        return pathsWithoutSecret("dhchap_secret", currentKey, subsystem);
     }
 
     /**
@@ -506,10 +519,15 @@ class LightbitsNvmeHost {
      * with the new key. Same rules as {@link #pathsWithoutKey(String)}.
      */
     int pathsWithoutCtrlKey(String currentCtrlKey) {
-        return pathsWithoutSecret("dhchap_ctrl_secret", currentCtrlKey);
+        return pathsWithoutSecret("dhchap_ctrl_secret", currentCtrlKey, null);
     }
 
-    private int pathsWithoutSecret(String attribute, String current) {
+    /** {@link #pathsWithoutCtrlKey(String)} for the paths of one subsystem (one cluster); null: every Lightbits path. */
+    int pathsWithoutCtrlKey(String currentCtrlKey, String subsystem) {
+        return pathsWithoutSecret("dhchap_ctrl_secret", currentCtrlKey, subsystem);
+    }
+
+    private int pathsWithoutSecret(String attribute, String current, String subsystem) {
         List<String> controllers = sys.listOrNull("/sys/class/nvme");
         if (controllers == null) {
             throw new CloudRuntimeException("could not list /sys/class/nvme to check this host's NVMe/TCP paths");
@@ -521,7 +539,7 @@ class LightbitsNvmeHost {
                 throw new CloudRuntimeException("could not read the subsystem NQN of " + ctrl
                         + " to check this host's NVMe/TCP paths");
             }
-            if (!nqn.startsWith(LIGHTBITS_NQN_PREFIX)) {
+            if (!nqn.startsWith(LIGHTBITS_NQN_PREFIX) || subsystem != null && !subsystem.trim().equals(nqn.trim())) {
                 continue;
             }
             String secret = sys.read("/sys/class/nvme/" + ctrl + "/" + attribute);
@@ -576,6 +594,11 @@ class LightbitsNvmeHost {
      * is never taken for zero (rotation deletes keys only on a known zero).
      */
     int lightbitsPathCount() {
+        return lightbitsPathCount(null);
+    }
+
+    /** {@link #lightbitsPathCount()} for one subsystem (one cluster); null: every Lightbits path. */
+    int lightbitsPathCount(String subsystem) {
         List<String> controllers = sys.listOrNull("/sys/class/nvme");
         if (controllers == null) {
             throw new CloudRuntimeException("could not list /sys/class/nvme to count this host's NVMe/TCP paths");
@@ -586,7 +609,7 @@ class LightbitsNvmeHost {
             if (nqn == null) {
                 throw new CloudRuntimeException("could not read the subsystem NQN of " + ctrl + " to count this host's NVMe/TCP paths");
             }
-            if (nqn.startsWith(LIGHTBITS_NQN_PREFIX)) {
+            if (nqn.startsWith(LIGHTBITS_NQN_PREFIX) && (subsystem == null || subsystem.trim().equals(nqn.trim()))) {
                 n++;
             }
         }
@@ -707,6 +730,15 @@ class LightbitsNvmeHost {
      * were there before are left alone: they may carry volumes. Returns the controllers dropped.
      */
     List<String> dropNewPathsWithoutCtrlKey(java.util.Set<String> before, String currentCtrlKey) {
+        return dropNewPathsWithoutCtrlKey(before, currentCtrlKey, null);
+    }
+
+    /**
+     * As {@link #dropNewPathsWithoutCtrlKey(java.util.Set, String)}, limited to the paths of one
+     * subsystem when it is given: with keys per cluster, another cluster's paths hold another
+     * controller key and are that cluster's connects' business.
+     */
+    List<String> dropNewPathsWithoutCtrlKey(java.util.Set<String> before, String currentCtrlKey, String subsystem) {
         List<String> dropped = new ArrayList<>();
         // a rejected controller that is gone is forgotten (the name can be reused); one that cannot
         // be read is kept, and an unreadable listing fails the check
@@ -716,6 +748,10 @@ class LightbitsNvmeHost {
         }
         REJECTED.keySet().retainAll(new java.util.HashSet<>(listed));
         for (Path p : paths()) {
+            // the NQN paths() read: a second read that failed would let another cluster's path through
+            if (subsystem != null && !subsystem.trim().equals(p.subsysNqn == null ? null : p.subsysNqn.trim())) {
+                continue;
+            }
             // a path an earlier connect rejected but could not disconnect stays rejected
             if (before.contains(p.controller) && !rejected(p.controller)) {
                 continue;

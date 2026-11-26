@@ -291,4 +291,97 @@ class LightbitsHostKeyTest {
         assertNotEquals(k, key.ensure());
         assertNotEquals(c, key.ensureCtrlKey());
     }
+
+    private static final String SUB_B = "nqn.2016-01.com.lightbitslabs:uuid:0b0b0b0b-1111-2222-3333-444444444444";
+
+    @Test
+    void eachClusterStartsWithTheHostWideKeyAndGetsItsOwnAtItsRotation() throws IOException {
+        String hostWide = key.ensure();
+        String hostWideCtrl = key.ensureCtrlKey();
+        LightbitsHostKey a = key.forScope(SUB);
+        LightbitsHostKey b = key.forScope(SUB_B);
+        assertEquals(hostWide, a.ensure(), "copied: the host's existing paths hold it");
+        assertEquals(hostWide, b.ensure());
+        assertEquals(hostWideCtrl, a.ensureCtrlKey());
+        assertNotEquals(key.keyFile(), a.keyFile());
+        assertNotEquals(a.keyFile(), b.keyFile());
+        assertTrue(a.configFile().getFileName().toString().startsWith("auth-"));
+
+        a.deleteKeys();   // cluster A rotates
+        String newA = a.ensure();
+        assertNotEquals(hostWide, newA, "after its rotation cluster A has its own key, not a copy");
+        assertNotEquals(hostWideCtrl, a.ensureCtrlKey());
+        assertEquals(hostWide, b.ensure(), "cluster B keeps its key");
+        assertEquals(hostWide, key.ensure(), "and so do the host-wide keys");
+        a.deleteKeys();
+        assertNotEquals(newA, a.ensure(), "a second rotation makes another new key, never the host-wide one again");
+        assertNotEquals(hostWide, a.ensure());
+        assertTrue(key.forScope(null) == key && key.forScope(" ") == key);
+        assertThrows(CloudRuntimeException.class, () -> key.forScope("../x"));
+    }
+
+    @Test
+    void anOperatorsOwnFileInTheDirectoryIsNeitherCheckedNorDeleted() throws IOException {
+        String k = key.ensure();
+        Path backup = Files.writeString(key.keyFile().getParent().resolve("notes.txt"), "mine");
+        Path linked = key.keyFile().getParent().resolve("old-backup.json");
+        Files.createSymbolicLink(linked, backup);
+        assertEquals(k, key.ensure(), "an unmanaged link does not make the keys untrusted");
+        assertTrue(Files.exists(backup) && Files.isSymbolicLink(linked), "and is left alone");
+    }
+
+    @Test
+    void aClusterThatRotatedKeepsItsOwnKeysAfterAnUntrustedFileCleanup() throws IOException {
+        String hostWide = key.ensure();
+        LightbitsHostKey a = key.forScope(SUB);
+        a.ensure();
+        a.deleteKeys();   // cluster A rotated: its keys are its own from now on
+        a.ensure();
+        Path elsewhere = Files.writeString(tmp.resolve("planted.json"), LightbitsHostKey.config(NQN, HOST_ID, KNOWN));
+        Files.delete(key.configFile());
+        Files.createSymbolicLink(key.configFile(), elsewhere);
+        String newHostWide = key.ensure();   // the cleanup replaces every key, host-wide ones made again first
+        assertNotEquals(hostWide, newHostWide);
+        assertNotEquals(newHostWide, a.ensure(), "cluster A makes new keys of its own, not a copy of the new host-wide ones");
+    }
+
+    @Test
+    void aCleanupMarksOnlyClustersThatHadFiles() throws IOException {
+        key.ensure();
+        key.ensureCtrlKey();
+        LightbitsHostKey a = key.forScope(SUB);   // never used: no files of its own
+        Path elsewhere = Files.writeString(tmp.resolve("planted.json"), LightbitsHostKey.config(NQN, HOST_ID, KNOWN));
+        Files.delete(a.configFile().getParent().resolve("auth.json"));
+        Files.createSymbolicLink(a.configFile().getParent().resolve("auth.json"), elsewhere);
+        a.ensure();   // the cleanup runs from the unused cluster's own request
+        assertFalse(Files.exists(a.ownMarker()), "a cluster that had no files is not marked: it keeps its first seeding");
+    }
+
+    @Test
+    void anExposureMarkCoversEveryClustersKeys() throws IOException {
+        key.ensure();
+        LightbitsHostKey a = key.forScope(SUB);
+        LightbitsHostKey b = key.forScope(SUB_B);
+        a.ensure();
+        b.ensure();
+        Files.setPosixFilePermissions(b.keyFile(), PosixFilePermissions.fromString("rw-r--r--"));
+        a.ensure();   // any use of the keys checks the whole directory
+        assertTrue(a.keysPossiblyExposed() && b.keysPossiblyExposed() && key.keysPossiblyExposed());
+        a.deleteKeys();
+        assertFalse(a.keysPossiblyExposed(), "cleared for the cluster that rotated");
+        assertTrue(b.keysPossiblyExposed(), "still set for the others");
+    }
+
+    @Test
+    void aClusterSeededFromExposedHostWideKeysIsFlaggedToo() throws IOException {
+        Path dir = Files.createDirectories(nvme.resolve("lightbits"));
+        Files.writeString(key.keyFile(), KNOWN + "\n");
+        Files.setPosixFilePermissions(key.keyFile(), PosixFilePermissions.fromString("rw-r--r--"));
+        key.ensure();
+        assertTrue(key.keysPossiblyExposed());
+        LightbitsHostKey a = key.forScope(SUB);
+        assertEquals(KNOWN, a.ensure());
+        assertTrue(a.keysPossiblyExposed(), "a copy of a possibly copied key is flagged");
+        assertEquals("rwx------", PosixFilePermissions.toString(Files.getPosixFilePermissions(dir)));
+    }
 }

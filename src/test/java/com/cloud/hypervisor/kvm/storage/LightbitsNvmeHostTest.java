@@ -380,6 +380,15 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
+    void aScopedIdleDisconnectLeavesTheOtherClustersSubsystemsAlone() {
+        String other = "nqn.2016-01.com.lightbitslabs:uuid:db336dd6-5e4c-4fc4-b7ff-9b74f95f75a2";
+        subsystem("nvme-subsys3", NQN, "nvme3");
+        subsystem("nvme-subsys4", other, "nvme4");
+        assertEquals(List.of(NQN), host.disconnectIdleSubsystems(NQN));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -n " + other)), sys.commands.toString());
+    }
+
+    @Test
     void aSubsystemWithANamespaceIsNeverDisconnected() {
         subsystem("nvme-subsys3", NQN, "nvme3", "nvme3n2", "ng3n2");
         subsystem("nvme-subsys4", NQN + "-b", "nvme6", "nvme6c6n1");
@@ -646,6 +655,29 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
+    void aRotationForOneClusterKeepsTheOtherClustersKeysConfigurationAndPaths(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp)
+            throws Exception {
+        String other = "nqn.2016-01.com.lightbitslabs:uuid:db336dd6-5e4c-4fc4-b7ff-9b74f95f75a2";
+        LightbitsHostKey base = keyIn(tmp);
+        LightbitsHostKey a = base.forScope(NQN);
+        LightbitsHostKey b = base.forScope(other);
+        String ka = a.ensure();
+        String kb = b.ensure();
+        java.nio.file.Path configB = b.configFile();
+        java.nio.file.Path leftover = base.twoWayConfigFile("387e455e-bb68-498f-9ef3-04c463815e5d");
+        java.nio.file.Files.writeString(leftover, "[]\n");
+        subsystem("nvme-subsys3", NQN, "nvme3");      // cluster A: idle
+        subsystem("nvme-subsys4", other, "nvme4");    // cluster B: idle too
+        LightbitsStorageAdaptor.rotateInbandKeys(host, a, NQN);
+        assertTrue(sys.commands.contains("nvme disconnect -n " + NQN));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.equals("nvme disconnect -n " + other)), "cluster B's paths are kept");
+        assertNotEquals(ka, a.ensure(), "a new cluster A key");
+        assertEquals(kb, b.ensure(), "cluster B's key is kept");
+        assertTrue(java.nio.file.Files.exists(configB), "cluster B's configuration is kept");
+        assertFalse(java.nio.file.Files.exists(leftover), "a per-pool file of an earlier version is removed");
+    }
+
+    @Test
     void aHostWithAVolumeInUseRefusesToRotate(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
         LightbitsHostKey key = keyIn(tmp);
         String k = key.ensure();
@@ -775,6 +807,24 @@ class LightbitsNvmeHostTest {
     }
 
     @Test
+    void pathCountsCanBeLimitedToOneCluster() {
+        String key = "DHHC-1:00:k:";
+        String other = "nqn.2016-01.com.lightbitslabs:uuid:0b0b0b0b-1111-2222-3333-444444444444";
+        sys.controller("nvme1", "traddr=10.0.0.1,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme1/dhchap_secret", key);
+        sys.files.put("/sys/class/nvme/nvme1/dhchap_ctrl_secret", key);
+        sys.files.put("/sys/class/nvme/nvme7/subsysnqn", other);
+        sys.files.put("/sys/class/nvme/nvme7/state", "live");
+        sys.files.put("/sys/class/nvme/nvme7/dhchap_secret", "none");
+        assertEquals(1, host.pathsWithoutKey(key), "all clusters");
+        assertEquals(0, host.pathsWithoutKey(key, NQN), "only this cluster's paths count");
+        assertEquals(1, host.pathsWithoutKey(key, other));
+        assertEquals(0, host.pathsWithoutCtrlKey(key, NQN));
+        assertEquals(2, host.lightbitsPathCount());
+        assertEquals(1, host.lightbitsPathCount(other));
+    }
+
+    @Test
     void aControllerNameReusedForANewKeyedPathIsNotTheRejectedOne() {
         String ctrl = "DHHC-1:00:ctrl:";
         sys.files.put("/sys/block/nvme3n1/device/subsysnqn", NQN);
@@ -809,6 +859,25 @@ class LightbitsNvmeHostTest {
         sys.files.put("/sys/class/nvme/nvme4/cntlid", "18");
         sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", ctrl);
         host.requireTwoWayPaths("nvme3n1", ctrl);
+        sys.files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme4/"));
+        host.forgetVanishedRejections();
+    }
+
+    @Test
+    void aClustersCleanupLeavesAnotherClustersRejectedPathAlone() {
+        String ctrlA = "DHHC-1:00:ctrlA:";
+        String ctrlB = "DHHC-1:00:ctrlB:";
+        String other = "nqn.2016-01.com.lightbitslabs:uuid:0b0b0b0b-1111-2222-3333-444444444444";
+        java.util.Set<String> before = host.pathNames();
+        sys.controller("nvme4", "traddr=10.0.0.4,trsvcid=4420", "live");
+        sys.files.put("/sys/class/nvme/nvme4/cntlid", "21");
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", "none");
+        sys.results.put("nvme disconnect -d nvme4", new LightbitsNvmeHost.Result(1, "failed"));
+        assertThrows(CloudRuntimeException.class, () -> host.dropNewPathsWithoutCtrlKey(before, ctrlA, NQN));
+        sys.files.put("/sys/class/nvme/nvme4/dhchap_ctrl_secret", ctrlA);
+        // cluster B's connect: nvme4 belongs to cluster A and is not checked against B's key
+        java.util.Set<String> beforeB = host.pathNames();
+        assertTrue(host.dropNewPathsWithoutCtrlKey(beforeB, ctrlB, other).isEmpty());
         sys.files.keySet().removeIf(f -> f.startsWith("/sys/class/nvme/nvme4/"));
         host.forgetVanishedRejections();
     }

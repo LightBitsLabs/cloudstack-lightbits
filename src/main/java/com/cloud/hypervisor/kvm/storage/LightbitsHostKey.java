@@ -60,6 +60,8 @@ public class LightbitsHostKey {
     private static final Pattern KEY = Pattern.compile("DHHC-1:0[0-3]:([A-Za-z0-9+/]+={0,2}):");
     private static final Pattern HOST_NQN = Pattern.compile("nqn\\.[A-Za-z0-9:._-]{1,220}");
     private static final Pattern UUID = Pattern.compile("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}");
+    /** A per-pool two-way configuration file of an earlier version: auth-<pool uuid>.json. */
+    private static final Pattern POOL_CONFIG = Pattern.compile("auth-[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\\.json");
     private static final Set<PosixFilePermission> DIR_MODE = PosixFilePermissions.fromString("rwx------");
     private static final Set<PosixFilePermission> FILE_MODE = PosixFilePermissions.fromString("rw-------");
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -68,24 +70,67 @@ public class LightbitsHostKey {
     private final Path nvmeDir;
     /** The owner the directory and files must have: root (tests use their own UID). */
     private final int ownerUid;
+    /** "" for the host-wide (legacy) keys, "-<digest of a cluster's subsystem NQN>" for one cluster's keys. */
+    private final String suffix;
+    /** For a cluster's keys: the host-wide keys a missing one is first copied from; null otherwise. */
+    private final LightbitsHostKey legacy;
 
     public LightbitsHostKey() {
         this(Path.of("/etc/nvme/lightbits"), Path.of("/etc/nvme"), 0);
     }
 
     LightbitsHostKey(Path dir, Path nvmeDir, int ownerUid) {
+        this(dir, nvmeDir, ownerUid, "", null);
+    }
+
+    private LightbitsHostKey(Path dir, Path nvmeDir, int ownerUid, String suffix, LightbitsHostKey legacy) {
         this.dir = dir;
         this.nvmeDir = nvmeDir;
         this.ownerUid = ownerUid;
+        this.suffix = suffix;
+        this.legacy = legacy;
+    }
+
+    /**
+     * This host's keys for one cluster, identified by its subsystem NQN: each cluster gets its own
+     * host key and controller key, so a cluster that learns one host's keys (it holds them as
+     * its trusted host's secrets) cannot use them against another cluster. Null or blank gives
+     * the host-wide keys (management servers older than this version send no scope). A cluster's
+     * key that does not exist yet is first copied from the host-wide one, so the paths a host
+     * already has keep working; the keys separate at the cluster's next rotation.
+     */
+    public LightbitsHostKey forScope(String subsystemNqn) {
+        if (subsystemNqn == null || subsystemNqn.isBlank()) {
+            return this;
+        }
+        if (!HOST_NQN.matcher(subsystemNqn.trim()).matches()) {
+            throw new CloudRuntimeException("Lightbits: not a subsystem NQN: " + subsystemNqn);
+        }
+        LightbitsHostKey base = legacy == null ? this : legacy;
+        return new LightbitsHostKey(dir, nvmeDir, ownerUid, "-" + scopeId(subsystemNqn.trim()), base);
+    }
+
+    /** A short, file-name safe digest of a subsystem NQN. */
+    static String scopeId(String subsystemNqn) {
+        try {
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(subsystemNqn.getBytes(StandardCharsets.UTF_8));
+            StringBuilder b = new StringBuilder();
+            for (int i = 0; i < 6; i++) {
+                b.append(String.format("%02x", d[i]));
+            }
+            return b.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     Path keyFile() {
-        return dir.resolve("dhchap-key");
+        return dir.resolve("dhchap-key" + suffix);
     }
 
     /** The controller key: the secret the cluster proves itself with, for two-way authentication. */
     Path ctrlKeyFile() {
-        return dir.resolve("dhchap-ctrl-key");
+        return dir.resolve("dhchap-ctrl-key" + suffix);
     }
 
     /** The two-way nvme-cli configuration of one pool that earlier versions wrote (removed on use). */
@@ -97,7 +142,7 @@ public class LightbitsHostKey {
     }
 
     public Path configFile() {
-        return dir.resolve("auth.json");
+        return dir.resolve("auth" + suffix + ".json");
     }
 
     /**
@@ -109,6 +154,9 @@ public class LightbitsHostKey {
             try {
                 restrict();
                 String key = readKey();
+                if (key == null && legacy != null) {
+                    key = seedFromLegacy(keyFile(), legacy.keyFile());
+                }
                 if (key == null) {
                     key = newKey(RANDOM);
                     writePrivate(keyFile(), key + "\n");
@@ -139,10 +187,18 @@ public class LightbitsHostKey {
     public void deleteKeys() {
         synchronized (LOCK) {
             try {
+                if (legacy != null && !Files.exists(ownMarker(), LinkOption.NOFOLLOW_LINKS)) {
+                    // from now on this cluster's keys are its own: never copied from the host-wide ones
+                    // again. The mark goes first: if it cannot be written, nothing is deleted and the
+                    // rotation is refused, so no later preparation copies the host-wide keys back.
+                    writePrivate(ownMarker(), "");
+                }
                 java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), ctrlKeyFile(), configFile()));
                 if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
                     try (java.util.stream.Stream<Path> list = Files.list(dir)) {
-                        list.filter(f -> f.getFileName().toString().matches("auth-.+\\.json")).forEach(files::add);
+                        // the per-pool two-way files of earlier versions (auth-<pool uuid>.json), not
+                        // another cluster's configuration (auth-<scope id>.json): its keys are not rotated
+                        list.filter(f -> POOL_CONFIG.matcher(f.getFileName().toString()).matches()).forEach(files::add);
                     }
                 }
                 for (Path f : files) {
@@ -191,44 +247,82 @@ public class LightbitsHostKey {
             // add or replace an entry between the checks and their use.
             Files.setPosixFilePermissions(dir, DIR_MODE);
         }
+        // every file here holds or marks keys: each cluster's keys and configurations, the
+        // host-wide ones, the per-pool two-way configurations and the rotation marks
         java.util.List<Path> files = new java.util.ArrayList<>(java.util.List.of(keyFile(), configFile(), ctrlKeyFile()));
         if (Files.isDirectory(dir, LinkOption.NOFOLLOW_LINKS)) {
-            // the per-pool two-way configurations hold the keys too
             try (java.util.stream.Stream<Path> list = Files.list(dir)) {
-                list.filter(f -> f.getFileName().toString().matches("auth-.+\\.json")).forEach(files::add);
+                // only the files managed here: an operator's own file (a backup, a directory) is neither
+                // checked nor deleted
+                list.filter(f -> !files.contains(f) && (MANAGED_FILE.matcher(f.getFileName().toString()).matches()
+                        || POOL_CONFIG.matcher(f.getFileName().toString()).matches())).forEach(files::add);
             }
         }
         boolean untrusted = false;
         for (Path f : files) {
             untrusted |= Files.isSymbolicLink(f) || Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS) && uid(f) != ownerUid;
         }
+        java.util.List<String> keyed = new java.util.ArrayList<>();   // suffixes of the keys present
         if (!untrusted) {
             for (Path f : files) {
                 if (Files.isRegularFile(f, LinkOption.NOFOLLOW_LINKS)) {
-                    wider |= groupOrOthers(Files.getPosixFilePermissions(f, LinkOption.NOFOLLOW_LINKS));
+                    String name = f.getFileName().toString();
+                    java.util.regex.Matcher m = KEY_FILE.matcher(name);
+                    if (m.matches() && !keyed.contains(m.group(1))) {
+                        keyed.add(m.group(1));
+                    }
+                    // keys and the configuration files holding them; the marks hold none
+                    if (m.matches() || name.endsWith(".json")) {
+                        wider |= groupOrOthers(Files.getPosixFilePermissions(f, LinkOption.NOFOLLOW_LINKS));
+                    }
                 }
             }
         }
         if (untrusted) {
+            // the clusters that had keys or marks here: after the cleanup each makes its own new keys,
+            // never copies of host-wide keys made again in the meantime
+            // (only files that exist: a scope with none was never used and keeps its first seeding)
+            java.util.Set<String> scopes = new java.util.HashSet<>();
             for (Path f : files) {
-                if (Files.deleteIfExists(f)) {
-                    LOG.warn("Lightbits: removed {}: the key or configuration file was not a file owned by root, so a new"
-                            + " in-band authentication key is made (register it by reconnecting the host)", f);
+                java.util.regex.Matcher m = SCOPED_FILE.matcher(f.getFileName().toString());
+                if (m.matches() && (Files.exists(f, LinkOption.NOFOLLOW_LINKS) || Files.isSymbolicLink(f))) {
+                    scopes.add(m.group(1));
                 }
             }
-            Files.deleteIfExists(rotationMarker());   // the keys are new: nothing left to rotate
-        } else if (wider && (Files.isRegularFile(keyFile(), LinkOption.NOFOLLOW_LINKS)
-                || Files.isRegularFile(ctrlKeyFile(), LinkOption.NOFOLLOW_LINKS)) && !keysPossiblyExposedUnlocked()) {
+            // The new marks are in place before anything is deleted (an existing mark, even a link,
+            // is replaced by a root-owned file), so a cleanup cut short never leaves a used scope
+            // without its mark.
+            java.util.Set<Path> marks = new java.util.HashSet<>();
+            for (String sfx : scopes) {
+                Path mark = dir.resolve("own-keys" + sfx);
+                Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
+                Files.move(tmp, mark, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                marks.add(mark);
+            }
+            for (Path f : files) {
+                if (!marks.contains(f) && Files.deleteIfExists(f)) {
+                    LOG.warn("Lightbits: removed {}: a key, configuration or mark file was not a file owned by root, so new"
+                            + " in-band authentication keys are made (register them by reconnecting the host)", f);
+                }
+            }
+        } else if (wider) {
             // Making the files root-only again does not take back a copy someone made while they
             // were readable. Replacing the keys at once could break this host's live paths, so the
             // keys stay until a rotation replaces them, and the host is reported until then. The
-            // mark is written before the modes are tightened: if it cannot be written, the wide
+            // marks are written before the modes are tightened: if one cannot be written, the wide
             // modes stay as the evidence and the next attempt tries again.
-            Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
-            Files.move(tmp, rotationMarker(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            LOG.warn("Lightbits: this host's in-band authentication key files were readable by other users than root;"
-                    + " they are root-only again, but the keys may have been copied. Rotate them (INSTALL.md, \"Rotating"
-                    + " the keys\")");
+            for (String sfx : keyed) {
+                Path mark = dir.resolve("rotation-required" + sfx);
+                if (!Files.exists(mark, LinkOption.NOFOLLOW_LINKS)) {
+                    Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
+                    Files.move(tmp, mark, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+            if (!keyed.isEmpty()) {
+                LOG.warn("Lightbits: this host's in-band authentication key files were readable by other users than root;"
+                        + " they are root-only again, but the keys may have been copied. Rotate them (INSTALL.md, \"Rotating"
+                        + " the keys\")");
+            }
         }
         if (!untrusted) {
             for (Path f : files) {
@@ -249,9 +343,50 @@ public class LightbitsHostKey {
         return false;
     }
 
+    /** A key file name: host or controller key, host-wide or one cluster's (group 1: the suffix). */
+    /** A file of one cluster's keys: key, configuration, rotation or own-keys mark (group 1: the suffix). */
+    private static final Pattern SCOPED_FILE = Pattern.compile(
+            "(?:dhchap-(?:ctrl-)?key|auth|rotation-required|own-keys)(-[0-9a-f]{12})(?:\\.json)?");
+
+    private static final Pattern KEY_FILE = Pattern.compile("dhchap-(?:ctrl-)?key(|-[0-9a-f]{12})");
+
+    /** Every file this class manages: keys, configurations and marks, host-wide or per cluster. */
+    private static final Pattern MANAGED_FILE = Pattern.compile(
+            "(?:dhchap-(?:ctrl-)?key|auth|rotation-required|own-keys)(?:-[0-9a-f]{12})?(?:\\.json)?");
+
+    /** Marks a cluster whose keys were rotated at least once: they are no longer copied from the host-wide ones. */
+    Path ownMarker() {
+        return dir.resolve("own-keys" + suffix);
+    }
+
     /** Marks keys that were readable by other users before {@link #restrict()} tightened them. */
     Path rotationMarker() {
-        return dir.resolve("rotation-required");
+        return dir.resolve("rotation-required" + suffix);
+    }
+
+    /**
+     * A cluster's key that does not exist yet is the host-wide one, copied: the host's existing
+     * paths hold it, so switching would break them. A copy of keys flagged as possibly exposed
+     * is flagged too. Returns the key, or null when there is no valid host-wide one.
+     */
+    private String seedFromLegacy(Path own, Path legacyFile) throws IOException {
+        if (Files.exists(ownMarker(), LinkOption.NOFOLLOW_LINKS)) {
+            return null;   // rotated once: this cluster's keys are its own
+        }
+        String key = readKey(legacyFile);
+        if (key == null) {
+            return null;
+        }
+        // the exposure mark goes first: if it cannot be written, no copy exists and the next
+        // attempt does both again
+        if (Files.exists(legacy.rotationMarker(), LinkOption.NOFOLLOW_LINKS) && !keysPossiblyExposedUnlocked()) {
+            Path tmp = Files.createTempFile(dir, ".tmp-", "", PosixFilePermissions.asFileAttribute(FILE_MODE));
+            Files.move(tmp, rotationMarker(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        }
+        writePrivate(own, key + "\n");
+        LOG.info("Lightbits: {} starts as a copy of {} (the host's existing paths hold it); it becomes its own at the next"
+                + " rotation", own, legacyFile);
+        return key;
     }
 
     /**
@@ -298,6 +433,9 @@ public class LightbitsHostKey {
             try {
                 restrict();
                 String key = readKey(ctrlKeyFile());
+                if (key == null && legacy != null) {
+                    key = seedFromLegacy(ctrlKeyFile(), legacy.ctrlKeyFile());
+                }
                 if (key == null) {
                     key = newKey(RANDOM);
                     writePrivate(ctrlKeyFile(), key + "\n");
@@ -335,8 +473,19 @@ public class LightbitsHostKey {
      * an earlier version wrote for this pool holds the keys too and is removed.
      */
     public java.util.List<LightbitsNvmeHost.Target> twoWayTargets(String poolUuid, java.util.List<Port> ports) {
+        return targets(poolUuid, ports, true);
+    }
+
+    /**
+     * The in-band connections for one pool: as {@link #twoWayTargets}, with the controller key only
+     * when {@code twoWay}. A one-way pool connects this way too, not through {@code nvme connect-all
+     * --config}: libnvme 1.16 connects with the key of a controller this host already has to another
+     * cluster instead of the configuration file's key (and reports success), which a cluster with
+     * its own key refuses.
+     */
+    public java.util.List<LightbitsNvmeHost.Target> targets(String poolUuid, java.util.List<Port> ports, boolean twoWay) {
         String key = ensure();
-        String ctrl = ensureCtrlKey();
+        String ctrl = twoWay ? ensureCtrlKey() : null;
         synchronized (LOCK) {
             try {
                 Files.deleteIfExists(twoWayConfigFile(poolUuid));
@@ -351,12 +500,12 @@ public class LightbitsHostKey {
                             && ADDRESS.matcher(p.address).matches() && p.service != null && SERVICE.matcher(p.service).matches()) {
                         out.add(new LightbitsNvmeHost.Target(p.subsystemNqn, p.address, p.service, "transport=tcp,traddr=" + p.address
                                 + ",trsvcid=" + p.service + ",nqn=" + p.subsystemNqn + ",hostnqn=" + nqn + ",hostid=" + hostId
-                                + ",dhchap_secret=" + key + ",dhchap_ctrl_secret=" + ctrl));
+                                + ",dhchap_secret=" + key + (twoWay ? ",dhchap_ctrl_secret=" + ctrl : "")));
                     }
                 }
                 return out;
             } catch (IOException e) {
-                throw new CloudRuntimeException("Lightbits: could not prepare this host's two-way in-band authentication"
+                throw new CloudRuntimeException("Lightbits: could not prepare this host's in-band authentication"
                         + " connections in " + dir + ": " + e.getMessage(), e);
             }
         }
@@ -446,6 +595,16 @@ public class LightbitsHostKey {
     /** Lightbits NVMe/TCP paths on this host that do not hold the given (current) key: none, or an old one. */
     public static int pathsWithoutKey(String currentKey) {
         return new LightbitsNvmeHost().pathsWithoutKey(currentKey);
+    }
+
+    /** As {@link #pathsWithoutKey(String)}, for the paths of one subsystem (null: all). */
+    public static int pathsWithoutKey(String currentKey, String subsystem) {
+        return new LightbitsNvmeHost().pathsWithoutKey(currentKey, subsystem);
+    }
+
+    /** As {@link #pathsWithoutCtrlKey(String)}, for the paths of one subsystem (null: all). */
+    public static int pathsWithoutCtrlKey(String currentCtrlKey, String subsystem) {
+        return new LightbitsNvmeHost().pathsWithoutCtrlKey(currentCtrlKey, subsystem);
     }
 
     /** Lightbits NVMe/TCP paths on this host whose controller key is not the given (current) one: none, or an old one. */

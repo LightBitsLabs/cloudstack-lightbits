@@ -364,6 +364,34 @@ class LightbitsStorageAdaptorTest {
     }
 
     @Test
+    void aOneWayPoolConnectsItsClustersPortsDirectlyWithThatClustersKeyOnly(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp)
+            throws Exception {
+        java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
+        LightbitsHostKey hostKey = new LightbitsHostKey(tmp.resolve("lightbits"), tmp, (Integer) java.nio.file.Files.getAttribute(tmp, "unix:uid"));
+        LightbitsStorageAdaptor a = new LightbitsStorageAdaptor(new LightbitsNvmeHost(sys), hostKey);
+        String subA = "nqn.2016-01.com.lightbitslabs:uuid:c2637e3c-ab68-4b02-b97e-cb7406891c60";
+        String subB = "nqn.2016-01.com.lightbitslabs:uuid:db336dd6-5e4c-4fc4-b7ff-9b74f95f75a2";
+        // a discovery log page that also lists another subsystem's port
+        sys.results.put("nvme discover -t tcp -a 10.0.1.1 -s 8009 -o json", new LightbitsNvmeHost.Result(0,
+                "{\"genctr\":1,\"records\":[{\"trtype\":\"tcp\",\"subtype\":\"nvme subsystem\",\"traddr\":\"10.0.1.1\","
+                        + "\"trsvcid\":\"4420\",\"subnqn\":\"" + subB + "\"},{\"trtype\":\"tcp\",\"subtype\":\"nvme subsystem\","
+                        + "\"traddr\":\"10.0.9.9\",\"trsvcid\":\"4420\",\"subnqn\":\"" + subA + "\"}]}"));
+        KVMStoragePool poolB = a.createStoragePool(POOL_B, "10.0.1.1", 443, "/proj", null, StoragePoolType.IscsiLUN,
+                Map.of(LightbitsStorageAdaptor.DETAIL_NVME_DISCOVERY, "10.0.1.1", LightbitsStorageAdaptor.DETAIL_INBAND_AUTH, "true",
+                        LightbitsStorageAdaptor.DETAIL_INBAND_KEY_SCOPE, subB), true);
+        String keyA = hostKey.forScope(subA).ensure();   // this host also has its cluster A key
+        String keyB = hostKey.forScope(subB).ensure();
+        sys.commands.clear();
+        assertThrows(CloudRuntimeException.class, () -> a.connectPhysicalDisk(VOL, poolB, null, false));
+        assertTrue(sys.commands.stream().noneMatch(c -> c.startsWith("nvme connect-all")),
+                "an in-band pool never runs connect-all (libnvme would send another cluster's key)");
+        assertFalse(sys.fabrics.isEmpty(), "connected directly");
+        assertTrue(sys.fabrics.stream().allMatch(o -> o.contains("nqn=" + subB + ",") && o.contains("dhchap_secret=" + keyB)
+                && !o.contains(keyA) && !o.contains("dhchap_ctrl_secret")), "only cluster B's port, with cluster B's key, one-way");
+        assertTrue(sys.commands.stream().noneMatch(c -> c.contains("DHHC-1")), "no key on any command line");
+    }
+
+    @Test
     void aTwoWayLookupOfAVolumeAVmAlreadyUsesIsNotRefusedAHandoffStillIs(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
         java.nio.file.Files.writeString(tmp.resolve("hostnqn"), "nqn.2014-08.org.nvmexpress:uuid:60c10b61-c740-478c-a800-402344d475c9");
         LightbitsStorageAdaptor a = new LightbitsStorageAdaptor(new LightbitsNvmeHost(sys), new LightbitsHostKey(tmp.resolve("lightbits"), tmp,

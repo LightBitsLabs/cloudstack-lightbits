@@ -92,6 +92,18 @@ public class LightbitsGetHostNqnAnswer extends Answer {
     }
 
     /** Whether a requested key rotation was done; null when none was asked for (or an older agent). */
+    /** The key scope the agent used; null from an agent that does not know scopes (host-wide keys). */
+    private String keyScope;
+
+    public LightbitsGetHostNqnAnswer withKeyScope(String keyScope) {
+        this.keyScope = keyScope;
+        return this;
+    }
+
+    public String getKeyScope() {
+        return keyScope;
+    }
+
     private Boolean keysRotated;
     /** Why a requested key rotation was not done. */
     private String rotateError;

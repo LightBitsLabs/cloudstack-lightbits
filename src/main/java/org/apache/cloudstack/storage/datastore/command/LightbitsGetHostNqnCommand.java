@@ -85,6 +85,21 @@ public class LightbitsGetHostNqnCommand extends Command {
         return rotateKeys;
     }
 
+    /**
+     * The pool's cluster (its subsystem NQN): the agent uses its keys for that cluster. Null from
+     * an older management server: the host-wide keys.
+     */
+    private String keyScope;
+
+    public LightbitsGetHostNqnCommand withKeyScope(String keyScope) {
+        this.keyScope = keyScope;
+        return this;
+    }
+
+    public String getKeyScope() {
+        return keyScope;
+    }
+
     public java.util.List<String> getEndpoints() {
         return endpoints;
     }

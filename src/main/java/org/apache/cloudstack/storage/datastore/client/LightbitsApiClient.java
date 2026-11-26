@@ -1251,6 +1251,19 @@ public class LightbitsApiClient {
         }
     }
 
+    /**
+     * The cluster's subsystem NQN ({@code GET /api/v2/clusterinfo}, readable with a project
+     * token): what identifies the cluster to an NVMe host. Null when the cluster does not report one.
+     */
+    public String clusterSubsystemNqn() {
+        try {
+            String v = mapper.readTree(execute("GET", "/api/v2/clusterinfo", null)).path("subsystemNQN").asText("");
+            return v.isBlank() ? null : v.trim();
+        } catch (java.io.IOException e) {
+            throw new com.cloud.utils.exception.CloudRuntimeException("Lightbits: could not read the cluster's subsystem NQN", e);
+        }
+    }
+
     /** Delete a trusted host of this project; false when it was not there. */
     public boolean deleteTrustedHost(String name) {
         try {

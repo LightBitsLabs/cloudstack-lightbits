@@ -6,27 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Changed
+- In-band authentication keys are per Lightbits cluster: a host makes a host key and a
+  controller key for each cluster (identified by its subsystem NQN, read from the cluster) and
+  registers each only with its own cluster, so one cluster's secrets cannot be used against
+  another. A host's existing key is kept for each cluster until that cluster's keys are rotated,
+  so live paths are not disturbed; rotation (pool `inbandKeyGeneration`) is per cluster. Path
+  counts and the readiness line are per pool, so a host's paths to another cluster no longer
+  make a pool report it not ready. An agent or management server of an earlier version uses
+  the host-wide key as before.
 - Documentation of two-way in-band authentication states what it checks (INSTALL.md, "What two-way
   checks").
 - A pending revocation of a removed host that the database cannot save is also kept in a local
   file on the management server (`/var/lib/cloudstack/lightbits/pending-revocations`, root only),
   so a restart of that management server no longer loses it. INSTALL.md, "Removing a host",
   gives the manual procedure for the case where that management server is lost.
-- Two-way in-band authentication connects a pool without `nvme connect-all`: the agent reads the
-  discovery log page once and makes one path per listed data port with both keys, written to
-  `/dev/nvme-fabrics`. No path of a two-way pool is made without the controller key, and the
-  per-pool configuration files (`/etc/nvme/lightbits/auth-<pool uuid>.json`) are no longer
-  written; one left by an earlier version is deleted at the pool's next connect.
+- In-band authentication connects a pool without `nvme connect-all`: the agent reads the
+  discovery log page once and makes one path per listed data port of the pool's cluster with
+  that cluster's key (and the controller key for two-way), written to `/dev/nvme-fabrics`.
+  With keys per cluster, nvme-cli (libnvme 1.16) sent the key of a path the host already had to
+  another cluster instead of the configured one, so a host with paths to two clusters could not
+  connect the second one once it enforced in-band authentication. No path of a two-way pool is
+  made without the controller key, and the per-pool configuration files
+  (`/etc/nvme/lightbits/auth-<pool uuid>.json`) are no longer written; one left by an earlier
+  version is deleted at the pool's next connect.
+- A key rotation for one cluster disconnects only that cluster's idle paths and keeps the other
+  clusters' configuration files.
 
 ### Known limitations
+- Per-cluster keys: a pool a host connected before its cluster's subsystem NQN could be read
+  keeps the host-wide key on that host and moves to the cluster's key at a later connect. If
+  that move fails during a key rotation of another pool of the same cluster and project (the
+  agent does not take the pool again), the pool keeps the old key until the host's next
+  connect, and a path of it that reconnects meanwhile is refused; reconnect the host. This needs
+  an agent failure during a rotation, so it is documented rather than handled in code.
 - Two-way in-band authentication (`inbandAuthTwoWay=true`) checks the cluster only on connections
   the cluster authenticates, which it does once in-band authentication is enforced on the
   cluster; before that it checks nothing. Like any Linux NVMe/TCP host, the host also accepts a
   target that does not ask for authentication, so two-way does not replace an isolated storage
   network. The CHANGELOG entries of 0.1.0-rc.1 and 0.1.0-rc.2 ("the host checks the cluster
   too") should be read with this.
-- Two-way: a one-way pool of the same cluster still connects with `nvme connect-all` and the
-  host key only, and its paths also carry the two-way pool's volumes. Such a path stays until
+- Two-way: a one-way pool of the same cluster connects with the host key only, and its paths
+  also carry the two-way pool's volumes. Such a path stays until
   it is disconnected by hand (`nvme disconnect -d <controller>`); meanwhile new handoffs of the
   two-way pool's volumes on that host are refused and the host is reported not ready. Make
   every pool of a cluster two-way, or none (INSTALL.md, "In-band authentication").

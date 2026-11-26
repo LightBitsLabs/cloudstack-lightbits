@@ -70,18 +70,24 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
                 answer = new LightbitsGetHostNqnAnswer(command, nqn, ips).withDataIpsPartial(!failed.isEmpty());
             }
             if (command.isInbandAuth()) {
+                answer.withKeyScope(command.getKeyScope());   // tells the management server the keys are this scope's
                 if (command.isRotateKeys()) {
                     try {
-                        rotateKeys();
+                        rotateKeys(command.getKeyScope());
                         answer.withRotation(true, null);
                     } catch (RuntimeException e) {
                         LOG.warn("Lightbits: {}", e.getMessage());
                         answer.withRotation(false, e.getMessage());
                     }
                 }
-                inbandAuth(answer);
+                inbandAuth(answer, command.getKeyScope());
                 if (command.isTwoWay() && answer.getDhchapKey() != null) {
-                    ctrlKey(answer);
+                    ctrlKey(answer, command.getKeyScope());
+                }
+                if (answer.getDhchapKey() != null) {
+                    // after both keys are prepared: preparing one can copy a flagged host-wide key
+                    // into this cluster and flag it too
+                    exposure(answer, command.getKeyScope());
                 }
             }
             return answer;
@@ -97,9 +103,14 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
      * NQN and data IPs are still good.
      */
     void inbandAuth(LightbitsGetHostNqnAnswer answer) {
+        inbandAuth(answer, null);
+    }
+
+    /** {@link #inbandAuth(LightbitsGetHostNqnAnswer)} with this host's keys for one cluster (null: the host-wide keys). */
+    void inbandAuth(LightbitsGetHostNqnAnswer answer, String scope) {
         String key;
         try {
-            key = hostKey().ensure();
+            key = keysFor(scope).ensure();
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: could not prepare this host's in-band authentication key: {}", e.getMessage());
             answer.withInbandAuth(null, null, e.getMessage());
@@ -107,14 +118,18 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
         }
         Integer keyless;
         try {
-            keyless = pathsWithoutKey(key);
+            keyless = pathsWithoutKey(key, scope);
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: could not count this host's NVMe/TCP paths without its current key: {}", e.getMessage());
             keyless = null;
         }
         answer.withInbandAuth(key, keyless, null);
+    }
+
+    /** Whether the keys just reported may have been copied; left unset (unknown) when it cannot be checked. */
+    void exposure(LightbitsGetHostNqnAnswer answer, String scope) {
         try {
-            answer.withKeysPossiblyExposed(hostKey().keysPossiblyExposed());
+            answer.withKeysPossiblyExposed(keysFor(scope).keysPossiblyExposed());
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: could not check whether this host's in-band authentication keys need rotating: {}", e.getMessage());
         }
@@ -126,16 +141,20 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
      * one-way) and is logged; the rest of the answer stands.
      */
     void ctrlKey(LightbitsGetHostNqnAnswer answer) {
+        ctrlKey(answer, null);
+    }
+
+    void ctrlKey(LightbitsGetHostNqnAnswer answer, String scope) {
         String ctrl;
         try {
-            ctrl = hostKey().ensureCtrlKey();
+            ctrl = keysFor(scope).ensureCtrlKey();
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: could not prepare this host's in-band authentication controller key: {}", e.getMessage());
             return;
         }
         Integer without;
         try {
-            without = pathsWithoutCtrlKey(ctrl);
+            without = pathsWithoutCtrlKey(ctrl, scope);
         } catch (RuntimeException e) {
             LOG.warn("Lightbits: could not count this host's NVMe/TCP paths without its current controller key: {}", e.getMessage());
             without = null;
@@ -149,6 +168,31 @@ public class LibvirtLightbitsGetHostNqnCommandWrapper
     }
 
     /** Rotate this host's keys if no Lightbits volume is in use here; throws with the reason otherwise. */
+    /** This host's keys for one cluster (its subsystem NQN), or the host-wide keys for null. */
+    protected com.cloud.hypervisor.kvm.storage.LightbitsHostKey keysFor(String scope) {
+        return hostKey().forScope(scope);
+    }
+
+    /** Paths of the cluster's subsystem (all Lightbits paths for null) that do not hold the current key. */
+    protected int pathsWithoutKey(String currentKey, String scope) {
+        return scope == null ? pathsWithoutKey(currentKey)
+                : com.cloud.hypervisor.kvm.storage.LightbitsHostKey.pathsWithoutKey(currentKey, scope);
+    }
+
+    protected int pathsWithoutCtrlKey(String currentCtrlKey, String scope) {
+        return scope == null ? pathsWithoutCtrlKey(currentCtrlKey)
+                : com.cloud.hypervisor.kvm.storage.LightbitsHostKey.pathsWithoutCtrlKey(currentCtrlKey, scope);
+    }
+
+    /** Rotate this host's keys for one cluster (null: the host-wide keys). */
+    protected void rotateKeys(String scope) {
+        if (scope == null) {
+            rotateKeys();
+        } else {
+            com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.rotateInbandKeys(scope);
+        }
+    }
+
     protected void rotateKeys() {
         com.cloud.hypervisor.kvm.storage.LightbitsStorageAdaptor.rotateInbandKeys();
     }
