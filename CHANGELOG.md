@@ -5,6 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- The trusted-host list sends the cluster's `nextOffset` back as `offsetUUID`, the parameter the
+  Lightbits API defines for it. No change on Lightbits 3.22.1, which returns every trusted host
+  in one response.
+
 ## [0.1.0-rc.3] - 2026-11-26
 
 Third release candidate for 0.1.0: in-band authentication keys per Lightbits cluster, a
