@@ -285,6 +285,30 @@ limit. To apply the new policy at once, use one of these:
 Check the policy the cluster applies with `lbcli get volume` (`qosPolicyName`) or in the
 management server log ("QoS policy changed from ... to ...").
 
+### Leftover objects on the cluster
+
+A management server that stops within about two seconds of creating a volume for an attach,
+or of taking a snapshot, can leave the new object on the cluster while CloudStack shows the
+volume as `Allocated` (and a later attach of it fails with "Unable to find suitable primary
+storage") or the snapshot as `Error`. CloudStack removes such a volume (when it is deleted) or
+snapshot (on its own) without calling the plugin, so the object stays on the cluster. Delete
+the volume in CloudStack (create a new one if it is still needed), then remove the leftover by
+hand.
+
+Every object the plugin makes is named `cs-<environment>-p<poolId>-<uuid>`, but the uuid is
+not always a volume's. Before deleting an object, check that its uuid is none of these:
+- a volume (`cmk list volumes listall=true`, including destroyed and expunging ones);
+- a template or ISO: the pool's copy of a template is named after the **template's** uuid
+  (`cmk list templates templatefilter=all`);
+- a snapshot (`cmk list snapshots listall=true`);
+- for a name ending in `-src`: the clone of that name without `-src`. A root disk made from a
+  template is a clone, and its `-src` snapshot stays as long as the disk does.
+
+Then delete it with `lbcli delete volume --project-name=<project> --name=<name>` or
+`lbcli delete snapshot --project-name=<project> --name=<name>`. A deleted template copy is
+made again only after its row for the pool is removed from CloudStack's `template_spool_ref`
+table, so do not delete one that is still in use.
+
 ## 5. Optional security features
 
 None of these is needed to run the plugin or to try it (except `ipAcl=true` on a cluster
