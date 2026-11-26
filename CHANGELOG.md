@@ -11,11 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   in one response.
 
 ### Added
-- [docs/known-issues.md](docs/known-issues.md): known issues with symptom, impact and
-  workaround, kept current between releases.
+- [docs/known-limitations-and-issues.md](docs/known-limitations-and-issues.md): the current
+  limitations and known issues in one place, each with what to do, kept current between
+  releases. It replaces reading the Known limitations of each earlier release.
 
 ### Known issues
-Rare, seen only in lab failure tests; workarounds in [docs/known-issues.md](docs/known-issues.md).
+Rare, seen only in lab failure tests; workarounds in [docs/known-limitations-and-issues.md](docs/known-limitations-and-issues.md).
 - A volume delete right after a storage node failure can be reported failed; delete it again.
 - A management server crash at the moment a volume or snapshot is created can leave an unused
   object on the cluster; remove it with `lbcli`.

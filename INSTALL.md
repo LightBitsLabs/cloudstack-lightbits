@@ -675,10 +675,10 @@ certificate (SHA-256 fingerprint ...) does not match the fingerprint pinned on t
 pool`. Running VMs are not affected (the NVMe/TCP data path carries no TLS); creating,
 attaching, snapshotting and deleting volumes is blocked until the pool is updated.
 
-## Known issues
+## Known limitations and issues
 
-Rare cases seen in lab failure tests, with their workarounds, are listed in
-[docs/known-issues.md](docs/known-issues.md).
+The limitations of the current release and the known issues, each with what to do, are in
+[docs/known-limitations-and-issues.md](docs/known-limitations-and-issues.md).
 
 ## Upgrading / uninstalling
 
