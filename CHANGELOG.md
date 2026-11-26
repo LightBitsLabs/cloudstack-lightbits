@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0-rc.3] - 2026-11-26
+
+Third release candidate for 0.1.0: in-band authentication keys per Lightbits cluster, a
+direct connect for in-band pools, and a local fallback for pending host revocations. For
+evaluation and pre-production testing, not yet a general-availability release. Built for
+CloudStack 4.22.1.0 and 4.23.0.0 (KVM); lab-validated on CloudStack 4.23.0.0 with Lightbits
+3.22.1, on one cluster and on two clusters used by the same hosts. Upgrading from 0.1.0-rc.2:
+install the same jar on the management servers and every KVM host; no other step. Existing
+keys are kept for each cluster until that cluster's keys are rotated.
+
 ### Changed
 - In-band authentication keys are per Lightbits cluster: a host makes a host key and a
   controller key for each cluster (identified by its subsystem NQN, read from the cluster) and

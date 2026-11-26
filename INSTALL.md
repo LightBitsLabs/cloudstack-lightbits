@@ -1,6 +1,6 @@
 # Installing the Lightbits CloudStack plugin
 
-> **Status: release candidate (`0.1.0-rc.2`).** Feature-complete for 0.1.0 and validated in the
+> **Status: release candidate (`0.1.0-rc.3`).** Feature-complete for 0.1.0 and validated in the
 > lab; for evaluation and pre-production testing, not yet a general-availability release.
 > These steps reflect the current standalone (out-of-tree) install model. Built and unit-tested
 > for CloudStack 4.22.1.0 and 4.23.0.0 (KVM); lab-validated on CloudStack 4.23.0.0 with

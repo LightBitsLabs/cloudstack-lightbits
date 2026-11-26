@@ -2,7 +2,7 @@
 
 Apache CloudStack primary storage plugin for [Lightbits](https://www.lightbitslabs.com) NVMe/TCP block storage.
 
-> **Status: release candidate (`0.1.0-rc.2`).** Feature-complete for 0.1.0 and validated in the
+> **Status: release candidate (`0.1.0-rc.3`).** Feature-complete for 0.1.0 and validated in the
 > lab; for evaluation and pre-production testing, not yet a general-availability release.
 > The Lightbits cluster's TLS certificate is verified by fingerprint pinning (see
 > [INSTALL.md](INSTALL.md#tls-verifying-the-cluster-certificate)).
