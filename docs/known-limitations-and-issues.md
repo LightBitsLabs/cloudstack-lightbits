@@ -112,11 +112,14 @@ the database failing during a host removal), and none affects the data of volume
   directly (a full list is paged, 500 items per page by default) as a CloudStack root admin
   (other accounts see only part), and include project resources and system VMs:
   - `cmk list volumes id=<uuid> listall=true listsystemvms=true`
-  - `cmk list snapshots id=<uuid> listall=true`
+  - `cmk list snapshots id=<uuid> listall=true`, and the same with `snapshottype=GROUP`
+    (disk snapshots taken as part of an instance snapshot)
   - `cmk list templates id=<uuid> templatefilter=all`
 
-  Run each also with `projectid=-1`. The object is unused only if none of them returns it (a
-  uuid CloudStack does not know is answered with "Invalid parameter id value").
+  Run each also with `projectid=-1`. The object is unused only if every lookup answers with
+  an empty result or with "Invalid parameter id value" (a uuid CloudStack does not know). If a
+  lookup fails in any other way (a timeout, an authentication or permission error), stop and
+  retry; do not delete the object.
 
 ### Host removal not finished after a database failure
 
