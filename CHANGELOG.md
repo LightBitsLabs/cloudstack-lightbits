@@ -10,17 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Lightbits API defines for it. No change on Lightbits 3.22.1, which returns every trusted host
   in one response.
 
-### Known limitations
-- A volume deleted in the first minutes after a Lightbits node fails can stay in `Deleting` on
-  the cluster longer than the plugin waits (120 s). The delete is then reported failed and the
-  volume stays in CloudStack as `Destroy`, although the cluster has accepted the delete; delete
-  it again later and it completes.
-- A management server that stops within about two seconds of creating a volume for an attach,
-  or of taking a snapshot, can leave the volume `Allocated` or the snapshot `Error` in
-  CloudStack while the object exists on the cluster. CloudStack removes such a volume or
-  snapshot without calling the plugin, so the object is left on the cluster; remove it by hand
-  (INSTALL.md, "Leftover objects on the cluster"). This needs a management server failure in
-  that window, so it is documented rather than handled in code.
+### Added
+- INSTALL.md has a "Known issues" section: rare cases seen in lab failure tests, each with its
+  workaround.
 
 ## [0.1.0-rc.3] - 2026-11-26
 
