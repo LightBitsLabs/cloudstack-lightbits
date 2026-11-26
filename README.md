@@ -80,7 +80,7 @@ See [docs/architecture.md](docs/architecture.md) for the design sketch.
 
 See **[INSTALL.md](INSTALL.md)** for the full deployment guide (management server + KVM hosts,
 pool registration, storage tags) and **[docs/jwt-rotation.md](docs/jwt-rotation.md)** for
-credential rotation.
+credential rotation. Known limitations and issues: [docs/known-limitations-and-issues.md](docs/known-limitations-and-issues.md).
 
 ## Requirements (target)
 

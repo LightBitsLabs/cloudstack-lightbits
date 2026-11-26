@@ -675,6 +675,11 @@ certificate (SHA-256 fingerprint ...) does not match the fingerprint pinned on t
 pool`. Running VMs are not affected (the NVMe/TCP data path carries no TLS); creating,
 attaching, snapshotting and deleting volumes is blocked until the pool is updated.
 
+## Known limitations and issues
+
+The limitations of the current release and the known issues, each with what to do, are in
+[docs/known-limitations-and-issues.md](docs/known-limitations-and-issues.md).
+
 ## Upgrading / uninstalling
 
 - **Upgrade the plugin:** replace the jar on the management server and every KVM host, then

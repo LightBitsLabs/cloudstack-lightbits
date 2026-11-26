@@ -10,6 +10,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Lightbits API defines for it. No change on Lightbits 3.22.1, which returns every trusted host
   in one response.
 
+### Added
+- [docs/known-limitations-and-issues.md](docs/known-limitations-and-issues.md): the current
+  limitations and known issues in one place, each with what to do, kept current between
+  releases. It replaces reading the Known limitations of each earlier release.
+
+### Known issues
+Rare, seen only in lab failure tests; workarounds in [docs/known-limitations-and-issues.md](docs/known-limitations-and-issues.md).
+- A volume delete right after a storage node failure can be reported failed; delete it again.
+- A management server crash at the moment a volume or snapshot is created can leave an unused
+  object on the cluster; remove it with `lbcli`.
+
 ## [0.1.0-rc.3] - 2026-11-26
 
 Third release candidate for 0.1.0: in-band authentication keys per Lightbits cluster, a
