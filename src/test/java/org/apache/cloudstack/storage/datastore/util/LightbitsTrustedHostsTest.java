@@ -143,14 +143,14 @@ class LightbitsTrustedHostsTest {
     }
 
     @Test
-    void theListFollowsNextOffset() {
+    void theListFollowsNextOffsetAsOffsetUuid() {
         wm.stubFor(get(urlEqualTo(HOSTS)).willReturn(aResponse().withStatus(200).withBody(
                 "{\"hosts\":[{\"name\":\"a\",\"hostNqn\":\"nqn.a\"}],\"nextOffset\":\"o1\"}")));
-        wm.stubFor(get(urlEqualTo(HOSTS + "?offset=o1")).willReturn(aResponse().withStatus(200).withBody(
+        wm.stubFor(get(urlEqualTo(HOSTS + "?offsetUUID=o1")).willReturn(aResponse().withStatus(200).withBody(
                 "{\"hosts\":[{\"name\":\"b\",\"hostNqn\":\"" + NQN + "\"}],\"nextOffset\":\"\"}")));
         assertEquals(2, client.listTrustedHosts().size());
         assertEquals("b", client.findTrustedHostByNqn(NQN).get().name);
-        wm.verify(2, getRequestedFor(urlEqualTo(HOSTS + "?offset=o1")));
+        wm.verify(2, getRequestedFor(urlEqualTo(HOSTS + "?offsetUUID=o1")));
     }
 
     @Test

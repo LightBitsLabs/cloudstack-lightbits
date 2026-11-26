@@ -1137,14 +1137,16 @@ public class LightbitsApiClient {
     /**
      * The trusted hosts of this client's project ({@code GET /api/v2/projects/{p}/trustedHosts}).
      * A project token sees only its own project's. Needs the cluster's InBandAuthentication
-     * feature flag; without it the cluster refuses the call.
+     * feature flag; without it the cluster refuses the call. A {@code nextOffset} in the response is
+     * sent back as {@code offsetUUID}, the request parameter the API defines for it (Lightbits
+     * 3.22.1 returns every host at once and an empty {@code nextOffset}).
      */
     public List<TrustedHost> listTrustedHosts() {
         List<TrustedHost> out = new ArrayList<>();
         String offset = "";
         try {
             while (true) {
-                String resp = execute("GET", projectColl("trustedHosts") + (offset.isEmpty() ? "" : "?offset=" + urlenc(offset)), null);
+                String resp = execute("GET", projectColl("trustedHosts") + (offset.isEmpty() ? "" : "?offsetUUID=" + urlenc(offset)), null);
                 JsonNode root = mapper.readTree(resp);
                 for (JsonNode h : root.path("hosts")) {
                     String name = h.path("name").asText(null);
