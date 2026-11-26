@@ -3,7 +3,15 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - 2026-11-27
+
+First general-availability release. Same features as 0.1.0-rc.3, plus the fix below and a
+page that gathers the current limitations and known issues. Built and unit-tested for
+CloudStack 4.22.1.0 and 4.23.0.0 (KVM); lab-validated on CloudStack 4.23.0.0 with Lightbits
+3.22.1, on a three-node cluster and on two clusters used by the same hosts. CloudStack
+4.22.1.0 is covered by the build and unit tests only. Upgrading from 0.1.0-rc.3: install the
+same jar on the management servers and every KVM host; no other step. From an earlier
+release candidate, also follow the upgrade notes of each release in between.
 
 ### Fixed
 - The trusted-host list sends the cluster's `nextOffset` back as `offsetUUID`, the parameter the
