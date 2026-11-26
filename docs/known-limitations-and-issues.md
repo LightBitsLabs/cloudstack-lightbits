@@ -108,7 +108,9 @@ the database failing during a host removal), and none affects the data of volume
   Before deleting a `cs-<environment>-p<poolId>-<uuid>` object, check that its uuid is not in
   use: not a volume, not a snapshot, and not a template (the pool's copy of a template is named
   after the template's uuid). A name ending in `-src` belongs to the clone of the same name
-  without `-src`, such as a VM's root disk; keep it while that clone exists.
+  without `-src`, such as a VM's root disk; keep it while that clone exists. Check every
+  account and CloudStack project: `listall=true` alone leaves out project resources, so also
+  list with `projectid=-1` (for example `cmk list volumes listall=true projectid=-1`).
 
 ### Host removal not finished after a database failure
 
