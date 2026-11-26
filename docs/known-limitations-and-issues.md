@@ -108,12 +108,15 @@ the database failing during a host removal), and none affects the data of volume
   Before deleting a `cs-<environment>-p<poolId>-<uuid>` object, check that its uuid is not in
   use: not a volume, not a snapshot, and not a template (the pool's copy of a template is named
   after the template's uuid). A name ending in `-src` belongs to the clone of the same name
-  without `-src`, such as a VM's root disk; keep it while that clone exists. Run the checks
-  as a CloudStack root admin (other accounts see only part of the list), and include project
-  resources and system VMs, which the default lists leave out:
-  - `cmk list volumes listall=true listsystemvms=true` and the same with `projectid=-1`;
-  - `cmk list snapshots listall=true` and the same with `projectid=-1`;
-  - `cmk list templates templatefilter=all` and the same with `projectid=-1`.
+  without `-src`, such as a VM's root disk; keep it while that clone exists. Look the uuid up
+  directly (a full list is paged, 500 items per page by default) as a CloudStack root admin
+  (other accounts see only part), and include project resources and system VMs:
+  - `cmk list volumes id=<uuid> listall=true listsystemvms=true`
+  - `cmk list snapshots id=<uuid> listall=true`
+  - `cmk list templates id=<uuid> templatefilter=all`
+
+  Run each also with `projectid=-1`. The object is unused only if none of them returns it (a
+  uuid CloudStack does not know is answered with "Invalid parameter id value").
 
 ### Host removal not finished after a database failure
 
