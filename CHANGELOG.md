@@ -11,8 +11,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   in one response.
 
 ### Added
-- INSTALL.md has a "Known issues" section: rare cases seen in lab failure tests, each with its
-  workaround.
+- [docs/known-issues.md](docs/known-issues.md): known issues with symptom, impact and
+  workaround, kept current between releases.
+
+### Known issues
+Rare, seen only in lab failure tests; workarounds in [docs/known-issues.md](docs/known-issues.md).
+- A volume delete right after a storage node failure can be reported failed; delete it again.
+- A management server crash at the moment a volume or snapshot is created can leave an unused
+  object on the cluster; remove it with `lbcli`.
 
 ## [0.1.0-rc.3] - 2026-11-26
 

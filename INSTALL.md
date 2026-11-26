@@ -677,27 +677,8 @@ attaching, snapshotting and deleting volumes is blocked until the pool is update
 
 ## Known issues
 
-The cases below are rare. Each was seen only in lab tests that inject failures at precise
-moments, and none affects data in use. They are listed so operators know what to do if they
-ever meet one.
-
-**A volume delete right after a storage node failure is reported failed.** In the first
-minutes after a Lightbits node goes down, the cluster can take longer than usual to finish a
-delete, and CloudStack may report the delete as failed while the cluster completes it. The
-volume stays in CloudStack as `Destroy`.
-Workaround: delete the volume again a little later; it completes.
-
-**A management server crash at the moment a volume or snapshot is created can leave an unused
-object on the cluster.** This needs the management server to stop within a second or two of
-creating a new volume for an attach, or of taking a snapshot. CloudStack then shows the volume
-as `Allocated` (an attach of it fails) or the snapshot as `Error`, and later removes it without
-asking the plugin, so the copy on the cluster stays. It uses capacity but nothing else.
-Workaround: delete the volume in CloudStack and create a new one if needed. Then remove the
-leftover with `lbcli delete volume` (or `lbcli delete snapshot`)
-`--project-name=<project> --name=<name>`. Before deleting a `cs-<environment>-p<poolId>-<uuid>`
-object, check that its uuid is not in use: not a volume, not a snapshot, and not a template
-(the pool's copy of a template is named after the template's uuid); a name ending in `-src`
-belongs to the clone of the same name without `-src`, such as a VM's root disk.
+Rare cases seen in lab failure tests, with their workarounds, are listed in
+[docs/known-issues.md](docs/known-issues.md).
 
 ## Upgrading / uninstalling
 
