@@ -110,18 +110,6 @@ the database failing during a host removal), and none affects the data of volume
   after the template's uuid). A name ending in `-src` belongs to the clone of the same name
   without `-src`, such as a VM's root disk; keep it while that clone exists.
 
-### Source host left in a volume's access list after a management server crash during migration
-
-- **Symptom:** after a live migration, both the source and the destination host are in the
-  volumes' access lists on the cluster.
-- **When it can happen:** if the management server stops while a live migration is in
-  progress. The migration completes, but the step that removes the source host does not run.
-- **Impact:** the source host keeps access to the VM's volumes but does not use them; the VM
-  runs normally.
-- **Workaround:** migrate the VM back to the source host; that migration removes the other
-  host, leaving only the host the VM runs on. Removing the host from CloudStack also removes
-  it from the access lists.
-
 ### Host removal not finished after a database failure
 
 - **Symptom:** a removed host is still in the volumes' access lists or in the cluster's trusted
