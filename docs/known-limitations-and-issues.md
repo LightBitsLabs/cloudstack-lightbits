@@ -93,6 +93,19 @@ the database failing during a host removal), and none affects the data of volume
 - **Impact:** none on other volumes; the cluster completes the delete it accepted.
 - **Workaround:** delete the volume again a little later; it completes.
 
+### Previous host still in a volume's access list after an interrupted live migration
+
+- **Symptom:** after a live migration, a volume's host access list (`lbcli get volume`) still
+  names the host the VM left, as well as the host it runs on.
+- **When it can happen:** if the management server stops during the live migration, after the
+  VM has moved but before the previous host is removed from the list.
+- **Impact:** none on the VM, which runs and writes on its new host. Until the list is
+  corrected, the previous host is still allowed to connect to the volume.
+- **Workaround:** stop and start the VM (a VM start leaves only the VM's host in each of its
+  volumes' lists), or migrate it back to the previous host. To correct it without moving the
+  VM, set each volume's list to the VM's host on the cluster:
+  `lbcli update volume --project-name=<project> --uuid=<volume uuid> --acl <NQN of the VM's host>`.
+
 ### Unused object left on the cluster after a management server crash
 
 - **Symptom:** a volume shows as `Allocated` in CloudStack and attaching it fails with "Unable
