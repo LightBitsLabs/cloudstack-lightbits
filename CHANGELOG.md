@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- When a VM starts, each of its volumes' NQN ACL is set to the VM's host alone; NQNs of other
+  hosts, including any added by hand on the cluster, are removed (with `ipAcl=true`, the IP ACL
+  follows). Attach to a running VM and live migration still add the host and keep the others,
+  and so does a start for which the plugin cannot read the VM (it logs "granting without removing
+  other hosts").
+
+### Known issues
+- A management server stop during a live migration can leave the previous host in the volumes'
+  access lists until the VM's next start; see
+  [docs/known-limitations-and-issues.md](docs/known-limitations-and-issues.md) for the workaround.
+
 ## [0.1.0] - 2026-11-27
 
 First general-availability release. Same features as 0.1.0-rc.3, plus the fix below and a
