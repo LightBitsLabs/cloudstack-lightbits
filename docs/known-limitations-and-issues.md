@@ -102,8 +102,10 @@ the database failing during a host removal), and none affects the data of volume
 - **Impact:** none on the VM, which runs and writes on its new host. Until the list is
   corrected, the previous host is still allowed to connect to the volume.
 - **Workaround:** stop and start the VM (a VM start leaves only the VM's host in each of its
-  volumes' lists), or migrate it back to the previous host. To correct it without moving the
-  VM, set each volume's list to the VM's host on the cluster:
+  volumes' lists, unless the plugin could not read the VM during the start, which it logs as a
+  warning), or migrate it back to the previous host. Check each volume's list afterwards. If the
+  previous host is still there, or to correct it without moving the VM, set each volume's list to
+  the VM's host on the cluster:
   `lbcli update volume --project-name=<project> --uuid=<volume uuid> --acl <NQN of the VM's host>`.
   With `ipAcl=true`, also set the volume's IP list to the VM's host's data IPs (host detail
   `lightbits.dataips.<pool id>`) in the same command: `--ip-acl <data IPs of the VM's host>`.
