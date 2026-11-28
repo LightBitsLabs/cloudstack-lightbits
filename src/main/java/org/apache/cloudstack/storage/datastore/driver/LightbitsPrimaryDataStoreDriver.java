@@ -15,6 +15,7 @@
  */
 package org.apache.cloudstack.storage.datastore.driver;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -90,6 +91,8 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
     private com.cloud.user.dao.AccountDao accountDao;
     @Inject
     private com.cloud.storage.dao.VMTemplateDao templateDao;
+    @Inject
+    private com.cloud.vm.dao.VMInstanceDao vmInstanceDao;
 
     /** host_details key holding a KVM host's NVMe host NQN (populated for the host). */
     public static final String HOST_NQN_DETAIL = "nvme.hostnqn";
@@ -732,6 +735,7 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
         if (ips != null) {
             hostIpsOrFail(host.getId(), poolId);   // fail early, before any lock; read again under the locks
         }
+        boolean exact = startingOn(dataObject, host);
         // Under the host's ACL lock, refused while the host is being removed: see LightbitsHostGate.
         org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.grant(host.getId(),
                 // Being removed: the mark is set, or the host's details are already gone (CloudStack
@@ -743,13 +747,9 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                 // The granted host's own IPs are read here, under both locks, so a refresh of its data
                 // IPs (which takes the same locks) cannot replace them between the read and the write.
                 () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
-                        () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true, acl -> {
-                            if (acl.contains(nqn)) {
-                                return false;
-                            }
-                            acl.add(nqn);
-                            return true;
-                        }, ips, ips == null ? null : hostIpsOrFail(host.getId(), poolId))),
+                        () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, true,
+                                acl -> exact ? grantOnly(acl, nqn, name) : grantAlso(acl, nqn),
+                                ips, ips == null ? null : hostIpsOrFail(host.getId(), poolId))),
                 () -> org.apache.cloudstack.storage.datastore.util.LightbitsHostGate.underPoolIpAclLock(hostGateLocker, poolId, ips != null,
                         () -> org.apache.cloudstack.storage.datastore.util.LightbitsAcl.update(client, name, false, acl -> acl.remove(nqn), ips)));
         if (dataObject instanceof VolumeInfo) {
@@ -767,6 +767,60 @@ public class LightbitsPrimaryDataStoreDriver implements PrimaryDataStoreDriver {
                     ((VolumeInfo) dataObject).getMaxIops(), v));
         }
         return true;
+    }
+
+    /** A grant that keeps the hosts already in the ACL: adds {@code nqn}; false when it is there already. */
+    static boolean grantAlso(List<String> acl, String nqn) {
+        if (acl.contains(nqn)) {
+            return false;
+        }
+        acl.add(nqn);
+        return true;
+    }
+
+    /**
+     * A grant that leaves only {@code nqn} in the ACL. Used when the volume's VM is starting on
+     * that host: no other host should reach the volume then, and an entry left by an earlier
+     * operation that did not finish (for example a live migration whose management server
+     * stopped before the source host was revoked) is removed.
+     */
+    static boolean grantOnly(List<String> acl, String nqn, String volumeName) {
+        List<String> others = new ArrayList<>(acl);
+        others.remove(nqn);
+        if (!others.isEmpty()) {
+            LOG.info("Lightbits: volume {} is starting on host {}; removing {} other host(s) from its ACL: {}",
+                    volumeName, nqn, others.size(), others);
+        }
+        boolean changed = !others.isEmpty() || !acl.contains(nqn);
+        acl.clear();
+        acl.add(nqn);
+        return changed;
+    }
+
+    /**
+     * True when {@code dataObject} is a volume whose VM is starting on {@code host}: CloudStack
+     * moves the VM to Starting on its new host before it grants the VM's volumes there
+     * (VirtualMachineManagerImpl.orchestrateStart, then VolumeOrchestrator.prepare). Any other
+     * grant (attach to a running VM, a live migration, copies) keeps the hosts already granted.
+     * A failed lookup also keeps them.
+     */
+    boolean startingOn(DataObject dataObject, Host host) {
+        if (!(dataObject instanceof VolumeInfo) || vmInstanceDao == null) {
+            return false;
+        }
+        Long vmId = ((VolumeInfo) dataObject).getInstanceId();
+        if (vmId == null) {
+            return false;
+        }
+        try {
+            com.cloud.vm.VMInstanceVO vm = vmInstanceDao.findById(vmId);
+            return vm != null && vm.getState() == com.cloud.vm.VirtualMachine.State.Starting
+                    && vm.getHostId() != null && vm.getHostId() == host.getId();
+        } catch (RuntimeException e) {
+            LOG.warn("Lightbits: could not read VM {} of volume {} ({}); granting without removing other hosts",
+                    vmId, dataObject.getUuid(), e.getMessage());
+            return false;
+        }
     }
 
     /** The locks grants, revokes and host removal share (see LightbitsHostGate); tests swap it for an in-process one. */

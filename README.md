@@ -53,7 +53,7 @@ Core (KVM, no option needed):
   volume in its project, so tenant-level isolation requires **one Lightbits project per pool**
 - VM live migration between KVM hosts (the destination host's NQN is added to each volume's
   ACL during migration prepare and the source's is pruned after), including host maintenance
-  evacuation
+  evacuation; when a VM starts, each of its volumes is granted to that VM's host alone
 - Cluster-wide and zone-wide storage pools; full cluster-side cleanup on teardown
 - TLS verification of the Lightbits API (fingerprint pinning or a CA-signed certificate), API
   endpoint failover

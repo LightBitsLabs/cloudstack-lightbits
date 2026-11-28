@@ -234,6 +234,10 @@ class LightbitsDriverOperationsTest {
     private final Map<String, String> offering = new HashMap<>();
     private final Map<String, String> hostDetails = new HashMap<>();
     private VolumeVO volumeRow;
+    /** The VM the test volume is attached to (null: not attached), and what the VM DAO does. */
+    private Long vmId;
+    private com.cloud.vm.VMInstanceVO vmRow;
+    private RuntimeException vmDaoFailure;
 
     @SuppressWarnings("unchecked")
     static <T> T fake(Class<T> type, Function<String, Function<Object[], Object>> handler) {
@@ -285,6 +289,12 @@ class LightbitsDriverOperationsTest {
         inject(driver, "accountDao", fake(com.cloud.user.dao.AccountDao.class, n -> n.equals("findByIdIncludingRemoved")
                 ? a -> fake(com.cloud.user.Account.class, m -> m.equals("getUuid") ? x -> "acct-uuid" : null) : null));
         inject(driver, "templateDao", fake(com.cloud.storage.dao.VMTemplateDao.class, n -> null));
+        inject(driver, "vmInstanceDao", fake(com.cloud.vm.dao.VMInstanceDao.class, n -> n.equals("findById") ? a -> {
+            if (vmDaoFailure != null) {
+                throw vmDaoFailure;
+            }
+            return vmRow;
+        } : null));
         volumeRow = newVolumeRow();
         inject(driver, "volumeDao", fake(com.cloud.storage.dao.VolumeDao.class, n -> n.equals("findById") ? a -> volumeRow : null));
         inject(driver, "hostDetailsDao", fake(com.cloud.host.dao.HostDetailsDao.class, n -> {
@@ -343,6 +353,7 @@ class LightbitsDriverOperationsTest {
                 case "getDiskOfferingId": return a -> 5L;
                 case "getMaxIops": return a -> null;
                 case "getAccountId": return a -> 2L;
+                case "getInstanceId": return a -> vmId;
                 case "getVolumeType": return a -> com.cloud.storage.Volume.Type.DATADISK;
                 case "getTO": return a -> to;
                 case "getDataStore": return a -> store;
@@ -541,6 +552,88 @@ class LightbitsDriverOperationsTest {
         cluster.add(volName(), 1L << 30, List.of());
         assertThrows(com.cloud.utils.exception.CloudRuntimeException.class,
                 () -> driver.grantAccess(volume(1L << 30, null), host(1), store()));
+    }
+
+    // ---- exact grant when the VM starts ----
+
+    private static final String OTHER = "nqn.2014-08.org.nvmexpress:uuid:00000000-0000-0000-0000-0000000000b2";
+
+    private void vm(com.cloud.vm.VirtualMachine.State state, Long hostId) throws Exception {
+        java.lang.reflect.Constructor<com.cloud.vm.VMInstanceVO> c = com.cloud.vm.VMInstanceVO.class.getDeclaredConstructor();
+        c.setAccessible(true);
+        vmRow = c.newInstance();
+        Field st = com.cloud.vm.VMInstanceVO.class.getDeclaredField("state");
+        st.setAccessible(true);
+        st.set(vmRow, state);
+        Field h = com.cloud.vm.VMInstanceVO.class.getDeclaredField("hostId");
+        h.setAccessible(true);
+        h.set(vmRow, hostId);
+        vmId = 21L;
+    }
+
+    @Test
+    void aGrantForAVmStartingOnTheHostLeavesOnlyThatHost() throws Exception {
+        vm(com.cloud.vm.VirtualMachine.State.Starting, 1L);
+        Volume v = cluster.add(volName(), 1L << 30, List.of(OTHER));
+        driver.grantAccess(volume(1L << 30, null), host(1), store());
+        assertEquals(List.of(NQN), v.getAcl().getValues(), "a host left by an unfinished operation is removed");
+        assertTrue(driver.grantAccess(volume(1L << 30, null), host(1), store()), "a second exact grant is a no-op");
+        assertEquals(List.of(NQN), v.getAcl().getValues());
+    }
+
+    @Test
+    void anExactGrantAlsoSetsTheIpAclToTheRemainingHost() throws Exception {
+        poolDetails.put(LightbitsPoolConfig.KEY_IP_ACL, "true");
+        hostDetails.put("lightbits.dataips." + POOL, "10.0.0.5");
+        vm(com.cloud.vm.VirtualMachine.State.Starting, 1L);
+        Volume v = cluster.add(volName(), 1L << 30, List.of(OTHER, NQN));
+        v.setIpAcl(FakeCluster.acl(List.of("10.0.0.9", "10.0.0.5")));
+        driver.grantAccess(volume(1L << 30, null), host(1), store());
+        assertEquals(List.of(NQN), v.getAcl().getValues());
+        assertEquals(List.of("10.0.0.5"), v.getIpAcl().getValues());
+    }
+
+    @Test
+    void otherGrantsKeepTheHostsAlreadyGranted() throws Exception {
+        Object[][] cases = {
+            {com.cloud.vm.VirtualMachine.State.Running, 1L, "attach to a running VM"},
+            {com.cloud.vm.VirtualMachine.State.Migrating, 2L, "live migration to host 1"},
+            {com.cloud.vm.VirtualMachine.State.Starting, 2L, "VM starting on another host"},
+            {com.cloud.vm.VirtualMachine.State.Stopped, null, "VM stopped"},
+        };
+        for (Object[] c : cases) {
+            setUp();
+            vm((com.cloud.vm.VirtualMachine.State) c[0], (Long) c[1]);
+            Volume v = cluster.add(volName(), 1L << 30, List.of(OTHER));
+            driver.grantAccess(volume(1L << 30, null), host(1), store());
+            assertEquals(List.of(OTHER, NQN), v.getAcl().getValues(), (String) c[2]);
+        }
+    }
+
+    @Test
+    void aVolumeWithoutAVmOrAFailedLookupKeepsTheHostsAlreadyGranted() throws Exception {
+        Volume v = cluster.add(volName(), 1L << 30, List.of(OTHER));
+        driver.grantAccess(volume(1L << 30, null), host(1), store());
+        assertEquals(List.of(OTHER, NQN), v.getAcl().getValues(), "not attached");
+
+        setUp();
+        vm(com.cloud.vm.VirtualMachine.State.Starting, 1L);
+        vmDaoFailure = new RuntimeException("db down");
+        Volume w = cluster.add(volName(), 1L << 30, List.of(OTHER));
+        driver.grantAccess(volume(1L << 30, null), host(1), store());
+        assertEquals(List.of(OTHER, NQN), w.getAcl().getValues(), "lookup failed");
+    }
+
+    @Test
+    void grantOnlyReportsAChangeOnlyWhenTheListChanges() {
+        List<String> acl = new ArrayList<>(List.of(NQN));
+        assertFalse(LightbitsPrimaryDataStoreDriver.grantOnly(acl, NQN, "v"));
+        acl = new ArrayList<>(List.of(OTHER));
+        assertTrue(LightbitsPrimaryDataStoreDriver.grantOnly(acl, NQN, "v"));
+        assertEquals(List.of(NQN), acl);
+        acl = new ArrayList<>();
+        assertTrue(LightbitsPrimaryDataStoreDriver.grantOnly(acl, NQN, "v"));
+        assertEquals(List.of(NQN), acl);
     }
 
     // ---- resize ----
