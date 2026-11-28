@@ -105,6 +105,8 @@ the database failing during a host removal), and none affects the data of volume
   volumes' lists), or migrate it back to the previous host. To correct it without moving the
   VM, set each volume's list to the VM's host on the cluster:
   `lbcli update volume --project-name=<project> --uuid=<volume uuid> --acl <NQN of the VM's host>`.
+  With `ipAcl=true`, also set the volume's IP list to the VM's host's data IPs (host detail
+  `lightbits.dataips.<pool id>`) in the same command: `--ip-acl <data IPs of the VM's host>`.
 
 ### Unused object left on the cluster after a management server crash
 

@@ -106,7 +106,7 @@ cmk list storageproviders type=primary | grep -i lightbits    # or check the UI 
 The plugin ACLs each volume to the connecting host's NVMe NQN. When a VM starts, each of its
 volumes' NQN ACL is set to the VM's host alone: NQNs of other hosts, including any added by
 hand on the cluster, are removed. Other grants (attach to a running VM, live migration) add the
-host and keep the others. The host listener populates
+host and keep the others, as does a start for which the plugin cannot read the VM. The host listener populates
 this automatically when a host connects while a Lightbits pool exists: the agent reports
 `/etc/nvme/hostnqn` (generating and pinning one via `nvme show-hostnqn` if the file is
 missing), and the listener stores it as the `nvme.hostnqn` host detail. Nothing to do —
